@@ -1,0 +1,7 @@
+claude-agent-sdk
+opencv-python
+numpy
+python-dotenv
+pillow
+pillow-heif
+anyio>=4.4.0
