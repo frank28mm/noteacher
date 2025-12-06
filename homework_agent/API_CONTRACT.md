@@ -113,6 +113,7 @@ X-Request-Id: req-123456
 - `session_id` (推荐): 会话/批次 ID，24h 生命周期，便于上下文续接
 - `mode` (可选): "normal"(~0.85) | "strict"(~0.91，自动提炼关键术语)，默认 "normal"
 - 幂等键使用 Header `X-Idempotency-Key`，Body 不支持。
+- `vision_provider` (可选): 用户可选视觉模型，限定值 `"qwen3"`(SiliconFlow Qwen/Qwen3-VL-32B-Thinking) | `"doubao"`(Ark doubao-seed-1-6-vision-250815)；未指定默认 `"qwen3"`。不对外提供 OpenAI 视觉选项。
 
 #### 响应体 (GradeResponse) - 同步模式
 ```json
