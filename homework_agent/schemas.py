@@ -1,0 +1,169 @@
+from enum import Enum
+from typing import List, Optional, Literal
+from pydantic import BaseModel, Field, AnyUrl, validator
+
+# --- Basic Enums ---
+class Subject(str, Enum):
+    MATH = "math"
+    ENGLISH = "english"
+
+
+class Verdict(str, Enum):
+    CORRECT = "correct"
+    INCORRECT = "incorrect"
+    UNCERTAIN = "uncertain"
+
+
+class Severity(str, Enum):
+    CALCULATION = "calculation"
+    CONCEPT = "concept"
+    FORMAT = "format"
+    UNKNOWN = "unknown"
+
+
+class SimilarityMode(str, Enum):
+    NORMAL = "normal"
+    STRICT = "strict"
+
+
+# --- Shared primitives ---
+class BBoxNormalized(BaseModel):
+    """Normalized [ymin, xmin, ymax, xmax] with origin top-left, y down, each in [0,1]."""
+
+    coords: List[float] = Field(..., min_items=4, max_items=4)
+
+    @validator("coords")
+    def _validate_coords(cls, v: List[float]):
+        if any(x < 0 or x > 1 for x in v):
+            raise ValueError("BBox values must be within [0,1]")
+        ymin, xmin, ymax, xmax = v
+        if ymax < ymin or xmax < xmin:
+            raise ValueError("BBox ymax/xmax must be >= ymin/xmin")
+        return v
+
+
+class ImageRef(BaseModel):
+    """Reference to an image either by URL or base64 string."""
+
+    url: Optional[AnyUrl] = None
+    base64: Optional[str] = Field(
+        None, description="Data URL or raw base64-encoded image content"
+    )
+
+    @validator("base64")
+    def _strip_prefix(cls, v: Optional[str]):
+        # Keep light validation: allow empty/None, otherwise non-empty string
+        if v is not None and not v.strip():
+            raise ValueError("base64 content cannot be empty")
+        return v
+
+    @validator("url", always=True)
+    def _ensure_one(cls, v, values):
+        if v is None and not values.get("base64"):
+            raise ValueError("Either url or base64 must be provided")
+        return v
+
+# --- Math Specific Structures ---
+class MathStep(BaseModel):
+    index: int = Field(..., description="Step number, 1-indexed")
+    verdict: Verdict
+    expected: Optional[str] = Field(None, description="Expected calculation/logic for this step")
+    observed: Optional[str] = Field(None, description="Actual observed calculation/logic")
+    hint: Optional[str] = Field(None, description="Socratic hint if this step is wrong")
+    severity: Optional[Severity] = None
+    bbox: Optional[BBoxNormalized] = Field(
+        None,
+        description="Optional normalized bbox for the step region, used for future highlighters",
+    )
+
+class GeometryElement(BaseModel):
+    type: str = Field(..., description="line, angle, point, etc.")
+    label: str = Field(..., description="Label like A, B, C, AB, etc.")
+    status: Literal["correct", "missing", "misplaced"]
+    description: Optional[str] = None
+
+class GeometryInfo(BaseModel):
+    description: str = Field(..., description="Natural language judgment, e.g., 'Auxiliary line BE is correct'")
+    elements: List[GeometryElement] = Field(default_factory=list)
+
+# --- Core Item Structures ---
+class WrongItem(BaseModel):
+    # Page & slice references
+    page_image_url: Optional[AnyUrl] = Field(None, description="Full page image URL")
+    slice_image_url: Optional[AnyUrl] = Field(None, description="Cropped review slice URL")
+    page_bbox: Optional[BBoxNormalized] = Field(None, description="BBox on full page [0-1]")
+    review_slice_bbox: Optional[BBoxNormalized] = Field(None, description="BBox of the review slice [0-1]")
+
+    # Core Feedback
+    reason: str = Field(..., description="Explanation of why it is wrong")
+    standard_answer: Optional[str] = Field(None, description="The correct answer (not always shown to student)")
+    
+    # Categorization
+    knowledge_tags: List[str] = Field(default_factory=list, description="L2/L3 knowledge points, e.g., ['Math', 'Geometry', 'Triangle']")
+    cross_subject_flag: Optional[bool] = Field(
+        None, description="Flag if content seems cross-subject/mismatched"
+    )
+    
+    # Subject Specific Details
+    math_steps: Optional[List[MathStep]] = None
+    geometry_check: Optional[GeometryInfo] = None
+    # English scoring
+    semantic_score: Optional[float] = Field(
+        None, description="Semantic similarity score for English subjective questions"
+    )
+    similarity_mode: Optional[SimilarityMode] = Field(
+        None, description="normal/strict, matches grading mode"
+    )
+    keywords_used: Optional[List[str]] = Field(
+        None,
+        description="Internal extracted keywords used in strict mode (for audit/debug)",
+    )
+    
+    # English specific could be added here if needed, but 'reason' usually suffices for MVP or 'semantic_score'
+
+class GradeRequest(BaseModel):
+    images: List[ImageRef] = Field(..., description="List of image references (url or base64)")
+    subject: Subject
+    batch_id: Optional[str] = Field(None, description="Client-side batch identifier")
+    session_id: Optional[str] = Field(None, description="Session identifier for the batch")
+    mode: Optional[SimilarityMode] = Field(
+        None, description="normal/strict (applies to English grading)"
+    )
+
+class GradeResponse(BaseModel):
+    wrong_items: List[WrongItem]
+    summary: str = Field(..., description="Overall summary of the page/batch")
+    subject: Subject
+    job_id: Optional[str] = Field(None, description="Asynchronous job identifier")
+    status: Optional[Literal["processing", "done", "failed"]] = None
+    total_items: Optional[int] = Field(None, description="Total questions detected")
+    wrong_count: Optional[int] = Field(None, description="Number of wrong items")
+    cross_subject_flag: Optional[bool] = Field(
+        None, description="Flag if the batch seems cross-subject/mismatched"
+    )
+    warnings: List[str] = Field(default_factory=list)
+
+# --- Chat/Socratic Structures ---
+class Message(BaseModel):
+    role: Literal["user", "assistant", "system"]
+    content: str
+
+class ChatRequest(BaseModel):
+    history: List[Message]
+    question: str
+    subject: Subject
+    session_id: Optional[str] = Field(None, description="Session identifier for context continuation")
+    mode: Optional[SimilarityMode] = Field(None, description="normal/strict, aligns with grading mode")
+    # Context from previous grading
+    context_item_ids: Optional[List[int]] = Field(
+        None, description="Optional wrong item indices/ids for targeted tutoring"
+    )
+
+
+class ChatResponse(BaseModel):
+    messages: List[Message]
+    session_id: Optional[str] = None
+    retry_after_ms: Optional[int] = Field(
+        None, description="Backoff hint for clients when rate limiting applies"
+    )
+    cross_subject_flag: Optional[bool] = None

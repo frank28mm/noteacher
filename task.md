@@ -1,0 +1,13 @@
+- [x] Phase 0: Requirement & Architecture (需求与架构)
+    - [x] Requirement Alignment (5 Dimensions)
+    - [x] Architecture Design (Dual-Engine)
+- [/] Phase 1: Agent Core Implementation (Python)
+    - [ ] Environment Setup (FastAPI + LangChain)
+    - [ ] Core Logic: Math Grader (Step-by-step)
+    - [ ] Core Logic: English Grader (Semantic)
+    - [ ] Socratic Tutor Logic
+    - [ ] Verification UI (Gradio)
+- [ ] Phase 2: Productization (BFF & App)
+    - [ ] Node.js BFF Setup
+    - [ ] App Development
+    - [ ] Integration Testing
