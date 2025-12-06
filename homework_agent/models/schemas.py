@@ -26,6 +26,11 @@ class SimilarityMode(str, Enum):
     STRICT = "strict"
 
 
+class VisionProvider(str, Enum):
+    QWEN3 = "qwen3"
+    DOUBAO = "doubao"
+
+
 # --- Shared primitives ---
 class BBoxNormalized(BaseModel):
     """Normalized [ymin, xmin, ymax, xmax] with origin top-left, y down, each in [0,1]."""
@@ -126,6 +131,10 @@ class GradeRequest(BaseModel):
     subject: Subject
     batch_id: Optional[str] = Field(None, description="Client-side batch identifier")
     session_id: Optional[str] = Field(None, description="Session identifier for the batch")
+    vision_provider: VisionProvider = Field(
+        VisionProvider.QWEN3,
+        description="Vision provider selection, default qwen3",
+    )
     mode: Optional[SimilarityMode] = Field(
         None, description="normal/strict (applies to English grading)"
     )
