@@ -76,8 +76,9 @@ resp = client.responses.create(
 - 模型/endpoint：后端按 provider 选择对应 `base_url`/`model`/`api_key`，不允许客户端自定义 base_url。
 - 失败回退：可按需要配置 fallback（例如 qwen3 → doubao），但需在实现中显式定义。
 
-## 5. 注意事项
+## 5. 注意事项（URL First）
+- 优先使用公网 HTTP/HTTPS URL，禁止 localhost/127/内网；单文件不超过 20 MB。
+- Doubao 仅接受 URL，Base64 会被拒绝；Qwen3 支持 URL（推荐）或 Base64 兜底（去掉 `data:image/...;base64,` 前缀）。
 - 不要将真实 API Key 提交到仓库；运行前在 `.env` 设置。
 - 确认 `base_url` 与 provider 一致，避免调用默认 openai.com。
-- 支持 url/base64 输入，需在业务层统一处理、校验格式/大小。
 - 确保限流与重试策略按契约执行（幂等键、防重复）。 

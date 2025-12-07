@@ -22,7 +22,7 @@
 
 #### 1.0.1 核心架构
 - 后端框架：FastAPI 0.100+ (Python 3.10+)；HTTP 直连 LLM/Vision API（OpenAI/Anthropic），不使用 Claude Agent SDK、不依赖 .claude 目录。
-- AI 模型：主选 OpenAI GPT-4o/GPT-4V；备选 Anthropic Claude 3.5 Sonnet；备用 Azure OpenAI/本地模型。
+- AI 模型：默认 Qwen3（SiliconFlow）作为主力 LLM+Vision，doubao（Ark）作为备选/回退；不对外新增其他 LLM 选项。保留 OpenAI/Anthropic 作为内部备用，不向终端暴露。
 - 视觉/OCR：用户可选 `"qwen3"`(SiliconFlow Qwen/Qwen3-VL-32B-Thinking) 或 `"doubao"`(Ark doubao-seed-1-6-vision-250815)，默认 `"qwen3"`；不对外提供 OpenAI 视觉选项。备选 Azure Computer Vision；备用 Tesseract（本地）。
 - 数据存储：PostgreSQL (主存)、Redis (缓存/会话)。
 - 队列：Celery + Redis（异步任务，可先用内存占位）。

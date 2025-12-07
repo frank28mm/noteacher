@@ -18,6 +18,8 @@
 - 严格模式：英语 strict 模式需关键词提炼+阈值（~0.91）；回退策略按要求执行。
 - SSE：心跳 30s，90s 无数据可断开，支持 last-event-id 续接。
 - 视觉模型选择：仅允许用户选择白名单值 `qwen3`(SiliconFlow) / `doubao`(Ark)，默认 `qwen3`；不向外暴露 OpenAI 视觉选项；后端需验证白名单避免任意 base_url/model 注入。
+- LLM 选择：默认使用 Qwen3（SiliconFlow）作为 LLM+Vision 主力，保留 doubao（Ark）作为备选/回退，不对外新增其他 LLM 选项，避免增加适配面。
+- MVP 验证策略：当前所有开发以本地测试跑通为先决条件，优先确保在本机环境（含本地存储/缓存）端到端可用，再考虑上线和云端替换。
 
 ## 提交前检查清单
 - 字段/响应是否与 `API_CONTRACT.md`、`schemas.py` 一致？无多余 key。

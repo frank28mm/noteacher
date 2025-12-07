@@ -22,8 +22,8 @@
 ### 2.1 图片引用 (ImageRef)
 ```typescript
 {
-  "url": "https://cdn.example.com/image.jpg",  // 可选
-  "base64": "data:image/jpeg;base64,/9j/4AAQ..."  // 可选
+  "url": "https://cdn.example.com/image.jpg",  // 可选，推荐。需公网 HTTP/HTTPS，禁止 localhost/127
+  "base64": "data:image/jpeg;base64,/9j/4AAQ..."  // 可选，兜底。请去掉 data: 前缀；大图建议改用 URL
 }
 ```
 
@@ -108,6 +108,7 @@ X-Request-Id: req-123456
 
 **字段说明**:
 - `images` (必需): 1-20 张图片，每项为 `ImageRef`（url 或 base64 二选一），支持 jpg/png/webp
+- 上传要求：单文件不超过 20 MB；**强烈推荐公网 URL**（禁止 127/localhost/内网）；**Doubao 仅支持 URL（Base64 报错）**；Qwen3 支持 URL（推荐）或 base64（兜底，去掉 data: 前缀，超限直接 400）。为减少无效调用，建议入口预检 URL/大小/格式，不合规直接返回 400。
 - `subject` (必需): "math" | "english"
 - `batch_id` (可选): 客户端批次标识，用于日志追踪
 - `session_id` (推荐): 会话/批次 ID，24h 生命周期，便于上下文续接
@@ -211,7 +212,7 @@ Cache-Control: no-cache
   "subject": "math",
   "session_id": "sess-abc123",
   "mode": "strict",
-  "context_item_ids": [1]
+  "context_item_ids": [1, "item-abc"]
 }
 ```
 
@@ -221,7 +222,7 @@ Cache-Control: no-cache
 - `subject` (必需): "math" | "english"
 - `session_id` (必需): 对应的作业批次会话ID（24h 生命周期，持久化）
 - `mode` (可选): "normal" | "strict"（对英语辅导/判分一致）
-- `context_item_ids` (可选): 关联的错题项索引/ID，针对性辅导
+- `context_item_ids` (可选): 关联的错题项，支持“索引 (int)”或“item_id (string)”两种写法；若缓存有错题则注入详情，无数据或缺失项将在上下文 note 中标记；last-event-id 断线续接会重放最近助手消息。
 - 幂等键使用 Header `X-Idempotency-Key`，Body 不支持。
 
 #### SSE响应格式
@@ -253,7 +254,7 @@ event: done
 data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"}
 ```
 
-> 心跳间隔建议 30s；若 90s 内无数据/心跳，服务器可主动断开，客户端需重连。
+> 心跳间隔建议 30s；若 90s 内无数据/心跳，服务器可主动断开，客户端需重连。客户端重连时可携带 `Last-Event-Id`，服务端会恢复 session 并按时间顺序重放最近最多 3 条 assistant 消息（仅当前 session）。\n*** End Patch
 
 **SSE事件类型**:
 1. `heartbeat`: 心跳事件，每30秒发送一次，保持连接

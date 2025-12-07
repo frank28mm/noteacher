@@ -1,62 +1,30 @@
-# Implementation Plan - Phase 1: Agent Core
+# Implementation Plan - Stability & Robustness Improvements
 
 ## Goal
-Build the "Brain" of the Homework Master. A standalone Python Microservice (FastAPI) capable of inputting homework images and outputting graded notifications with Socratic guidance.
-
-## User Review Required
-> [!IMPORTANT]
-> **API Key Required**: This phase requires a valid OpenAI-compatible API Key (GPT-4o or Claude 3.5 Sonnet recommended for Vision). Please ensure `.env` file is configured.
+Address critical stability issues and input validation gaps in the Service Layer (`VisionClient`, `LLMClient`) to ensure a robust foundation before building the Demo UI. This aligns with the "Stability First" approach. **原则：URL First，Base64 仅兜底；单文件大小上限 20 MB；Qwen3 为主力模型（非兜底）**。
 
 ## Proposed Changes
 
-### 1. Environment & Scaffold
-#### [NEW] `homework_agent/`
-*   Initialize Python project with `poetry` or `venv`.
-*   Dependencies: `fastapi`, `uvicorn`, `langchain`, `openai`, `pydantic`, `python-dotenv`.
-*   Setup `.env` template.
+### 1. Vision Input Validation & Hardening
+#### [MODIFY] [homework_agent/services/vision.py](file:///Users/frank/Documents/网页软件开发/作业检查大师/homework_agent/services/vision.py)
+*   **Doubao (Ark) Guardrail**: 仅接受公网 HTTP/HTTPS URL；base64 直接抛错，提示“请上传到 OSS 后提供 URL”。
+*   **Qwen (Silicon) Policy**: Qwen3 为主力，推荐 URL；Base64 仅兜底，自动剥离 `data:image/...;base64,` 前缀，若解析失败提示改用 URL。
+*   **Validation**: 校验 HTTP/HTTPS，拒绝 127/localhost/内网；单文件大小上限 20 MB；提示需公网可达，避免 data: 前缀。
 
-### 2. Data Model & Interface Contract (Partner 1 Recommendation)
-#### [NEW] `homework_agent/schemas.py`
-*   Define **Pydantic Models** to serve as the strict contract between Node BFF and Python Agent.
-*   `GradeRequest`: `images` (List[str]), `subject` (Enum).
-*   `GradeResponse`: `wrong_items` (List[WrongItem]), `summary`.
-*   `WrongItem`: `box_2d` (List[int]), `reason`, `standard_answer` (optional), `knowledge_tags` (List[str]).
-*   `ChatRequest`: `history` (List[Message]), `question`.
+### 2. LLM/Vision Retry Logic
+#### [MODIFY] [homework_agent/services/llm.py](file:///Users/frank/Documents/网页软件开发/作业检查大师/homework_agent/services/llm.py) & [homework_agent/services/vision.py](file:///Users/frank/Documents/网页软件开发/作业检查大师/homework_agent/services/vision.py)
+*   Ensure the `max_retries` parameter (already present in function signatures) is actually utilized.
+*   Implement a simple retry loop (with exponential backoff, e.g., `tenacity` or custom loop) around the OpenAI client calls to handle transient network errors (`APIConnectionError`, `timeout`)，不对 4xx/校验失败重试。
+*   Logging: 在重试前/失败时记录 provider/model/operation，便于观察重试来源。
 
-### 3. Core Logic (The Brain)
-#### [NEW] `homework_agent/core/ocr.py`
-*   Implement `OCRProcessor` to handle handwritten text recognition (Vision API).
-
-#### [NEW] `homework_agent/core/grader.py`
-*   Implement `HomeworkGrader` class.
-*   **Math Chain**:
-    *   Prompt engineering for Step-by-step verification.
-    *   Geometry auxiliary line check (Text description).
-*   **English Chain**:
-    *   Prompt engineering for Semantic Similarity (Strict Mode threshold > 0.9).
-*   **Socratic Tutor**:
-    *   Logic for generating hints vs full explanation (Counter < 5).
-    *   **Memory Boundary**: Ensure strictly session-based context (no long-term memory leakage).
-
-### 4. API Layer
-#### [NEW] `homework_agent/main.py`
-*   `POST /grade`: Accepts `GradeRequest`, returns `GradeResponse`.
-*   `POST /chat`: Accepts `ChatRequest`, returns SSE stream.
-
-### 4. Verification UI (Temporary)
-#### [NEW] `homework_agent/demo_ui.py`
-*   Simple **Gradio** interface to drag-and-drop images and test the Agent interactively without waiting for the Mobile App.
+### 3. Redis Verification (Optional but Recommended)
+*   If `REDIS_URL` is configured, verify connection in `homework_agent/utils/cache.py` on startup and log a clear warning if fallback to Memory is triggered.
 
 ## Verification Plan
 
-### Automated Tests
-*   **Unit Tests**: `pytest` for Prompt logic.
-    *   Input: Sample math image (from `tests/data`).
-    *   Expect: JSON containing "step error" detected.
-*   **Integration Tests**: Test FastAPI endpoints.
+### Automated Verification
+1.  **Vision Validation Test**: Run a script that attempts to send Base64 to Doubao and asserts that it raises the expected `ValueError`.
+2.  **Retry Test**: Simulate a transient connection error (mock logic or strict timeout) and verify retries occur.
 
-### Manual Verification
-1.  Run `python homework_agent/demo_ui.py`.
-2.  **Math Case**: Upload a math worksheet with a calculation error. Verify Agent describes the error step.
-3.  **English Case**: Upload an English fill-in-the-blank. Write a synonym answer. Verify Agent accepts it (Semantic Similarity).
-4.  **Chat Case**: Ask "Why?" on a wrong question. Verify Agent gives a Hint, not the answer.
+### Demo UI (Postponed)
+*   Once the above stability fixes are verified, we will proceed with the Gradio UI as originally planned, but built on this more stable foundation. 

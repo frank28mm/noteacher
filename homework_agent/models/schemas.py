@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import List, Optional, Literal
-from pydantic import BaseModel, Field, AnyUrl, validator
+from pydantic import BaseModel, Field, AnyUrl, field_validator
 
 # --- Basic Enums ---
 class Subject(str, Enum):
@@ -35,9 +35,10 @@ class VisionProvider(str, Enum):
 class BBoxNormalized(BaseModel):
     """Normalized [ymin, xmin, ymax, xmax] with origin top-left, y down, each in [0,1]."""
 
-    coords: List[float] = Field(..., min_items=4, max_items=4)
+    coords: List[float] = Field(..., min_length=4, max_length=4)
 
-    @validator("coords")
+    @field_validator("coords")
+    @classmethod
     def _validate_coords(cls, v: List[float]):
         if any(x < 0 or x > 1 for x in v):
             raise ValueError("BBox values must be within [0,1]")
@@ -55,14 +56,16 @@ class ImageRef(BaseModel):
         None, description="Data URL or raw base64-encoded image content"
     )
 
-    @validator("base64")
+    @field_validator("base64")
+    @classmethod
     def _strip_prefix(cls, v: Optional[str]):
         # Keep light validation: allow empty/None, otherwise non-empty string
         if v is not None and not v.strip():
             raise ValueError("base64 content cannot be empty")
         return v
 
-    @validator("url", always=True)
+    @field_validator("url")
+    @classmethod
     def _ensure_one(cls, v, values):
         if v is None and not values.get("base64"):
             raise ValueError("Either url or base64 must be provided")
@@ -98,6 +101,14 @@ class WrongItem(BaseModel):
     slice_image_url: Optional[AnyUrl] = Field(None, description="Cropped review slice URL")
     page_bbox: Optional[BBoxNormalized] = Field(None, description="BBox on full page [0-1]")
     review_slice_bbox: Optional[BBoxNormalized] = Field(None, description="BBox of the review slice [0-1]")
+
+    # Stable identifiers (optional, from upstream grader/DB)
+    item_id: Optional[str] = Field(
+        None, description="Stable wrong-item id from upstream storage (preferred over index)"
+    )
+    image_id: Optional[str] = Field(
+        None, description="Optional image/page id to validate context binding"
+    )
 
     # Core Feedback
     reason: str = Field(..., description="Explanation of why it is wrong")
@@ -164,8 +175,11 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="Session identifier for context continuation")
     mode: Optional[SimilarityMode] = Field(None, description="normal/strict, aligns with grading mode")
     # Context from previous grading
-    context_item_ids: Optional[List[int]] = Field(
-        None, description="Optional wrong item indices/ids for targeted tutoring"
+    context_item_ids: Optional[List[str | int]] = Field(
+        None,
+        description=(
+            "Optional wrong item identifiers for targeted tutoring; supports index or item_id"
+        ),
     )
 
 

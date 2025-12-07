@@ -9,10 +9,45 @@ Notes:
 - Do not allow arbitrary base_url/model injection; use env-configured endpoints.
 """
 
+import re
 from typing import List, Optional
 
 from pydantic import BaseModel
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError, APITimeoutError
+import httpx
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
+import logging
+from functools import partial
+
+logger = logging.getLogger(__name__)
+
+
+def _log_retry(op: str, retry_state):
+    provider = retry_state.kwargs.get("provider", "unknown")
+    model = None
+    try:
+        self_obj = retry_state.args[0]
+        if provider == VisionProvider.QWEN3:
+            model = getattr(self_obj, "silicon_model", None)
+        elif provider == VisionProvider.DOUBAO:
+            model = getattr(self_obj, "ark_model", None)
+    except Exception:
+        model = model or "unknown"
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    logger.warning(
+        "Retrying %s (provider=%s, model=%s), attempt=%s, exception=%s",
+        op,
+        provider,
+        model,
+        retry_state.attempt_number,
+        exc,
+    )
 
 from homework_agent.models.schemas import ImageRef, VisionProvider
 from homework_agent.utils.settings import get_settings
@@ -35,24 +70,54 @@ class VisionClient:
         self.ark_model = settings.ark_vision_model
 
     def _build_openai_client(self, base_url: str, api_key: str) -> OpenAI:
-        return OpenAI(base_url=base_url, api_key=api_key)
+        return OpenAI(base_url=base_url, api_key=api_key, timeout=300.0)
+
+    def _strip_base64_prefix(self, data: str) -> str:
+        return re.sub(r"^data:image/[^;]+;base64,", "", data, flags=re.IGNORECASE)
+
+    def _is_public_url(self, url: str) -> bool:
+        if not url:
+            return False
+        if re.match(r"^https?://", url) is None:
+            return False
+        if url.startswith("http://127.") or url.startswith("https://127."):
+            return False
+        if url.startswith("http://localhost") or url.startswith("https://localhost"):
+            return False
+        return True
 
     def _image_content_blocks(self, refs: List[ImageRef], provider: VisionProvider):
         blocks = []
         for ref in refs:
             if ref.url:
+                if not self._is_public_url(str(ref.url)):
+                    raise ValueError("Image URL must be public HTTP/HTTPS (no localhost/127)")
                 if provider == VisionProvider.DOUBAO:
-                    blocks.append({"type": "input_image", "image_url": ref.url})
+                    blocks.append({"type": "input_image", "image_url": str(ref.url)})
                 else:
                     blocks.append({"type": "image_url", "image_url": {"url": str(ref.url)}})
             elif ref.base64:
                 # Some providers may not accept raw base64; callers should prefer URL uploads
+                cleaned = self._strip_base64_prefix(ref.base64)
+                # Approximate size check: 4/3 of base64 length
+                est_bytes = int(len(cleaned) * 0.75)
+                if est_bytes > 20 * 1024 * 1024:
+                    raise ValueError("Image size exceeds 20MB limit; use URL instead")
                 if provider == VisionProvider.DOUBAO:
-                    blocks.append({"type": "input_image", "image_url": ref.base64})
+                    raise ValueError("Doubao/Ark only supports public URLs; base64 is not accepted")
                 else:
-                    blocks.append({"type": "image_url", "image_url": {"url": ref.base64}})
+                    blocks.append({"type": "image_url", "image_url": {"url": cleaned}})
         return blocks
 
+    @retry(
+        retry=retry_if_exception_type(
+            (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)
+        ),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(3),
+        before_sleep=partial(_log_retry, "vision.analyze"),
+        reraise=True,
+    )
     def analyze(
         self,
         images: List[ImageRef],
