@@ -98,15 +98,17 @@ class VisionClient:
                     blocks.append({"type": "image_url", "image_url": {"url": str(ref.url)}})
             elif ref.base64:
                 # Some providers may not accept raw base64; callers should prefer URL uploads
-                cleaned = self._strip_base64_prefix(ref.base64)
+                # Note: Qwen3 (SiliconFlow) expects full Data URI (data:image/...) in 'url' field.
+                # Do NOT strip prefix.
+                
                 # Approximate size check: 4/3 of base64 length
-                est_bytes = int(len(cleaned) * 0.75)
+                est_bytes = int(len(ref.base64) * 0.75)
                 if est_bytes > 20 * 1024 * 1024:
                     raise ValueError("Image size exceeds 20MB limit; use URL instead")
                 if provider == VisionProvider.DOUBAO:
                     raise ValueError("Doubao/Ark only supports public URLs; base64 is not accepted")
                 else:
-                    blocks.append({"type": "image_url", "image_url": {"url": cleaned}})
+                    blocks.append({"type": "image_url", "image_url": {"url": ref.base64}})
         return blocks
 
     @retry(

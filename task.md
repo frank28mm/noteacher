@@ -29,19 +29,23 @@
 - [x] Check: Confirm Redis connection probe in startup
 - [x] Verification: Run `verify_stability.py` (Guardrails + Retry + E2E + RateLimit Fail-Fast)
 - [x] Strategy: Drop automatic retry for RateLimit (Fail Fast)
-- [ ] **Phase 2: Gradio Demo UI** (`homework_agent/demo_ui.py`):
-  - [ ] **UI Scaffold**: Setup Gradio Blocks, Tabs ("作业批改", "苏格拉底辅导"), and CSS styling.
-  - [ ] **Tab 1: Smart Grading**:
-    - [ ] UI: Image Upload (File/Clipboard), Subject Select, "Start Grading" Btn.
-    - [ ] Logic: Call `VisionClient` (OCR/Describe) + `LLMClient` (Grade).
-    - [ ] Display: Render JSON result as structured Markdown (Score, Wrong Items, Analysis).
-    - [ ] State: Store `grade_result` for Tab 2 context.
-  - [ ] **Tab 2: Socratic Tutor**:
-    - [ ] UI: ChatBot interface.
-    - [ ] Logic: Inject cached `wrong_items` into system prompt (Context Augmentation).
-    - [ ] Interaction: Multi-turn conversation with `LLMClient.socratic_tutor`.
-  - [ ] **Integration**: Run locally (`python -m homework_agent.demo_ui`).
-  - [ ] **Reminder**: 当前 RateLimit 采用 fail-fast（不重试）；Redis/异步队列尚未启用，Demo 为本地单进程验证。
+- [x] **Phase 2: Gradio Demo UI** (`homework_agent/demo_ui.py`):
+  - [x] **UI Scaffold**: Setup Gradio Blocks, Tabs ("作业批改", "苏格拉底辅导"), and CSS styling.
+  - [x] **Tab 1: Smart Grading**:
+    - [x] UI: Image Upload (File/Clipboard), Subject Select, "Start Grading" Btn.
+    - [x] Logic: Call `VisionClient` (OCR/Describe) + `LLMClient` (Grade).
+    - [x] Display: Render JSON result as structured Markdown (Score, Wrong Items, Analysis).
+    - [x] State: Store `grade_result` for Tab 2 context.
+  - [x] **Tab 2: Socratic Tutor**:
+    - [x] UI: ChatBot interface.
+    - [x] Logic: Inject cached `wrong_items` into system prompt (Context Augmentation).
+    - [x] Interaction: Multi-turn conversation with `LLMClient.socratic_tutor`.
+  - [x] **Integration**: Run locally (`python -m homework_agent.demo_ui`).
+  - [x] **Fixes**:
+    - [x] Converted listeners to Sync to avoid async/await runtime errors.
+    - [x] Corrected `VisionResult` field access (`.text`).
+    - [x] Added English grading support and file size checks.
+  - [x] **Reminder**: 当前 RateLimit 采用 fail-fast（不重试）；Redis/异步队列尚未启用，Demo 为本地单进程验证。
 - [ ] 异步批处理：`/grade` 大批量仍用 BackgroundTasks + cache_store；需接入 Redis/队列、完善 job 状态更新。
 - [ ] 功能验证：数学/英语批改、苏格拉底辅导全链路验收。
 
