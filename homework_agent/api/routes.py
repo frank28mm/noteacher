@@ -214,6 +214,9 @@ def cache_response(idempotency_key: str, response: GradeResponse) -> None:
 
 async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse:
     """执行批改（同步/后台共用）。"""
+    # 提前确定 session_id，用于所有返回路径
+    session_for_ctx = req.session_id or req.batch_id
+
     vision_client = VisionClient()
     # Vision 分析
     try:
@@ -229,6 +232,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             summary="Vision analysis not available",
             subject=req.subject,
             job_id=None,
+            session_id=session_for_ctx,
             status="failed",
             total_items=None,
             wrong_count=None,
@@ -260,6 +264,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             summary=f"LLM grading failed: {str(e)}",
             subject=req.subject,
             job_id=None,
+            session_id=session_for_ctx,
             status="failed",
             total_items=None,
             wrong_count=None,
@@ -272,6 +277,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         summary=grading_result.summary,
         subject=req.subject,
         job_id=None,
+        session_id=session_for_ctx,
         status="done",
         total_items=grading_result.total_items,
         wrong_count=grading_result.wrong_count,
@@ -377,11 +383,13 @@ async def grade_homework(
             ttl_seconds=IDP_TTL_HOURS * 3600,
         )
         background_tasks.add_task(background_grade, job_id, req, provider_str)
+        session_for_ctx = req.session_id or req.batch_id
         return GradeResponse(
             wrong_items=[],
             summary="任务已创建，正在处理中...",
             subject=req.subject,
             job_id=job_id,
+            session_id=session_for_ctx,
             status="processing",
             total_items=None,
             wrong_count=None,
@@ -389,9 +397,12 @@ async def grade_homework(
             warnings=["大批量任务已转为异步处理"],
         )
 
+
+    # Determine session_id for context early
+    session_for_ctx = req.session_id or req.batch_id
+
     try:
         response = await perform_grading(req, provider_str)
-        session_for_ctx = req.session_id or req.batch_id
         if session_for_ctx:
             save_mistakes(session_for_ctx, [item for item in response.wrong_items])
         if idempotency_key:

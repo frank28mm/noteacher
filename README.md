@@ -16,6 +16,7 @@
   - **Fail Fast**: 遇到 RateLimit 立即报错，不盲目重试。
   - **Anti-Jitter**: 网络超时/连接中断自动指数退避重试 (Exponential Backoff)。
   - **Input Guardrails**: 路由层拦截非法输入 (Localhost/超大 Base64)，减少无效 Token 消耗。
+  - **上传兼容**: 支持 HEIC/HEIF 自动转 JPEG，PDF 自动拆前 8 页转图片；Qwen3 默认需最小边 ≥28px，Doubao ≥14px。
 
 ### 2. 苏格拉底辅导 (Socratic Tutor)
 - **启发式引导**：不直接给出答案，通过连续提问引导学生自己发现错误（最多 5 轮）。

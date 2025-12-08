@@ -10,3 +10,7 @@ gradio>=4.0.0
 python-multipart
 httpx
 tenacity>=8.0.0
+supabase>=2.0.0
+pillow
+pillow-heif
+pymupdf

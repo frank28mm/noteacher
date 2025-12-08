@@ -144,7 +144,7 @@ class GradeRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="Session identifier for the batch")
     vision_provider: VisionProvider = Field(
         VisionProvider.QWEN3,
-        description="Vision provider selection, default qwen3",
+        description="Vision provider selection, default qwen3; doubao is optional (URL-only)",
     )
     mode: Optional[SimilarityMode] = Field(
         None, description="normal/strict (applies to English grading)"
@@ -155,6 +155,7 @@ class GradeResponse(BaseModel):
     summary: str = Field(..., description="Overall summary of the page/batch")
     subject: Subject
     job_id: Optional[str] = Field(None, description="Asynchronous job identifier")
+    session_id: Optional[str] = Field(None, description="Session identifier for context continuation")
     status: Optional[Literal["processing", "done", "failed"]] = None
     total_items: Optional[int] = Field(None, description="Total questions detected")
     wrong_count: Optional[int] = Field(None, description="Number of wrong items")
