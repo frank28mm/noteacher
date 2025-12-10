@@ -1,30 +1,17 @@
-# Implementation Plan - Stability & Robustness Improvements
+# Implementation Plan - Fix Timeouts, Restore Vision Text, and Optimize
 
-## Goal
-Address critical stability issues and input validation gaps in the Service Layer (`VisionClient`, `LLMClient`) to ensure a robust foundation before building the Demo UI. This aligns with the "Stability First" approach. **原则：URL First，Base64 仅兜底；单文件大小上限 20 MB；Qwen3 为主力模型（非兜底）**。
+## Goal Description
+1. **Restore Vision Traceability**: Ensure `vision_raw_text` is in schema and returned by API.
+2. **Fix Timeouts (P0)**: Solve Chat/Grade API timeouts by making backend LLM calls non-blocking.
+3. **Fix Schema Error**: Add `Severity.MINOR`.
+4. **Optimize Performance**: Add client-side image compression.
 
 ## Proposed Changes
+1. **Models**: Update `schemas.py` (`vision_raw_text`, `Severity.MINOR/MEDIUM`).
+2. **Routes**: Update `routes.py` (populate `vision_raw_text`, use `run_in_executor` for `.chat`).
+3. **Client/UI**: 不再维护 `verify_full_workflow.py`，改为 Demo UI + Vision 调试 Tab；展示 `vision_raw_text`。
 
-### 1. Vision Input Validation & Hardening
-#### [MODIFY] [homework_agent/services/vision.py](file:///Users/frank/Documents/网页软件开发/作业检查大师/homework_agent/services/vision.py)
-*   **Doubao (Ark) Guardrail**: 仅接受公网 HTTP/HTTPS URL；base64 直接抛错，提示“请上传到 OSS 后提供 URL”。
-*   **Qwen (Silicon) Policy**: Qwen3 为主力，推荐 URL；Base64 仅兜底，自动剥离 `data:image/...;base64,` 前缀，若解析失败提示改用 URL。
-*   **Validation**: 校验 HTTP/HTTPS，拒绝 127/localhost/内网；单文件大小上限 20 MB；提示需公网可达，避免 data: 前缀。
-
-### 2. LLM/Vision Retry Logic
-#### [MODIFY] [homework_agent/services/llm.py](file:///Users/frank/Documents/网页软件开发/作业检查大师/homework_agent/services/llm.py) & [homework_agent/services/vision.py](file:///Users/frank/Documents/网页软件开发/作业检查大师/homework_agent/services/vision.py)
-*   Ensure the `max_retries` parameter (already present in function signatures) is actually utilized.
-*   Implement a simple retry loop (with exponential backoff, e.g., `tenacity` or custom loop) around the OpenAI client calls to handle transient network errors (`APIConnectionError`, `timeout`)，不对 4xx/校验失败重试。
-*   Logging: 在重试前/失败时记录 provider/model/operation，便于观察重试来源。
-
-### 3. Redis Verification (Optional but Recommended)
-*   If `REDIS_URL` is configured, verify connection in `homework_agent/utils/cache.py` on startup and log a clear warning if fallback to Memory is triggered.
-
-## Verification Plan
-
-### Automated Verification
-1.  **Vision Validation Test**: Run a script that attempts to send Base64 to Doubao and asserts that it raises the expected `ValueError`.
-2.  **Retry Test**: Simulate a transient connection error (mock logic or strict timeout) and verify retries occur.
-
-### Demo UI (Postponed)
-*   Once the above stability fixes are verified, we will proceed with the Gradio UI as originally planned, but built on this more stable foundation. 
+## Verification
+在 Demo UI 中：
+- Vision 调试 Tab：直接调用 qwen3/doubao，确认能拿到完整识别文本。
+- 智能批改 Tab：确认 `/grade` 返回 `vision_raw_text`，判定覆盖每题（学生作答/标准答案/is_correct，选项题 student_choice/correct_choice，verdict 仅 correct/incorrect/uncertain，severity 仅 calculation/concept/format/unknown/medium/minor）。

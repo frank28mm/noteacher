@@ -1,8 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from homework_agent.api import routes
-from homework_agent.utils.settings import get_settings
+from api import routes
+from utils.settings import get_settings
 
 
 def create_app() -> FastAPI:

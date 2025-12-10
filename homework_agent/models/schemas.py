@@ -19,6 +19,8 @@ class Severity(str, Enum):
     CONCEPT = "concept"
     FORMAT = "format"
     UNKNOWN = "unknown"
+    MEDIUM = "medium"
+    MINOR = "minor"
 
 
 class SimilarityMode(str, Enum):
@@ -163,6 +165,9 @@ class GradeResponse(BaseModel):
         None, description="Flag if the batch seems cross-subject/mismatched"
     )
     warnings: List[str] = Field(default_factory=list)
+    vision_raw_text: Optional[str] = Field(
+        None, description="Vision API 原始识别文本，用于调试和验证"
+    )
 
 # --- Chat/Socratic Structures ---
 class Message(BaseModel):

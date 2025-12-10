@@ -24,13 +24,13 @@ from tenacity import (
 )
 from functools import partial
 
-from homework_agent.core.prompts import (
+from core.prompts import (
     MATH_GRADER_SYSTEM_PROMPT,
     ENGLISH_GRADER_SYSTEM_PROMPT,
     SOCRATIC_TUTOR_SYSTEM_PROMPT,
 )
-from homework_agent.models.schemas import Subject, SimilarityMode
-from homework_agent.utils.settings import get_settings
+from models.schemas import Subject, SimilarityMode, Severity
+from utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,29 @@ class LLMClient:
         # Doubao 文本模型（可通过环境变量 model_reasoning 覆盖）
         self.ark_model = settings.model_reasoning
 
+    def _normalize_math_wrong_items(self, wrong_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """将 math_steps 中非白名单的 severity 归一化，避免后续 Pydantic 校验报错。"""
+        allowed = {sev.value for sev in Severity}
+        normalized: List[Dict[str, Any]] = []
+        for item in wrong_items or []:
+            copy_item = dict(item)
+            steps = copy_item.get("math_steps") or copy_item.get("steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    sev = step.get("severity")
+                    if isinstance(sev, str):
+                        sev_lower = sev.strip().lower()
+                        if sev_lower not in allowed:
+                            step["severity"] = Severity.UNKNOWN.value
+                        else:
+                            step["severity"] = sev_lower
+            # geometry_check 如果不是 dict/Model，则置空，避免校验失败
+            geom = copy_item.get("geometry_check")
+            if geom is not None and not isinstance(geom, dict):
+                copy_item["geometry_check"] = None
+            normalized.append(copy_item)
+        return normalized
+
     def _get_client(self, provider: str = "silicon") -> OpenAI:
         """获取OpenAI兼容客户端"""
         allowed = {"silicon", "ark", "openai"}
@@ -191,6 +214,8 @@ class LLMClient:
             content = response.choices[0].message.content
             try:
                 result_data = json.loads(content)
+                if "wrong_items" in result_data:
+                    result_data["wrong_items"] = self._normalize_math_wrong_items(result_data.get("wrong_items"))
                 return MathGradingResult(**result_data)
             except Exception as parse_err:
                 logger.error(f"Math grading parse failed: {parse_err}; raw content: {content}")

@@ -21,6 +21,7 @@
         * 结构化反馈：`steps` 中用 `verdict` 标记 correct/incorrect/uncertain，可选 `severity`（计算错误/概念错误/格式）。
         * 几何题：作图对但标注缺失则提示标注；辅助线错误则指出错误线段/关系，但不直接给正确作法，按上述递进。
 *   **答案获取**：完整答案和解析仅在“错题本/错题库”中可查看，不在辅导对话中直接直接提供（除非多次引导失败，待定）。
+*   **判定透明度**：批改结果需覆盖每道题，返回学生作答/标准答案/判定（选项题注明 student_choice/correct_choice），判定枚举受限（verdict 仅 correct/incorrect/uncertain；severity 仅 calculation/concept/format/unknown/medium/minor）；不确定要标记，禁止编造 bbox。返回 `vision_raw_text` 便于审计。
 
 ### 1.3 数据闭环 (Data Loop)
 *   **错题归档机制**：**人工确认入库**。

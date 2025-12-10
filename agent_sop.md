@@ -212,10 +212,12 @@ graph TD
    ✅ 自动打标 L2/L3 知识点
    ✅ 例: ['数学', '几何', '三角形', '全等判定']
 
-5. 输出结构化:
-   ✅ 构建WrongItem数组
-   ✅ 只包含incorrect/uncertain的题目
-   ✅ 填充所有必需字段：page_image_url/slice_image_url/page_bbox/review_slice_bbox（归一化）、reason/standard_answer、knowledge_tags、cross_subject_flag（仅标记，不切科）
+5. 输出结构化（新版判定标准，务必覆盖所有题目）:
+   ✅ 对每题提供：题干概要、学生作答（文本/选项）、标准答案、判定 is_correct；选项题写明 student_choice/correct_choice；未答标 missing。
+   ✅ verdict 仅 correct/incorrect/uncertain；severity 仅 calculation/concept/format/unknown/medium/minor。
+   ✅ wrong_items 仅含 incorrect/uncertain，但 summary 需说明全题覆盖（全对也说明“未发现错误”）；不确定时明确原因。
+   ✅ 不编造 bbox，不确定时留空或省略 bbox。
+   ✅ 返还 vision_raw_text 供前端/审计查看。
 ```
 
 **边界情况处理**:

@@ -2,20 +2,22 @@ import hashlib
 import json
 import uuid
 import logging
+import asyncio
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, status, Request, Header, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from typing import AsyncIterator, Dict, Any, Optional, List, Tuple, Iterable
 import re
 
-from homework_agent.models.schemas import (
+from models.schemas import (
     GradeRequest, GradeResponse, ChatRequest, ChatResponse,
     VisionProvider, Message, Subject, SimilarityMode
 )
-from homework_agent.services.vision import VisionClient
-from homework_agent.services.llm import LLMClient, MathGradingResult, EnglishGradingResult
-from homework_agent.utils.settings import get_settings
-from homework_agent.utils.cache import get_cache_store, BaseCache
+from services.vision import VisionClient
+from services.llm import LLMClient, MathGradingResult, EnglishGradingResult
+from utils.settings import get_settings
+from utils.cache import get_cache_store, BaseCache
+from models.schemas import Severity, GeometryInfo
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,28 @@ def get_mistakes(session_id: str) -> Optional[List[Dict[str, Any]]]:
     if not data:
         return None
     return data.get("wrong_items")
+
+
+def sanitize_wrong_items(wrong_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Normalize LLM输出，避免 Severity/geometry_check 等字段导致 Pydantic 校验错误。"""
+    allowed_sev = {s.value for s in Severity}
+    cleaned: List[Dict[str, Any]] = []
+    for item in wrong_items or []:
+        copy_item = dict(item)
+        # Normalize severity in math_steps/steps
+        steps = copy_item.get("math_steps") or copy_item.get("steps")
+        if isinstance(steps, list):
+            for step in steps:
+                sev = step.get("severity")
+                if isinstance(sev, str):
+                    sev_norm = sev.strip().lower()
+                    step["severity"] = sev_norm if sev_norm in allowed_sev else Severity.UNKNOWN.value
+        # Normalize geometry_check
+        geom = copy_item.get("geometry_check")
+        if geom is not None and not isinstance(geom, (dict, GeometryInfo)):
+            copy_item["geometry_check"] = None
+        cleaned.append(copy_item)
+    return cleaned
 
 
 def normalize_context_ids(raw_ids: Iterable[Any]) -> List[str | int]:
@@ -238,6 +262,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             wrong_count=None,
             cross_subject_flag=None,
             warnings=[f"Vision analysis failed: {str(e)}"],
+            vision_raw_text=None,
         )
 
     llm_client = LLMClient()
@@ -247,6 +272,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                 text_content=vision_result.text,
                 provider=provider_str,
             )
+            grading_result.wrong_items = sanitize_wrong_items(grading_result.wrong_items)
         elif req.subject == Subject.ENGLISH:
             grading_result = llm_client.grade_english(
                 text_content=vision_result.text,
@@ -270,6 +296,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             wrong_count=None,
             cross_subject_flag=None,
             warnings=[f"LLM error: {str(e)}"],
+            vision_raw_text=vision_result.text,
         )
 
     return GradeResponse(
@@ -283,6 +310,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         wrong_count=grading_result.wrong_count,
         cross_subject_flag=grading_result.cross_subject_flag,
         warnings=grading_result.warnings,
+        vision_raw_text=vision_result.text,
     )
 
 
@@ -395,6 +423,7 @@ async def grade_homework(
             wrong_count=None,
             cross_subject_flag=None,
             warnings=["大批量任务已转为异步处理"],
+            vision_raw_text=None,
         )
 
 
@@ -511,12 +540,16 @@ async def chat_stream(
             if not mistakes:
                 wrong_item_context["note"] = "no mistakes cached for this session"
 
-        tutor_result = llm_client.socratic_tutor(
-            question=req.question,
-            wrong_item_context=wrong_item_context,
-            session_id=session_id,
-            interaction_count=current_turn,
-            provider=provider_str,
+        loop = asyncio.get_running_loop()
+        tutor_result = await loop.run_in_executor(
+            None,
+            lambda: llm_client.socratic_tutor(
+                question=req.question,
+                wrong_item_context=wrong_item_context,
+                session_id=session_id,
+                interaction_count=current_turn,
+                provider=provider_str,
+            ),
         )
 
         # 更新session，追加本轮问答

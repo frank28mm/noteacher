@@ -20,6 +20,7 @@
 - 视觉模型选择：仅允许用户选择白名单值 `qwen3`(SiliconFlow) / `doubao`(Ark)，默认 `qwen3`；不向外暴露 OpenAI 视觉选项；后端需验证白名单避免任意 base_url/model 注入。
 - LLM 选择：默认使用 Qwen3（SiliconFlow）作为 LLM+Vision 主力，保留 doubao（Ark）作为备选/回退，不对外新增其他 LLM 选项，避免增加适配面。
 - MVP 验证策略：当前所有开发以本地测试跑通为先决条件，优先确保在本机环境（含本地存储/缓存）端到端可用，再考虑上线和云端替换。
+- 判定输出一致性（新增）：每题必须覆盖，标出学生作答/标准答案/is_correct；选项题写明 student_choice/correct_choice；verdict 仅 correct/incorrect/uncertain；severity 仅 calculation/concept/format/unknown/medium/minor；不确定标记 uncertain，不编造 bbox；`vision_raw_text` 必须返给客户端用于审计。
 
 ## 提交前检查清单
 - 字段/响应是否与 `API_CONTRACT.md`、`schemas.py` 一致？无多余 key。

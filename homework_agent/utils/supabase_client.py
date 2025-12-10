@@ -166,6 +166,8 @@ class SupabaseStorageClient:
                     file_options={"content-type": mime_type}
                 )
                 public_url = self.client.storage.from_(self.bucket).get_public_url(unique_filename)
+                # Supabase Python SDK 2.x 会返回末尾带 "?" 的直链，这里清理掉避免下游 URL 校验/超时问题
+                public_url = public_url.rstrip("?")
                 urls.append(public_url)
             return urls
         except Exception as e:

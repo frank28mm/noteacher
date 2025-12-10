@@ -9,8 +9,9 @@ import gradio as gr
 from dotenv import load_dotenv
 
 from typing import List, Dict, Any, Optional
-from homework_agent.models.schemas import Subject, VisionProvider, WrongItem, Message
+from homework_agent.models.schemas import Subject, VisionProvider, WrongItem, Message, ImageRef
 from homework_agent.utils.supabase_client import get_storage_client
+from homework_agent.services.vision import VisionClient
 
 
 # 加载环境变量 - 使用脚本所在目录的父目录（项目根目录）
@@ -44,8 +45,12 @@ def upload_to_supabase(file_path: str, min_side: int) -> List[str]:
 def format_grading_result(result: Dict[str, Any]) -> str:
     """格式化批改结果为 Markdown"""
     md = f"## 📊 评分结果\n\n"
-    md += f"**科目 (Subject)**: {result.get('subject', 'N/A')}\n\n"
-    md += f"**摘要 (Summary)**: {result.get('summary', 'N/A')}\n\n"
+    md += f"- **科目 (Subject)**: {result.get('subject', 'N/A')}\n"
+    md += f"- **状态 (Status)**: {result.get('status', 'N/A')}\n"
+    md += f"- **Session ID**: `{result.get('session_id', 'N/A')}`\n"
+    md += f"- **摘要 (Summary)**: {result.get('summary', 'N/A')}\n"
+    md += f"- **错题数 (Wrong Count)**: {result.get('wrong_count', 'N/A')}\n"
+    md += "\n"
 
     wrong_items = result.get('wrong_items', [])
     if wrong_items:
@@ -66,6 +71,16 @@ def format_grading_result(result: Dict[str, Any]) -> str:
         md += "\n### ⚠️ 警告\n"
         for warning in result['warnings']:
             md += f"- {warning}\n"
+
+    # Vision 原文（完整展开）
+    vision_raw = result.get("vision_raw_text")
+    if vision_raw:
+        md += "\n### 👁️ Vision 识别原文（完整）\n"
+        md += f"<details open><summary>点击可折叠</summary>\n\n```\n{vision_raw}\n```\n</details>\n"
+    else:
+        md += "\n> 没有返回 vision_raw_text（可能是下载 URL 或模型连接失败）。\n"
+
+    return md
 
     return md
 
@@ -151,27 +166,28 @@ async def call_chat_api(question: str, session_id: str, subject: str,
 
 
 async def grade_homework_logic(img_path, subject, provider):
-    """批改作业的主逻辑"""
+    """批改作业的主逻辑（非流式，返回最终结果与状态）"""
     # gr.File returns path string or object with .name
     if hasattr(img_path, "name"):
         img_path = img_path.name
 
     if not img_path:
-        return "**错误**：请上传图片文件。", None, [], None
+        return "**错误**：请上传图片文件。", None, [], None, "❌ 未选择文件"
 
+    status_lines = []
     try:
         # 尺寸下限：Qwen3 >=28px，Doubao >=14px
         min_side = 28 if provider == "qwen3" else 14
 
         # Step 1: 上传到 Supabase Storage
-        gr.Info("📤 正在上传文件到云存储...")
+        status_lines.append("📤 正在上传文件到云存储...")
         image_urls = upload_to_supabase(img_path, min_side=min_side)
         if not image_urls:
-            return "**错误**：上传失败，未获取到 URL。", None, [], None
-        gr.Info(f"✅ 文件已上传，共 {len(image_urls)} 张用于批改")
+            return "**错误**：上传失败，未获取到 URL。", None, [], None, "❌ 上传失败"
+        status_lines.append(f"✅ 文件已上传，共 {len(image_urls)} 张用于批改")
 
         # Step 2: 调用后端 API
-        gr.Info("🤖 正在调用批改服务...")
+        status_lines.append("🤖 正在调用批改服务...")
         result = await call_grade_api(image_urls, subject, provider)
 
         # Step 3: 格式化结果
@@ -182,16 +198,56 @@ async def grade_homework_logic(img_path, subject, provider):
         wrong_items = result.get('wrong_items', [])
         options = [f"{i}:{item.get('reason', 'N/A')[:30]}" for i, item in enumerate(wrong_items)]
 
-        gr.Info("✅ 批改完成！")
-        return formatted_md, session_id, options, image_urls[0]
+        status_lines.append("✅ 批改完成！")
+        status_md = "\n".join(status_lines)
+        return formatted_md, session_id, options, image_urls[0], status_md
 
     except ValueError as e:
-        return f"**错误**：{str(e)}", None, [], None
+        return f"**错误**：{str(e)}", None, [], None, f"❌ 失败：{e}"
     except Exception as e:
         err_msg = str(e)
         if "20040" in err_msg:
             err_msg += "\n\n提示：模型无法下载该 URL，建议检查图片是否可公开访问"
-        return f"**系统错误**：{err_msg}", None, [], None
+        return f"**系统错误**：{err_msg}", None, [], None, f"❌ 失败：{err_msg}"
+
+
+async def vision_debug_logic(img_path, provider):
+    """直接调用 Vision 模型，返回原始识别文本（debug_vision 的 UI 化版本）"""
+    # gr.File returns path string or object with .name
+    if hasattr(img_path, "name"):
+        img_path = img_path.name
+
+    if not img_path:
+        return "**错误**：请上传图片文件。", ""
+
+    try:
+        min_side = 28 if provider == "qwen3" else 14
+        gr.Info("📤 上传到 Supabase (调试用)...")
+        urls = upload_to_supabase(img_path, min_side=min_side)
+        if not urls:
+            return "**错误**：上传失败，未获取到 URL。", ""
+        img_url = urls[0]
+        gr.Info(f"✅ 上传成功，URL: {img_url}")
+
+        # 调用 Vision
+        client = VisionClient()
+        prompt = "请详细识别并提取这张图片中的所有题目、学生的解答过程和最终答案。请按题目顺序列出。"
+        gr.Info("👁️ 正在调用 Vision 模型...")
+        # VisionClient.analyze 是同步方法，放线程池避免阻塞
+        import asyncio
+        result = await asyncio.to_thread(
+            client.analyze,
+            images=[ImageRef(url=img_url)],
+            prompt=prompt,
+            provider=VisionProvider(provider),
+        )
+        md = f"**上传 URL**: {img_url}\n\n"
+        md += f"**模型**: {provider}\n\n"
+        md += "### Vision 原始识别文本\n"
+        md += f"```\n{result.text}\n```"
+        return md, img_url
+    except Exception as e:
+        return f"**系统错误**：{e}", ""
 
 
 async def tutor_chat_logic(message, history, session_id, selected_items, subject):
@@ -277,6 +333,7 @@ def create_demo():
                         grade_btn = gr.Button("🚀 开始批改", variant="primary")
 
                     with gr.Column(scale=1):
+                        status_md = gr.Markdown(label="状态")
                         output_md = gr.Markdown(label="📊 批改结果")
                         session_id_state = gr.State()
                         wrong_item_options = gr.State()
@@ -285,7 +342,7 @@ def create_demo():
                 grade_btn.click(
                     fn=grade_homework_logic,
                     inputs=[input_img, subject_dropdown, provider_dropdown],
-                    outputs=[output_md, session_id_state, wrong_item_options, image_url_state],
+                    outputs=[output_md, session_id_state, wrong_item_options, image_url_state, status_md],
                 )
 
             # ========== Tab 2: 苏格拉底辅导 ==========
@@ -327,6 +384,32 @@ def create_demo():
                     inputs=None,
                     outputs=[chatbot, msg],
                     queue=False
+                )
+
+            # ========== Tab 3: Vision 调试 ==========
+            with gr.Tab("👁️ Vision 调试"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        vision_input = gr.File(
+                            label="上传图片 (JPG/PNG/HEIC/PDF)",
+                            file_types=["image", "pdf"],
+                            height=200,
+                        )
+                        vision_provider = gr.Dropdown(
+                            choices=["qwen3", "doubao"],
+                            value="qwen3",
+                            label="视觉模型"
+                        )
+                        vision_btn = gr.Button("👁️ 运行 Vision 调试", variant="secondary")
+                    with gr.Column(scale=1):
+                        vision_output = gr.Markdown(label="Vision 原始识别文本")
+                        vision_img_url = gr.Textbox(label="上传后的公网 URL", interactive=False)
+
+                vision_btn.click(
+                    fn=vision_debug_logic,
+                    inputs=[vision_input, vision_provider],
+                    outputs=[vision_output, vision_img_url],
+                    show_progress=True,
                 )
 
         gr.Markdown("""
