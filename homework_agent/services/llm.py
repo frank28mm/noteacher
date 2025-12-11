@@ -24,13 +24,13 @@ from tenacity import (
 )
 from functools import partial
 
-from core.prompts import (
+from homework_agent.core.prompts import (
     MATH_GRADER_SYSTEM_PROMPT,
     ENGLISH_GRADER_SYSTEM_PROMPT,
     SOCRATIC_TUTOR_SYSTEM_PROMPT,
 )
-from models.schemas import Subject, SimilarityMode, Severity
-from utils.settings import get_settings
+from homework_agent.models.schemas import Subject, SimilarityMode, Severity
+from homework_agent.utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 

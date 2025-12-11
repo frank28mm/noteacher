@@ -9,15 +9,15 @@ from fastapi.responses import StreamingResponse
 from typing import AsyncIterator, Dict, Any, Optional, List, Tuple, Iterable
 import re
 
-from models.schemas import (
+from homework_agent.models.schemas import (
     GradeRequest, GradeResponse, ChatRequest, ChatResponse,
     VisionProvider, Message, Subject, SimilarityMode
 )
-from services.vision import VisionClient
-from services.llm import LLMClient, MathGradingResult, EnglishGradingResult
-from utils.settings import get_settings
-from utils.cache import get_cache_store, BaseCache
-from models.schemas import Severity, GeometryInfo
+from homework_agent.services.vision import VisionClient
+from homework_agent.services.llm import LLMClient, MathGradingResult, EnglishGradingResult
+from homework_agent.utils.settings import get_settings
+from homework_agent.utils.cache import get_cache_store, BaseCache
+from homework_agent.models.schemas import Severity, GeometryInfo
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +246,11 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
     try:
         vision_result = vision_client.analyze(
             images=req.images,
-            prompt="请识别并提取作业内容，包括题目、答案和解题步骤",
+            prompt=(
+                "请识别并提取作业内容，包括题目、答案和解题步骤。"
+                "对含幂/分式/下标的公式请双写：先按原式抄写（含上下标、分式），再给出纯文本展开形式（如 10^(n+1)、(a-b)^2/(c+d)）。"
+                "特别自检指数/分母的 +1、±、平方/立方等细节，如有疑似误读，直接在结果中标注“可能误读公式：…”。"
+            ),
             provider=req.vision_provider,
         )
     except Exception as e:
