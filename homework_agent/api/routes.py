@@ -247,7 +247,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         vision_result = vision_client.analyze(
             images=req.images,
             prompt=(
-                "请识别并提取作业内容，包括题目、答案和解题步骤。"
+                "请识别并提取作业内容，包括题目、答案和解题步骤。逐题输出“学生作答状态”：若看到答案/勾选则写明，若未看到答案/空白/未勾选，明确标注“未作答”或“可能未作答”。"
                 "对含幂/分式/下标的公式请双写：先按原式抄写（含上下标、分式），再给出纯文本展开形式（如 10^(n+1)、(a-b)^2/(c+d)）。"
                 "特别自检指数/分母的 +1、±、平方/立方等细节，如有疑似误读，直接在结果中标注“可能误读公式：…”。"
             ),

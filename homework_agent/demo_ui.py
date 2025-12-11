@@ -56,7 +56,9 @@ def format_grading_result(result: Dict[str, Any]) -> str:
     if wrong_items:
         md += "### ❌ 错题列表\n"
         for idx, item in enumerate(wrong_items, 1):
-            md += f"**{idx}.** {item.get('question_content', 'N/A')}\n"
+            qnum = item.get("question_number") or item.get("question_index") or idx
+            qtext = item.get('question_content') or item.get('question') or 'N/A'
+            md += f"**题 {qnum}** {qtext}\n"
             md += f"- 错误原因: {item.get('reason', 'N/A')}\n"
             if item.get("analysis"):
                 md += f"- 分析: {item.get('analysis')}\n"
