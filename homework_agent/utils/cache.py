@@ -16,6 +16,26 @@ except ImportError:
     redis = None  # Redis optional
 
 
+def _json_default(obj: Any):
+    """Make cache payload JSON-serializable (best-effort)."""
+    try:
+        # Pydantic models
+        if hasattr(obj, "model_dump"):
+            return obj.model_dump()
+        if hasattr(obj, "dict"):
+            return obj.dict()
+    except Exception:
+        pass
+    # Datetime/date
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    # Common URL-ish / path-ish objects
+    try:
+        return str(obj)
+    except Exception:
+        return repr(obj)
+
+
 class BaseCache:
     def get(self, key: str) -> Optional[Any]:
         raise NotImplementedError
@@ -69,7 +89,7 @@ class RedisCache(BaseCache):
             return None
 
     def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
-        data = json.dumps(value)
+        data = json.dumps(value, ensure_ascii=False, default=_json_default)
         self.client.set(self._k(key), data, ex=ttl_seconds)
 
     def delete(self, key: str) -> None:
@@ -79,14 +99,21 @@ class RedisCache(BaseCache):
 def get_cache_store() -> BaseCache:
     redis_url = os.getenv("REDIS_URL")
     prefix = os.getenv("CACHE_PREFIX", "")
+    require_redis = os.getenv("REQUIRE_REDIS", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
     if redis_url and redis:
         try:
             cache = RedisCache(redis_url, prefix=prefix)
             cache.client.ping()  # Verify connection immediately
             return cache
         except Exception as e:
+            if require_redis:
+                raise RuntimeError(f"REQUIRE_REDIS=1 but Redis ping failed: {e}")
             logging.warning("Redis configured but unavailable (ping failed), falling back to in-memory cache: %s", e)
             return InMemoryCache()
     if redis_url and not redis:
+        if require_redis:
+            raise RuntimeError("REQUIRE_REDIS=1 but redis package not installed")
         logging.warning("REDIS_URL set but redis package not installed; using in-memory cache")
+    if require_redis and not redis_url:
+        raise RuntimeError("REQUIRE_REDIS=1 but REDIS_URL is not set")
     return InMemoryCache()

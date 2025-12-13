@@ -41,11 +41,13 @@
 ```typescript
 {
   "page_image_url": "https://cdn.example.com/page1.jpg",
-  "slice_image_url": "https://cdn.example.com/slice123.jpg",
-  "page_bbox": {"coords": [0.2, 0.3, 0.5, 0.8]},
-  "review_slice_bbox": {"coords": [0.2, 0.3, 0.4, 0.5]},
+  "slice_image_url": "https://cdn.example.com/slice123.jpg",  // 可选：整题切片
+  "page_bbox": {"coords": [0.2, 0.3, 0.5, 0.8]},             // 可选：整题区域 bbox（MVP 允许偏大）
+  "review_slice_bbox": {"coords": [0.2, 0.3, 0.4, 0.5]},      // 可选：题干+作答组合切片 bbox（后续可用）
+  "question_bboxes": [{"coords": [0.2, 0.3, 0.5, 0.8]}],       // 可选：多 bbox（题干/作答分离时）
   "reason": "计算步骤错误：第2步中3×4应为12而非13",
   "standard_answer": "正确答案：45",
+  "question_number": "27",  // 题号（字符串，例：\"27\" / \"28(1)②\"）
   "knowledge_tags": ["数学", "几何", "三角形"],
   "cross_subject_flag": false,
   "math_steps": [
@@ -114,7 +116,7 @@ X-Request-Id: req-123456
 - `session_id` (推荐): 会话/批次 ID，24h 生命周期，便于上下文续接
 - `mode` (可选): "normal"(~0.85) | "strict"(~0.91，自动提炼关键术语)，默认 "normal"
 - 幂等键使用 Header `X-Idempotency-Key`，Body 不支持。
-- `vision_provider` (可选): 用户可选视觉模型，限定值 `"qwen3"`(SiliconFlow Qwen/Qwen3-VL-32B-Thinking) | `"doubao"`(Ark doubao-seed-1-6-vision-250815)；未指定默认 `"qwen3"`。不对外提供 OpenAI 视觉选项。
+- `vision_provider` (可选): 用户可选视觉模型，限定值 `"doubao"`(Ark doubao-seed-1-6-vision-250815) | `"qwen3"`(SiliconFlow Qwen/Qwen3-VL-32B-Thinking)；未指定默认 `"doubao"`。不对外提供 OpenAI 视觉选项。
 
 #### 响应体 (GradeResponse) - 同步模式
 ```json
@@ -277,15 +279,14 @@ data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"
    }
    ```
 
-4. `done`: 会话结束标记
+4. `done`: 会话结束标记（无硬性轮次上限）
    ```json
    {
      "session_id": "sess-abc123",
-     "interaction_count": 2,  // 当前轮次
-     "status": "continue|limit_reached|explained",  // 继续|次数已达上限(5轮)|已给解析
-     "follow_up": "需要我解释完整解题过程吗？"
+     "status": "continue|explained|error"  // 继续对话|模型认为已充分解释|异常结束
    }
    ```
+   > 说明：当前服务端不强制轮数封顶；`status` 通常为 `continue`（可继续提问），异常时为 `error`。`explained` 为保留语义位，便于未来扩展。
 
 5. `error`: 错误事件
    ```json
@@ -597,8 +598,8 @@ fetch('/v1/chat', {
 - **混合内容**: 英语题含简单算式
 
 ### B.3 聊天测试用例
-- **正常引导**: 5轮内成功提示
-- **终止机制**: 5轮后给解析
+- **多轮引导**: 无硬上限的递进提示循环
+- **自然终止**: 用户结束或模型认为已解释充分，不以轮数封顶
 - **会话续接**: 断线重连恢复上下文
 
 ---

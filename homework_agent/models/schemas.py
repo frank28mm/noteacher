@@ -115,6 +115,25 @@ class WrongItem(BaseModel):
     # Core Feedback
     reason: str = Field(..., description="Explanation of why it is wrong")
     standard_answer: Optional[str] = Field(None, description="The correct answer (not always shown to student)")
+    question_number: Optional[str] = Field(
+        None,
+        description="Original question number as on the paper (e.g., '27' or '15(2)')",
+    )
+    question_content: Optional[str] = Field(
+        None, description="Short question stem/content (for UI display and routing)"
+    )
+    student_answer: Optional[str] = Field(
+        None, description="Student answer (for UI display; chat will not directly reveal standard answers)"
+    )
+    warnings: List[str] = Field(default_factory=list, description="Per-item warnings (e.g., OCR ambiguity)")
+
+    @field_validator("question_number", mode="before")
+    @classmethod
+    def _coerce_question_number(cls, v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
     
     # Categorization
     knowledge_tags: List[str] = Field(default_factory=list, description="L2/L3 knowledge points, e.g., ['Math', 'Geometry', 'Triangle']")
@@ -145,8 +164,8 @@ class GradeRequest(BaseModel):
     batch_id: Optional[str] = Field(None, description="Client-side batch identifier")
     session_id: Optional[str] = Field(None, description="Session identifier for the batch")
     vision_provider: VisionProvider = Field(
-        VisionProvider.QWEN3,
-        description="Vision provider selection, default qwen3; doubao is optional (URL-only)",
+        VisionProvider.DOUBAO,
+        description="Vision provider selection, default doubao (URL-only); qwen3 is optional fallback (URL or base64)",
     )
     mode: Optional[SimilarityMode] = Field(
         None, description="normal/strict (applies to English grading)"
@@ -180,6 +199,10 @@ class ChatRequest(BaseModel):
     subject: Subject
     session_id: Optional[str] = Field(None, description="Session identifier for context continuation")
     mode: Optional[SimilarityMode] = Field(None, description="normal/strict, aligns with grading mode")
+    llm_model: Optional[str] = Field(
+        None,
+        description="Optional LLM reasoning model override for chat (debug/demo only).",
+    )
     # Context from previous grading
     context_item_ids: Optional[List[str | int]] = Field(
         None,

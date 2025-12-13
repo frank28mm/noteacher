@@ -68,9 +68,14 @@ class VisionClient:
         self.ark_api_key = settings.ark_api_key
         self.ark_base_url = settings.ark_base_url
         self.ark_model = settings.ark_vision_model
+        # Ensure lower-level client timeout is never smaller than grade vision budget
+        self.timeout_seconds = max(
+            int(settings.vision_client_timeout_seconds),
+            int(settings.grade_vision_timeout_seconds),
+        )
 
     def _build_openai_client(self, base_url: str, api_key: str) -> OpenAI:
-        return OpenAI(base_url=base_url, api_key=api_key, timeout=300.0)
+        return OpenAI(base_url=base_url, api_key=api_key, timeout=float(self.timeout_seconds))
 
     def _strip_base64_prefix(self, data: str) -> str:
         return re.sub(r"^data:image/[^;]+;base64,", "", data, flags=re.IGNORECASE)
@@ -124,7 +129,7 @@ class VisionClient:
         self,
         images: List[ImageRef],
         prompt: Optional[str] = None,
-        provider: VisionProvider = VisionProvider.QWEN3,
+        provider: VisionProvider = VisionProvider.DOUBAO,
     ) -> VisionResult:
         """Call selected vision provider and return text output + raw response.
 

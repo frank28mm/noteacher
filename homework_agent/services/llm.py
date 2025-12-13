@@ -10,8 +10,9 @@ LLM Client - 文本推理客户端
 
 import json
 import logging
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Iterable
 from pydantic import BaseModel, Field
+from pydantic.config import ConfigDict
 
 from openai import OpenAI, APIConnectionError, APITimeoutError
 import httpx
@@ -23,6 +24,7 @@ from tenacity import (
     before_sleep_log,
 )
 from functools import partial
+from fastapi.encoders import jsonable_encoder
 
 from homework_agent.core.prompts import (
     MATH_GRADER_SYSTEM_PROMPT,
@@ -68,7 +70,9 @@ class LLMResult(BaseModel):
 
 class MathGradingResult(BaseModel):
     """数学批改结果"""
+    model_config = ConfigDict(extra="ignore")
     wrong_items: List[Dict[str, Any]] = Field(default_factory=list, description="错误项列表")
+    questions: List[Dict[str, Any]] = Field(default_factory=list, description="全题列表（用于按题号检索对话）")
     summary: str = Field(..., description="总体摘要")
     subject: Subject = Subject.MATH
     total_items: Optional[int] = Field(None, description="检测到的题目总数")
@@ -79,7 +83,9 @@ class MathGradingResult(BaseModel):
 
 class EnglishGradingResult(BaseModel):
     """英语批改结果"""
+    model_config = ConfigDict(extra="ignore")
     wrong_items: List[Dict[str, Any]] = Field(default_factory=list, description="错误项列表")
+    questions: List[Dict[str, Any]] = Field(default_factory=list, description="全题列表（用于按题号检索对话）")
     summary: str = Field(..., description="总体摘要")
     subject: Subject = Subject.ENGLISH
     total_items: Optional[int] = Field(None, description="检测到的题目总数")
@@ -117,8 +123,14 @@ class LLMClient:
         # Ark配置 (doubao)
         self.ark_api_key = settings.ark_api_key
         self.ark_base_url = settings.ark_base_url
-        # Doubao 文本模型（可通过环境变量 model_reasoning 覆盖）
-        self.ark_model = settings.model_reasoning
+        # Doubao 文本模型（Ark）
+        self.ark_model = settings.ark_reasoning_model
+        self.ark_model_thinking = settings.ark_reasoning_model_thinking
+        # Ensure lower-level client timeout is never smaller than grade LLM budget
+        self.timeout_seconds = max(
+            int(settings.llm_client_timeout_seconds),
+            int(settings.grade_llm_timeout_seconds),
+        )
 
     def _normalize_math_wrong_items(self, wrong_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """将 math_steps 中非白名单的 severity 归一化，避免后续 Pydantic 校验报错。"""
@@ -151,11 +163,19 @@ class LLMClient:
         if provider == "silicon":
             if not self.silicon_api_key:
                 raise ValueError("SILICON_API_KEY not configured")
-            return OpenAI(base_url=self.silicon_base_url, api_key=self.silicon_api_key, timeout=300.0)
+            return OpenAI(
+                base_url=self.silicon_base_url,
+                api_key=self.silicon_api_key,
+                timeout=float(self.timeout_seconds),
+            )
         elif provider == "ark":
             if not self.ark_api_key:
                 raise ValueError("ARK_API_KEY not configured")
-            return OpenAI(base_url=self.ark_base_url, api_key=self.ark_api_key, timeout=120.0)
+            return OpenAI(
+                base_url=self.ark_base_url,
+                api_key=self.ark_api_key,
+                timeout=float(self.timeout_seconds),
+            )
         elif provider == "openai":
             if not self.openai_api_key:
                 raise ValueError("OPENAI_API_KEY not configured")
@@ -207,15 +227,47 @@ class LLMClient:
                 model=model,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=2000,
+                # Full-question `questions[]` can be long; too-low max_tokens frequently truncates JSON.
+                max_tokens=4096,
                 response_format={"type": "json_object"},
             )
 
             content = response.choices[0].message.content
             try:
                 result_data = json.loads(content)
+                # Output contract hardening:
+                # - Do not keep `standard_answer` (avoid leakage + reduce payload).
+                # - Keep only the first non-correct step for incorrect/uncertain; omit steps for correct.
+                questions = result_data.get("questions")
+                if isinstance(questions, list):
+                    for q in questions:
+                        if not isinstance(q, dict):
+                            continue
+                        q.pop("standard_answer", None)
+                        verdict = (q.get("verdict") or "").strip().lower()
+                        steps = q.get("math_steps") or q.get("steps")
+                        if verdict == "correct":
+                            q.pop("math_steps", None)
+                            q.pop("steps", None)
+                        else:
+                            if isinstance(steps, list) and steps:
+                                first_bad = None
+                                for s in steps:
+                                    if isinstance(s, dict) and (s.get("verdict") or "").strip().lower() != "correct":
+                                        first_bad = s
+                                        break
+                                first_bad = first_bad or steps[0]
+                                if isinstance(first_bad, dict):
+                                    q["math_steps"] = [first_bad]
+                            else:
+                                q.pop("math_steps", None)
+                                q.pop("steps", None)
+
                 if "wrong_items" in result_data:
                     result_data["wrong_items"] = self._normalize_math_wrong_items(result_data.get("wrong_items"))
+                    for it in result_data["wrong_items"] or []:
+                        if isinstance(it, dict):
+                            it.pop("standard_answer", None)
                 return MathGradingResult(**result_data)
             except Exception as parse_err:
                 logger.error(f"Math grading parse failed: {parse_err}; raw content: {content}")
@@ -288,7 +340,7 @@ class LLMClient:
                 model=model,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=2000,
+                max_tokens=4096,
                 response_format={"type": "json_object"},
             )
 
@@ -330,6 +382,8 @@ class LLMClient:
         session_id: Optional[str] = None,
         interaction_count: int = 0,
         provider: str = "silicon",
+        model_override: Optional[str] = None,
+        history: Optional[List[Dict[str, Any]]] = None,
     ) -> SocraticTutorResult:
         """
         苏格拉底式辅导
@@ -346,52 +400,67 @@ class LLMClient:
         """
         client = self._get_client(provider)
 
-        # 递进提示策略，根据交互次数构造引导语
-        turn = min(interaction_count, 4)
+        # 递进提示策略，根据交互次数构造引导语（无硬性最后一轮）
+        turn = interaction_count % 3
         if turn == 0:
             strategy = "轻提示：肯定已正确部分，指出第一个疑点，不给答案。"
         elif turn == 1:
             strategy = "方向提示：指向相关公式/概念/检查点，不给答案。"
-        elif turn == 2:
-            strategy = "重提示：指出错误类型或可能位置，不给结果。"
-        elif turn == 3:
-            strategy = "引导验证：引导逐步验证关键步骤，仍不直接给答案。"
         else:
-            strategy = "最后一轮：如仍未解决，提供完整解析。"
+            strategy = "重提示：指出错误类型或可能位置，但仍不直接给答案。"
 
-        context_text = ""
+        # Build a normal chat transcript so the model can follow the user's flow.
+        meta = {
+            "session_id": session_id or "N/A",
+            "interaction_count": interaction_count,
+            "strategy": strategy,
+        }
+        messages = [{"role": "system", "content": SOCRATIC_TUTOR_SYSTEM_PROMPT}]
         if wrong_item_context:
-            context_text = f"\n\n错误上下文: {json.dumps(wrong_item_context, ensure_ascii=False)}"
-
-        messages = [
-            {"role": "system", "content": SOCRATIC_TUTOR_SYSTEM_PROMPT},
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "本次作业辅导上下文（仅供参考，勿编造；若存在歧义/误读提示，请优先向学生确认）：\n"
+                    + json.dumps(jsonable_encoder(wrong_item_context), ensure_ascii=False),
+                }
+            )
+        messages.append(
             {
-                "role": "user",
-                "content": f"""学生问题: {question}{context_text}
+                "role": "system",
+                "content": "会话元信息（勿原样复述给学生）：\n"
+                + json.dumps(meta, ensure_ascii=False),
+            }
+        )
 
-当前交互次数: {interaction_count}/5
-会话ID: {session_id or 'N/A'}
-引导策略: {strategy}
+        # Include a short tail of history so the model can react naturally (e.g., user corrections).
+        if history:
+            tail = history[-12:]
+            for m in tail:
+                role = (m.get("role") if isinstance(m, dict) else None) or None
+                content = (m.get("content") if isinstance(m, dict) else None) or ""
+                if role not in {"user", "assistant"}:
+                    continue
+                messages.append({"role": role, "content": str(content)})
 
-请按策略提供引导式辅导，若为最后一轮可给出解析。""",
-            },
-        ]
+        # Ensure the current user question is included as the last message.
+        if not messages or messages[-1]["role"] != "user" or messages[-1]["content"] != str(question):
+            messages.append({"role": "user", "content": str(question)})
 
         try:
-            model = self.silicon_model if provider == "silicon" else self.ark_model
+            if model_override:
+                model = model_override
+            else:
+                model = self.silicon_model if provider == "silicon" else self.ark_model
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                temperature=0.7,
-                max_tokens=2000,
+                temperature=0.4,
+                max_tokens=800,
             )
 
             content = response.choices[0].message.content
 
-            # 判断状态：第 5 轮（interaction_count>=4）可给解析，标记 explained
             status = "continue"
-            if interaction_count >= 4:
-                status = "explained"
 
             return SocraticTutorResult(
                 messages=[{"role": "assistant", "content": content}],
@@ -410,6 +479,83 @@ class LLMClient:
                 status="error",
                 interaction_count=interaction_count,
             )
+
+    def socratic_tutor_stream(
+        self,
+        *,
+        question: str,
+        wrong_item_context: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+        interaction_count: int = 0,
+        provider: str = "silicon",
+        model_override: Optional[str] = None,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Iterable[str]:
+        """
+        Stream 苏格拉底式辅导输出（同步生成器，供 SSE 透传）。
+        - 仅产出文本增量，不返回结构化 status/interaction_count（调用方自行更新会话状态）。
+        """
+        client = self._get_client(provider)
+
+        turn = interaction_count % 3
+        if turn == 0:
+            strategy = "轻提示：肯定已正确部分，指出第一个疑点，不给答案。"
+        elif turn == 1:
+            strategy = "方向提示：指向相关公式/概念/检查点，不给答案。"
+        else:
+            strategy = "重提示：指出错误类型或可能位置，但仍不直接给答案。"
+
+        meta = {
+            "session_id": session_id or "N/A",
+            "interaction_count": interaction_count,
+            "strategy": strategy,
+        }
+        messages: List[Dict[str, str]] = [{"role": "system", "content": SOCRATIC_TUTOR_SYSTEM_PROMPT}]
+        if wrong_item_context:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "本次作业辅导上下文（仅供参考，勿编造；若存在歧义/误读提示，请优先向学生确认）：\n"
+                    + json.dumps(jsonable_encoder(wrong_item_context), ensure_ascii=False),
+                }
+            )
+        messages.append(
+            {
+                "role": "system",
+                "content": "会话元信息（勿原样复述给学生）：\n"
+                + json.dumps(meta, ensure_ascii=False),
+            }
+        )
+
+        if history:
+            tail = history[-12:]
+            for m in tail:
+                role = (m.get("role") if isinstance(m, dict) else None) or None
+                content = (m.get("content") if isinstance(m, dict) else None) or ""
+                if role not in {"user", "assistant"}:
+                    continue
+                messages.append({"role": role, "content": str(content)})
+
+        if not messages or messages[-1]["role"] != "user" or messages[-1]["content"] != str(question):
+            messages.append({"role": "user", "content": str(question)})
+
+        model = model_override or (self.silicon_model if provider == "silicon" else self.ark_model)
+        stream = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.4,
+            max_tokens=800,
+            stream=True,
+        )
+        for event in stream:
+            try:
+                choice = (getattr(event, "choices", None) or [None])[0]
+                delta = getattr(choice, "delta", None)
+                text = getattr(delta, "content", None)
+                if text:
+                    yield text
+            except Exception:
+                continue
 
     @retry(
         retry=retry_if_exception_type(

@@ -3,15 +3,19 @@
 """
 import os
 import uuid
+import json
 import mimetypes
+import asyncio
+import time
 import httpx
 import gradio as gr
 from dotenv import load_dotenv
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple
 from homework_agent.models.schemas import Subject, VisionProvider, WrongItem, Message, ImageRef
 from homework_agent.utils.supabase_client import get_storage_client
 from homework_agent.services.vision import VisionClient
+from homework_agent.utils.settings import get_settings
 
 
 # 加载环境变量 - 使用脚本所在目录的父目录（项目根目录）
@@ -21,6 +25,10 @@ load_dotenv(_project_root / ".env")
 
 # API 基础 URL - 从环境变量读取，默认为本地
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000/api/v1")
+_settings = get_settings()
+DEMO_GRADE_TIMEOUT_SECONDS = float(
+    os.getenv("DEMO_GRADE_TIMEOUT_SECONDS", str(_settings.grade_completion_sla_seconds + 60))
+)
 
 
 def upload_to_supabase(file_path: str, min_side: int) -> List[str]:
@@ -49,14 +57,27 @@ def format_grading_result(result: Dict[str, Any]) -> str:
     md += f"- **状态 (Status)**: {result.get('status', 'N/A')}\n"
     md += f"- **Session ID**: `{result.get('session_id', 'N/A')}`\n"
     md += f"- **摘要 (Summary)**: {result.get('summary', 'N/A')}\n"
-    md += f"- **错题数 (Wrong Count)**: {result.get('wrong_count', 'N/A')}\n"
+    wrong_count = result.get("wrong_count")
+    wrong_items = result.get("wrong_items") or []
+    if wrong_count is None and isinstance(wrong_items, list):
+        wrong_count = len(wrong_items)
+    md += f"- **错题数 (Wrong Count)**: {wrong_count if wrong_count is not None else 'N/A'}\n"
     md += "\n"
 
-    wrong_items = result.get('wrong_items', [])
+    status = result.get("status")
+    if status and status != "done":
+        md += "### ❌ 批改失败\n"
+        if result.get("warnings"):
+            md += "原因（warnings）：\n"
+            for w in result.get("warnings") or []:
+                md += f"- {w}\n"
+        md += "\n"
+        # 仍然继续展示 vision_raw_text 以便核对
+
     if wrong_items:
         md += "### ❌ 错题列表\n"
-        for idx, item in enumerate(wrong_items, 1):
-            qnum = item.get("question_number") or item.get("question_index") or idx
+        for item in wrong_items:
+            qnum = item.get("question_number") or item.get("question_index") or "N/A"
             qtext = item.get('question_content') or item.get('question') or 'N/A'
             md += f"**题 {qnum}** {qtext}\n"
             md += f"- 错误原因: {item.get('reason', 'N/A')}\n"
@@ -67,7 +88,10 @@ def format_grading_result(result: Dict[str, Any]) -> str:
                 md += f"- 位置 (BBox): `{bbox}`\n"
             md += "\n"
     else:
-        md += "### ✅ 全对 (All Correct!)\n太棒了！没有发现错误。\n"
+        if status == "done":
+            md += "### ✅ 全对 (All Correct!)\n太棒了！没有发现错误。\n"
+        else:
+            md += "### ⚠️ 未生成错题列表\n批改未完成（LLM 超时/解析失败等），因此无法给出错题判定。\n"
 
     if result.get('warnings'):
         md += "\n### ⚠️ 警告\n"
@@ -84,8 +108,6 @@ def format_grading_result(result: Dict[str, Any]) -> str:
 
     return md
 
-    return md
-
 
 async def call_grade_api(image_urls: List[str], subject: str, provider: str) -> Dict[str, Any]:
     """调用后端 /api/v1/grade API"""
@@ -98,7 +120,8 @@ async def call_grade_api(image_urls: List[str], subject: str, provider: str) -> 
         "vision_provider": provider
     }
 
-    async with httpx.AsyncClient(timeout=300.0) as client:
+    # Demo 端的 HTTP timeout 必须 ≥ 后端 grade 的 SLA，否则前端会“系统报错”但后端仍在跑。
+    async with httpx.AsyncClient(timeout=DEMO_GRADE_TIMEOUT_SECONDS) as client:
         response = await client.post(
             f"{API_BASE_URL}/grade",
             json=payload
@@ -110,8 +133,13 @@ async def call_grade_api(image_urls: List[str], subject: str, provider: str) -> 
     return response.json()
 
 
-async def call_chat_api(question: str, session_id: str, subject: str,
-                       context_item_ids: Optional[List[str]] = None) -> str:
+async def call_chat_api(
+    question: str,
+    session_id: str,
+    subject: str,
+    context_item_ids: Optional[List[str]] = None,
+    llm_model: Optional[str] = None,
+) -> str:
     """调用后端 /api/v1/chat API
 
     Args:
@@ -128,7 +156,8 @@ async def call_chat_api(question: str, session_id: str, subject: str,
         "question": question,
         "subject": subject,
         "session_id": session_id,
-        "context_item_ids": context_item_ids or []
+        "context_item_ids": context_item_ids or [],
+        "llm_model": llm_model,
     }
 
     async with httpx.AsyncClient(timeout=120.0) as client:
@@ -196,21 +225,17 @@ async def grade_homework_logic(img_path, subject, provider):
         formatted_md = format_grading_result(result)
         session_id = result.get('session_id')
 
-        # Step 4: 准备错题选项
-        wrong_items = result.get('wrong_items', [])
-        options = [f"{i}:{item.get('reason', 'N/A')[:30]}" for i, item in enumerate(wrong_items)]
-
         status_lines.append("✅ 批改完成！")
         status_md = "\n".join(status_lines)
-        return formatted_md, session_id, options, image_urls[0], status_md
+        return formatted_md, session_id, image_urls[0], status_md
 
     except ValueError as e:
-        return f"**错误**：{str(e)}", None, [], None, f"❌ 失败：{e}"
+        return f"**错误**：{str(e)}", None, None, f"❌ 失败：{e}"
     except Exception as e:
         err_msg = str(e)
         if "20040" in err_msg:
             err_msg += "\n\n提示：模型无法下载该 URL，建议检查图片是否可公开访问"
-        return f"**系统错误**：{err_msg}", None, [], None, f"❌ 失败：{err_msg}"
+        return f"**系统错误**：{err_msg}", None, None, f"❌ 失败：{err_msg}"
 
 
 async def vision_debug_logic(img_path, provider):
@@ -252,43 +277,96 @@ async def vision_debug_logic(img_path, provider):
         return f"**系统错误**：{e}", ""
 
 
-async def tutor_chat_logic(message, history, session_id, selected_items, subject):
-    """苏格拉底辅导逻辑"""
+async def tutor_chat_logic(
+    message: str,
+    history: List[Dict[str, str]],
+    session_id: str,
+    subject: str,
+) -> AsyncGenerator[Tuple[str, List[Dict[str, str]]], None]:
+    """苏格拉底辅导逻辑（真实流式：后端 SSE 透传）"""
     history = history or []
-    if not session_id:
-        response = "请先在【智能批改】标签页完成批改，我需要基于错题来辅导。"
-        history.append([message, response])
-        return "", history
 
-    if len(history) >= 5:
-        history.append([message, "已达到 5 轮上限，建议重新开始。"])
-        return "", history
+    # 只允许批改后对话
+    if not session_id:
+        history.append({"role": "assistant", "content": "请先在【智能批改】标签页完成批改，我需要基于错题来辅导。"})
+        yield "", history
+        return
+
+    # 先把用户消息显示出来
+    history.append({"role": "user", "content": message})
+    yield "", history
+
+    # 插入“思考中...”占位，并在收到首条 chat 更新后替换为真实输出
+    assistant_msg = {"role": "assistant", "content": "思考中... (0s)"}
+    history.append(assistant_msg)
+    yield "", history
+
+    payload = {
+        "history": [],
+        "question": message,
+        "subject": subject,
+        "session_id": session_id,
+        "context_item_ids": [],
+        "llm_model": None,
+    }
+
+    start = time.monotonic()
+    current_event = ""
+    last_rendered = ""
 
     try:
-        # 解析选中的错题索引
-        context_item_ids = []
-        if selected_items:
-            for s in selected_items:
-                try:
-                    idx = int(s.split(":", 1)[0])
-                    context_item_ids.append(idx)
-                except:
-                    pass
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("POST", f"{API_BASE_URL}/chat", json=payload) as resp:
+                if resp.status_code != 200:
+                    body = (await resp.aread()).decode("utf-8", errors="ignore")
+                    raise Exception(f"API 调用失败: {resp.status_code} - {body}")
 
-        gr.Info("🤔 正在思考...")
-        assistant_msg = await call_chat_api(
-            question=message,
-            session_id=session_id,
-            subject=subject,
-            context_item_ids=context_item_ids
-        )
+                async for line in resp.aiter_lines():
+                    if line.startswith("event:"):
+                        current_event = line[6:].strip()
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data:
+                        continue
 
-        history.append([message, assistant_msg])
-        return "", history
+                    # Update thinking clock on heartbeat
+                    if current_event == "heartbeat":
+                        elapsed = int(time.monotonic() - start)
+                        if assistant_msg["content"].startswith("思考中"):
+                            assistant_msg["content"] = f"思考中... ({elapsed}s)"
+                            yield "", history
+                        continue
+
+                    if current_event == "error":
+                        raise Exception(data)
+
+                    if current_event == "chat":
+                        try:
+                            obj = json.loads(data)
+                        except Exception:
+                            continue
+                        msgs = obj.get("messages") or []
+                        # Find latest assistant message content
+                        latest = ""
+                        for m in reversed(msgs):
+                            if m.get("role") == "assistant":
+                                latest = m.get("content") or ""
+                                break
+                        if latest and latest != last_rendered:
+                            assistant_msg["content"] = latest
+                            last_rendered = latest
+                            yield "", history
+                        continue
+
+                    if current_event == "done":
+                        break
 
     except Exception as e:
-        history.append([message, f"系统错误：{str(e)}"])
-        return "", history
+        assistant_msg["content"] = f"系统错误：{str(e)}"
+        yield "", history
+        return
 
 
 def create_demo():
@@ -309,7 +387,7 @@ def create_demo():
         - ⚠️ 文件大小：≤ 20MB
         - 📐 尺寸：Qwen3 最小边 ≥28px，Doubao 最小边 ≥14px
         - 🌍 URL 要求：必须是公网可访问 (禁止 localhost/内网)
-        - 🤖 模型选择：Qwen3 (支持 URL+base64) / Doubao (仅 URL)
+        - 🤖 模型选择：Doubao（默认，仅 URL） / Qwen3（备用，支持 URL+base64）
         """)
 
         with gr.Tabs():
@@ -328,9 +406,9 @@ def create_demo():
                             label="📚 学科 (Subject)"
                         )
                         provider_dropdown = gr.Dropdown(
-                            choices=["qwen3", "doubao"],
-                            value="qwen3",
-                            label="🤖 模型 (Provider)"
+                            choices=["doubao", "qwen3"],
+                            value="doubao",
+                            label="🤖 视觉模型 (Provider)"
                         )
                         grade_btn = gr.Button("🚀 开始批改", variant="primary")
 
@@ -338,51 +416,39 @@ def create_demo():
                         status_md = gr.Markdown(label="状态")
                         output_md = gr.Markdown(label="📊 批改结果")
                         session_id_state = gr.State()
-                        wrong_item_options = gr.State()
                         image_url_state = gr.State()
 
                 grade_btn.click(
                     fn=grade_homework_logic,
                     inputs=[input_img, subject_dropdown, provider_dropdown],
-                    outputs=[output_md, session_id_state, wrong_item_options, image_url_state, status_md],
+                    outputs=[output_md, session_id_state, image_url_state, status_md],
                 )
 
             # ========== Tab 2: 苏格拉底辅导 ==========
             with gr.Tab("👩‍🏫 苏格拉底辅导"):
-                gr.Markdown("基于批改结果进行启发式辅导，最多 5 轮对话。")
+                gr.Markdown(
+                    "基于批改结果进行启发式辅导，默认不限轮对话（苏格拉底式引导，不直接给答案）。\n\n"
+                    "- 你可以直接说：`讲讲第23题` / `再讲讲19题` / `第2题有没有更简便的方法？`\n"
+                    "- 系统会尝试根据题号在本次 session 中定位对应题目（若定位不确定会回退为整页）。\n"
+                )
 
                 chatbot = gr.Chatbot(label="💬 辅导对话", height=400)
-                select_items = gr.CheckboxGroup(
-                    label="✅ 选择要讨论的错题",
-                    choices=[]
-                )
                 msg = gr.Textbox(
                     label="💭 你的问题",
                     placeholder="这道题为什么错了？应该怎么思考？"
                 )
                 clear_btn = gr.Button("🗑️ 清除历史")
 
-                # 状态更新函数
-                def update_choices(opts):
-                    return gr.update(choices=opts)
-
-                # 当错题选项变化时，更新选择列表
-                wrong_item_options.change(
-                    fn=update_choices,
-                    inputs=wrong_item_options,
-                    outputs=select_items
-                )
-
                 # 发送消息
                 msg.submit(
                     fn=tutor_chat_logic,
-                    inputs=[msg, chatbot, session_id_state, select_items, subject_dropdown],
+                    inputs=[msg, chatbot, session_id_state, subject_dropdown],
                     outputs=[msg, chatbot],
                 )
 
                 # 清除历史
                 clear_btn.click(
-                    fn=lambda: ([], []),
+                    fn=lambda: ([], ""),
                     inputs=None,
                     outputs=[chatbot, msg],
                     queue=False
@@ -434,6 +500,7 @@ def create_demo():
 if __name__ == "__main__":
     # 设置环境变量
     os.environ["no_proxy"] = "localhost,127.0.0.1,0.0.0.0"
+    os.environ["GRADIO_API_INFO"] = "0"  # 禁用API信息获取以避免兼容性问题
 
     # 创建并启动 Demo
     demo = create_demo()

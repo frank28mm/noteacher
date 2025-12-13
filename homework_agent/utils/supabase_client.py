@@ -187,6 +187,25 @@ class SupabaseStorageClient:
             raise Exception("上传结果为空")
         return urls[0]
 
+    def upload_bytes(
+        self,
+        file_content: bytes,
+        *,
+        mime_type: str = "image/jpeg",
+        suffix: str = ".jpg",
+        prefix: str = "slices/",
+    ) -> str:
+        """上传内存中的二进制内容（用于切片/裁剪图）并返回公网 URL"""
+        file_ext = suffix if suffix.startswith(".") else f".{suffix}"
+        unique_filename = f"{prefix}{uuid.uuid4().hex}{file_ext}"
+        self.client.storage.from_(self.bucket).upload(
+            path=unique_filename,
+            file=file_content,
+            file_options={"content-type": mime_type},
+        )
+        public_url = self.client.storage.from_(self.bucket).get_public_url(unique_filename)
+        return str(public_url).rstrip("?")
+
 
 def get_storage_client() -> SupabaseStorageClient:
     """获取 SupabaseStorageClient 实例 (单例模式)"""

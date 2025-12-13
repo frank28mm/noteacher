@@ -20,6 +20,67 @@ class Settings(BaseSettings):
     ark_api_key: str | None = Field(default=None, validation_alias="ARK_API_KEY")
     ark_base_url: str = Field(default="https://ark.cn-beijing.volces.com/api/v3", validation_alias="ARK_BASE_URL")
     ark_vision_model: str = Field(default="doubao-seed-1-6-vision-250815", validation_alias="ARK_VISION_MODEL")
+    # Ark/Doubao text reasoning models for chat/grading
+    ark_reasoning_model: str = Field(default="Doubao-Seed-1-6", validation_alias="ARK_REASONING_MODEL")
+    ark_reasoning_model_thinking: str = Field(
+        default="Doubao-Seed-1-6-thinking",
+        validation_alias="ARK_REASONING_MODEL_THINKING",
+    )
+
+    # Baidu PaddleOCR-VL (OCR + layout)
+    baidu_ocr_api_key: str | None = Field(default=None, validation_alias="BAIDU_OCR_API_KEY")
+    baidu_ocr_secret_key: str | None = Field(default=None, validation_alias="BAIDU_OCR_SECRET_KEY")
+    baidu_ocr_oauth_url: str = Field(
+        default="https://aip.baidubce.com/oauth/2.0/token",
+        validation_alias="BAIDU_OCR_OAUTH_URL",
+    )
+    baidu_ocr_submit_url: str = Field(
+        default="https://aip.baidubce.com/rest/2.0/brain/online/v2/paddle-vl-parser/task",
+        validation_alias="BAIDU_OCR_SUBMIT_URL",
+    )
+    baidu_ocr_query_url: str = Field(
+        default="https://aip.baidubce.com/rest/2.0/brain/online/v2/paddle-vl-parser/task/query",
+        validation_alias="BAIDU_OCR_QUERY_URL",
+    )
+    baidu_ocr_timeout_seconds: int = Field(default=60, validation_alias="BAIDU_OCR_TIMEOUT_SECONDS")
+    baidu_ocr_poll_interval_seconds: float = Field(
+        default=1.0, validation_alias="BAIDU_OCR_POLL_INTERVAL_SECONDS"
+    )
+    baidu_ocr_poll_max_seconds: int = Field(
+        default=60, validation_alias="BAIDU_OCR_POLL_MAX_SECONDS"
+    )
+
+    # Slice generation (BBox + Slice)
+    slice_padding_ratio: float = Field(default=0.05, validation_alias="SLICE_PADDING_RATIO")
+    slice_ttl_seconds: int = Field(default=24 * 3600, validation_alias="SLICE_TTL_SECONDS")
+
+    # SLA / Time budgets (seconds)
+    grade_completion_sla_seconds: int = Field(
+        # Completion SLA should cover both Vision and LLM budgets (+ margin).
+        default=600, validation_alias="GRADE_COMPLETION_SLA_SECONDS"
+    )
+    grade_vision_timeout_seconds: int = Field(
+        # Vision can be slow on some images; keep a safer default than 60s.
+        default=240, validation_alias="GRADE_VISION_TIMEOUT_SECONDS"
+    )
+    grade_llm_timeout_seconds: int = Field(
+        # Full-question grading JSON can be slow; keep a safer default.
+        default=300, validation_alias="GRADE_LLM_TIMEOUT_SECONDS"
+    )
+    vision_client_timeout_seconds: int = Field(
+        # Low-level client timeout should not undercut grade vision budget.
+        default=240, validation_alias="VISION_CLIENT_TIMEOUT_SECONDS"
+    )
+    llm_client_timeout_seconds: int = Field(
+        default=300, validation_alias="LLM_CLIENT_TIMEOUT_SECONDS"
+    )
+
+    # Concurrency limits (to avoid thread pile-ups)
+    max_concurrent_vision: int = Field(default=2, validation_alias="MAX_CONCURRENT_VISION")
+    max_concurrent_llm: int = Field(default=4, validation_alias="MAX_CONCURRENT_LLM")
+
+    # QIndex worker queue (Redis required)
+    qindex_queue_name: str = Field(default="qindex:queue", validation_alias="QINDEX_QUEUE_NAME")
 
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     allow_origins: list[str] = Field(default=["*"], validation_alias="ALLOW_ORIGINS")

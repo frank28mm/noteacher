@@ -22,8 +22,8 @@
 
 #### 1.0.1 核心架构
 - 后端框架：FastAPI 0.100+ (Python 3.10+)；HTTP 直连 LLM/Vision API（OpenAI/Anthropic），不使用 Claude Agent SDK、不依赖 .claude 目录。
-- AI 模型：默认 Qwen3（SiliconFlow）作为主力 LLM+Vision，doubao（Ark）作为备选/回退；不对外新增其他 LLM 选项。保留 OpenAI/Anthropic 作为内部备用，不向终端暴露。
-- 视觉/OCR：用户可选 `"qwen3"`(SiliconFlow Qwen/Qwen3-VL-32B-Thinking) 或 `"doubao"`(Ark doubao-seed-1-6-vision-250815)，默认 `"qwen3"`；不对外提供 OpenAI 视觉选项。备选 Azure Computer Vision；备用 Tesseract（本地）。
+- AI 模型（Reasoning/Chat）：Phase 1 `/grade` 与 `/chat` 当 provider=ark 时均使用 `ARK_REASONING_MODEL` 指定的 Doubao 模型（测试环境可指向 `doubao-seed-1-6-vision-250815`）；`ARK_REASONING_MODEL_THINKING` 不作为必需项。Qwen3 推理仅作为内部调试/备用，不对外暴露或新增其他 LLM 选项。保留 OpenAI/Anthropic 作为内部备用，不向终端暴露。
+- 视觉/OCR：用户可选 `"doubao"`(Ark doubao-seed-1-6-vision-250815) 或 `"qwen3"`(SiliconFlow Qwen/Qwen3-VL-32B-Thinking)，默认 `"doubao"`；不对外提供 OpenAI 视觉选项。`doubao` 仅支持公网 URL 输入；`qwen3` 支持 URL 或 Base64 兜底。备选 Azure Computer Vision；备用 Tesseract（本地）。
 - 数据存储：PostgreSQL (主存)、Redis (缓存/会话)。
 - 队列：Celery + Redis（异步任务，可先用内存占位）。
 - 部署：Docker；可选 K8s/云函数。
@@ -55,8 +55,10 @@ homework_agent/
 
 #### 1.0.5 存储与坐标
 - 坐标统一归一化 `[ymin, xmin, ymax, xmax]`，原点左上。
-- 输出字段：page_image_url/slice_image_url/page_bbox/review_slice_bbox 必填（若缺需说明），steps/geometry 可选 bbox。
-- 图像/切片存 OSS，7d TTL；Redis 缓存/会话 24h；PG 持久化错题/历史。
+- bbox/切片为可选增强能力：允许 `bbox=None` / `slice_image_url=None`，但必须在 `warnings` 说明“定位不确定，改用整页”。
+- bbox 对象（MVP）：整题区域（题干 + 学生作答）；允许多 bbox 列表（题干/作答分离时）。
+- 裁剪策略（MVP）：默认 5% padding；裁剪前 clamp 到 [0,1]；裁剪失败回退为整页。
+- 图像/切片存 Supabase Storage：切片 TTL 必须可配置（Demo 可 24h；生产建议 7d）；Redis 缓存/会话 24h；PG 持久化错题/历史（后续）。
 
 ### 1.1 核心流程图
 
@@ -76,13 +78,11 @@ graph TD
     K --> L[返回GradeResponse]
     L --> M{需要辅导？}
     M -->|否| N[结束]
-    M -->|是| O[启动Chat会话]
-    O --> P[苏格拉底辅导循环]
-    P --> Q{交互次数 < 5？}
+    M -->|是| O[启动Chat会话（已批改）]
+    O --> P[苏格拉底辅导循环（不限轮次，默认不直接给答案）]
+    P --> Q{继续？}
     Q -->|是| R[继续辅导]
-    R --> P
-    Q -->|否| S[提供完整解析]
-    S --> T[结束会话]
+    Q -->|否| S[结束会话/关闭引导]
 ```
 
 ### 1.2 输入/输出标准
@@ -132,32 +132,42 @@ graph TD
 - 超过限制 → 413 Payload Too Large
 - 幂等冲突 → 409 Conflict
 
-#### SOP-1.2: ChatRequest验证
-**触发**: POST /chat
+#### SOP-1.2: ChatRequest验证  
+**触发**: POST /chat  
 
-**检查清单**:
+**检查清单**:  
 ```python
 ✅ 验证字段完整性:
-  - history: 最多20条消息
+  - history: 最多20条消息，role/content 格式
   - question: 非空字符串
   - subject: math 或 english
-  - session_id: 必需，24小时有效
+  - session_id: 必需，来自已完成批改的批次（即便全对也允许辅导），24小时有效
 
 ✅ 会话状态检查:
-  - 检查session_id是否存在于活跃会话中
+  - 检查 session_id 是否存在于活跃会话中
   - 验证会话是否超时（>24小时）
-  - 记录当前交互次数（最多5次）
+  - 记录当前交互次数（默认不限轮；如需可在错题上下文场景下设置软性上限）
 
 ✅ 上下文关联:
-  - 验证context_item_ids是否存在于之前的批改结果中
-  - 加载错题详情作为辅导上下文
+  - 验证 context_item_ids 是否存在于之前的批改结果中
+  - 加载错题详情作为辅导上下文（若未提供，视为泛辅导但仍限数学/英语）
   - 仅读取当前批次上下文，不读取历史画像；长期画像仅写入不读取
 ```
 
 ### 2.2 阶段2：图像处理与内容识别
 
 #### SOP-2.1: OCR图像处理
-**工具**: 直接调用视觉模型 API（OpenAI/Anthropic），可选备用：Azure Computer Vision / Tesseract OCR（非 SDK）
+**工具（MVP 推荐）**: 传统 OCR + 版面分析（路线 3）
+
+- **首选**：百度文档解析 **PaddleOCR-VL**（云端 API）用于获取版面结构、文本块与坐标，用于题块聚类/题号定位与 bbox 生成。
+- **可选**：本地 PaddleOCR / RapidOCR（ONNXRuntime）作为离线替代/降级；或 Azure Computer Vision / Tesseract 作为备用。
+
+> 说明：本阶段的目标不是“读懂题”，而是产出可靠的文本框与版面结构，用于后续生成题目区域 bbox / 切片。
+
+**执行方式（重要）**：
+- OCR + 题块 bbox + 切片裁剪/上传属于重任务，**不得在 API 主进程内同步执行**。
+- `/grade` 完成后仅负责 **enqueue** 一个 qindex 任务到 Redis 队列（默认 `qindex:queue`）。
+- 独立 worker `python -m homework_agent.workers.qindex_worker` 负责消费队列，生成 bbox/slice 并写回 `qindex:{session_id}`。
 
 **处理步骤**:
 ```python
@@ -268,42 +278,16 @@ graph TD
   - 确保不直接给出答案
 ```
 
-#### SOP-4.2: 5轮辅导循环
+#### SOP-4.2: 苏格拉底辅导循环（默认不限轮，基于已批改 session）
 **调用prompt**: `SOCRATIC_TUTOR_SYSTEM_PROMPT`
 
-**轮次策略**:
+**策略要点**:
 ```python
-第1轮 (交互1):
-  ✅ 策略: 轻提示
-  ✅ 行为: 复述学生正确的部分，指出第一个疑点
-  ✅ 示例: "你第1步计算正确，能再检查一下第2步吗？"
-
-第2轮 (交互2):
-  ✅ 策略: 方向提示
-  ✅ 行为: 指向特定概念/公式/检查点
-  ✅ 示例: "回忆一下运算顺序，这里应该先算乘法"
-
-第3轮 (交互3):
-  ✅ 策略: 重提示
-  ✅ 行为: 指出错误类型（计算/概念/格式）
-  ✅ 示例: "你在第2步的乘法计算可能有误"
-
-第4轮 (交互4):
-  ✅ 策略: 引导验证
-  ✅ 行为: 引导学生逐步验证每步
-  ✅ 示例: "我们一起算一遍：3×4等于多少？"
-
-第5轮 (交互5):
-  ✅ 策略: 完整解析
-  ✅ 行为: 提供详细解答过程
-  ✅ 示例: "正确解法是...，你的错误在于..."
-```
-
-**状态管理**:
-```python
-- 每次交互后: interaction_count += 1
-- 状态标记: continue/limit_reached/explained
-- 超过5次: 自动提供完整解析并结束会话
+  - 仅在完成批改后使用（即便全对也可辅导），不做纯闲聊。
+  - 默认不限轮；如指定错题上下文，可按需要设置软性上限（提示递进），但不强制。
+  - 苏格拉底式引导：只给提示/反问/分步引导，不直接给答案；保持鼓励口吻。
+  - 提示递进示例（可按需要重复循环）：轻提示 -> 方向提示 -> 重提示/定位错误类型。若需给出完整解析，可通过 UI 触发，而非自动上限。
+  - 状态标记：continue/explained（不再使用 limit_reached 作为硬阈值）。
 ```
 
 > SSE 心跳/断线：心跳建议 30s；若 90s 内无数据可断开；客户端可用 last-event-id 续接。
@@ -328,8 +312,7 @@ graph TD
 
 **质量检查**:
 - wrong_count必须与wrong_items.length一致
-- 所有bbox必须在[0,1]范围内
-- page_bbox/review_slice_bbox 必须存在且归一化，若不可用需明确原因
+- 若提供 bbox（或 bbox 列表），必须归一化且在 [0,1] 范围内；不确定则留空并写 warnings
 - reason必须提供有用反馈
 - 必须包含至少一个knowledge_tag
 
