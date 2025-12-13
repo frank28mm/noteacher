@@ -544,7 +544,8 @@ class LLMClient:
             model=model,
             messages=messages,
             temperature=0.4,
-            max_tokens=800,
+            # Allow longer tutoring responses; UI streaming handles incremental rendering.
+            max_tokens=1600,
             stream=True,
         )
         for event in stream:

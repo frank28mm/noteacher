@@ -13,7 +13,7 @@ import re
 
 from homework_agent.models.schemas import (
     GradeRequest, GradeResponse, ChatRequest, ChatResponse,
-    VisionProvider, Message, Subject, SimilarityMode
+    VisionProvider, Message, Subject, SimilarityMode, ImageRef
 )
 from homework_agent.services.vision import VisionClient
 from homework_agent.services.ocr_baidu import BaiduPaddleOCRVLClient
@@ -60,6 +60,81 @@ MAX_SOCRATIC_TURNS = 999999
 SESSION_TTL_HOURS = 24
 IDP_TTL_HOURS = 24
 SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
+
+
+def _ensure_session_id(value: Optional[str]) -> str:
+    """Ensure we always have a stable session_id for grade→chat delivery."""
+    v = (value or "").strip()
+    if v:
+        return v
+    return f"session_{uuid.uuid4().hex[:8]}"
+
+
+def _count_questions_with_options(bank: Dict[str, Any]) -> int:
+    qs = bank.get("questions")
+    if not isinstance(qs, dict):
+        return 0
+    n = 0
+    for q in qs.values():
+        if isinstance(q, dict) and q.get("options"):
+            n += 1
+    return n
+
+
+def persist_question_bank(
+    *,
+    session_id: str,
+    bank: Dict[str, Any],
+    grade_status: str,
+    grade_summary: str,
+    grade_warnings: List[str],
+    timings_ms: Optional[Dict[str, int]] = None,
+) -> None:
+    """Persist the canonical qbank snapshot that /chat must rely on."""
+    if not session_id:
+        return
+    now = datetime.now().isoformat()
+    meta = bank.get("meta") if isinstance(bank.get("meta"), dict) else {}
+    meta.update(
+        {
+            "updated_at": now,
+            "grade_status": grade_status,
+            "grade_summary": grade_summary,
+            "warnings": grade_warnings or [],
+        }
+    )
+    if timings_ms:
+        meta["timings_ms"] = {str(k): int(v) for k, v in timings_ms.items() if v is not None}
+    # Derived stats for acceptance checks
+    try:
+        meta["vision_raw_len"] = int(len(bank.get("vision_raw_text") or ""))
+        meta["questions_count"] = int(len(bank.get("questions") or {})) if isinstance(bank.get("questions"), dict) else 0
+        meta["questions_with_options"] = int(_count_questions_with_options(bank))
+    except Exception:
+        pass
+    bank["meta"] = meta
+    save_question_bank(session_id, bank)
+    try:
+        logger.info(
+            "qbank_saved session_id=%s status=%s questions=%s options=%s vision_raw_len=%s timings_ms=%s",
+            session_id,
+            grade_status,
+            meta.get("questions_count"),
+            meta.get("questions_with_options"),
+            meta.get("vision_raw_len"),
+            meta.get("timings_ms"),
+        )
+    except Exception:
+        pass
+
+
+def _merge_bank_meta(bank: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(bank, dict):
+        return bank
+    meta = bank.get("meta") if isinstance(bank.get("meta"), dict) else {}
+    meta.update({k: v for k, v in (extra or {}).items() if v is not None})
+    bank["meta"] = meta
+    return bank
 
 
 def _now_ts() -> float:
@@ -271,6 +346,21 @@ def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
         # Keep geometry_check out of the qbank for now (future work).
         copy_q.pop("geometry_check", None)
+
+        # Normalize options (choice questions) to a compact dict[str, str] if present.
+        opts = copy_q.get("options")
+        if opts is None:
+            pass
+        elif isinstance(opts, dict):
+            clean_opts: Dict[str, str] = {}
+            for k, v in opts.items():
+                kk = str(k).strip()
+                vv = str(v).strip()
+                if kk and vv:
+                    clean_opts[kk] = vv
+            copy_q["options"] = clean_opts or None
+        else:
+            copy_q["options"] = None
         normalized.append(copy_q)
     return normalized
 
@@ -285,12 +375,40 @@ def build_question_bank(
 ) -> Dict[str, Any]:
     """Build a queryable question bank snapshot keyed by question_number."""
     qlist = normalize_questions(questions)
+
+    # Enrich question_content/options/student_answer from Vision raw text when possible.
+    # This avoids relying on the grader to re-state long stems/options (reduces token use + prevents hallucination).
+    vision_qbank = build_question_bank_from_vision_raw_text(
+        session_id=session_id,
+        subject=subject,
+        vision_raw_text=vision_raw_text,
+        page_image_urls=page_image_urls,
+    )
+    vision_questions = vision_qbank.get("questions") if isinstance(vision_qbank, dict) else None
+    vision_questions = vision_questions if isinstance(vision_questions, dict) else {}
+
     by_qn: Dict[str, Any] = {}
     for q in qlist:
         qn = q.get("question_number")
         if not qn:
             continue
-        by_qn[str(qn)] = q
+        qn_str = str(qn)
+        vq = vision_questions.get(qn_str)
+        if isinstance(vq, dict):
+            # Prefer OCR/vision-grounded content to prevent grader-side drift.
+            if vq.get("question_content"):
+                q["question_content"] = vq.get("question_content")
+            if vq.get("student_answer"):
+                q["student_answer"] = vq.get("student_answer")
+            if vq.get("options"):
+                q["options"] = vq.get("options")
+            if vq.get("answer_status"):
+                q["answer_status"] = vq.get("answer_status")
+            # Preserve "可能误读公式" hints from vision.
+            vw = vq.get("warnings")
+            if isinstance(vw, list) and vw:
+                q["warnings"] = list(dict.fromkeys((q.get("warnings") or []) + vw))
+        by_qn[qn_str] = q
     return {
         "session_id": session_id,
         "subject": subject.value if hasattr(subject, "value") else str(subject),
@@ -315,9 +433,10 @@ def build_question_bank_from_vision_raw_text(
     lines = text.splitlines()
     questions: Dict[str, Any] = {}
 
-    # Split by headings like "### 第28题" (also allow "## 第28题")
+    # Split by headings like "### 第28题" or numbered lines like "28."
     # NOTE: Use real whitespace escapes; avoid double-escaping (\\s) which would match a literal backslash.
     header_re = re.compile(r"^#{2,4}\s*第\s*([^题\s]+)\s*题\s*$")
+    num_re = re.compile(r"^\s*(\d{1,3}(?:\s*\(\s*\d+\s*\)\s*)?(?:[①②③④⑤⑥⑦⑧⑨])?)\s*[\.．]\s*$")
     current_qn: Optional[str] = None
     current_buf: List[str] = []
 
@@ -330,26 +449,72 @@ def build_question_bank_from_vision_raw_text(
         # best-effort extraction
         q_content = ""
         student_ans = ""
-        m1 = re.search(r"\*\*题目\*\*：?\s*(.+)", block)
-        if m1:
-            q_content = m1.group(1).strip()
+        answer_status = ""
+        options: Dict[str, str] = {}
+
+        # 题干：支持 "**题目**：" / "- 题目：" / "题目："，并尽量把后续的示例/图示说明一并带上（直到出现“答案/作答状态/步骤”等标签）。
+        blk_lines = [ln.rstrip() for ln in block.splitlines()]
+        label_stop = re.compile(
+            r"^\s*[\-\*\s]*((\*\*)?(答案|作答状态|学生作答状态|学生答案|学生作答|学生作答步骤|作答步骤|解题步骤)(\*\*)?)\s*[:：]"
+        )
+        for i, ln in enumerate(blk_lines):
+            if re.search(r"(?:\*\*题目\*\*|题目)\s*[:：]", ln):
+                first = re.split(r"[:：]", ln, maxsplit=1)
+                head = (first[1] if len(first) > 1 else "").strip()
+                collected: List[str] = [head] if head else []
+                for j in range(i + 1, min(len(blk_lines), i + 12)):
+                    nxt = blk_lines[j].strip()
+                    if not nxt:
+                        continue
+                    if label_stop.search(nxt):
+                        break
+                    # drop leading bullets for readability
+                    nxt = re.sub(r"^[\-\*\s]+", "", nxt).strip()
+                    if nxt:
+                        collected.append(nxt)
+                q_content = "\n".join([c for c in collected if c]).strip()
+                break
         # Some vision formats emit 学生答案/答案 instead of 作答状态
-        m2 = re.search(r"\*\*学生作答状态\*\*：?\s*(.+)", block)
+        m2 = re.search(r"(?:\*\*学生作答状态\*\*|学生作答状态|作答状态)\s*[:：]\s*(.+)", block)
         if m2:
-            student_ans = m2.group(1).strip()
+            answer_status = m2.group(1).strip()
         if not student_ans:
-            m3 = re.search(r"\*\*学生答案\*\*：?\s*(.+)", block)
+            m3 = re.search(r"(?:\*\*学生答案\*\*|学生答案)\s*[:：]\s*(.+)", block)
             if m3:
                 student_ans = m3.group(1).strip()
         # fallback: look for "答案："
         if not student_ans:
-            m4 = re.search(r"答案：\s*([^\n]+)", block)
+            m4 = re.search(r"(?:\*\*答案\*\*|答案)\s*[:：]\s*([^\n]+)", block)
             if m4:
                 student_ans = m4.group(1).strip()
 
+        # Extract choice options if present (A/B/C/D)
+        # Common patterns: "A. xxx", "A、xxx", "A: xxx" (often under a line like "选项：").
+        if ("选项" in block) or ("A." in block and "B." in block) or ("A、" in block and "B、" in block):
+            for line in block.splitlines():
+                s = line.strip()
+                mopt = re.match(r"^[\-\*\s]*([A-D])[\.\、:：]\s*(.+)$", s)
+                if mopt:
+                    k = mopt.group(1).strip()
+                    v = mopt.group(2).strip()
+                    if v:
+                        options[k] = v
+            # Fallback: options may be in a single line, e.g. "选项：A. ... B. ... C. ... D. ..."
+            if not options:
+                for k, v in re.findall(r"([A-D])[\.\、:：]\s*([^\n]+?)(?=(?:\s+[A-D][\.\、:：])|$)", block):
+                    kk = str(k).strip()
+                    vv = str(v).strip().rstrip(";；")
+                    if kk and vv:
+                        options[kk] = vv
+
         warnings: List[str] = []
-        if "可能误读公式" in block:
-            warnings.append("可能误读公式：请人工复核题干/指数/分式细节")
+        # Extract concrete misread warnings when present (avoid losing details).
+        for kind, detail in re.findall(r"(可能误读(?:公式|规律))\s*[:：]\s*([^\n]+)", block):
+            d = str(detail).strip()
+            if d:
+                warnings.append(f"{kind}：{d}")
+        if not warnings and "可能误读" in block:
+            warnings.append("可能误读公式：请人工复核题干/图示/指数/分式细节")
 
         questions[str(current_qn)] = {
             "question_number": str(current_qn),
@@ -359,14 +524,18 @@ def build_question_bank_from_vision_raw_text(
             "reason": "批改未完成（LLM 超时/失败），暂无法判定对错；可先基于识别原文进行辅导。",
             "warnings": warnings,
             "knowledge_tags": [],
+            "answer_status": answer_status or None,
+            "options": options or None,
         }
         current_buf = []
 
     for line in lines:
-        m = header_re.match(line.strip())
-        if m:
+        stripped = line.strip()
+        m = header_re.match(stripped)
+        m2 = num_re.match(stripped)
+        if m or m2:
             _flush()
-            current_qn = _normalize_question_number(m.group(1))
+            current_qn = _normalize_question_number((m.group(1) if m else m2.group(1)))
             current_buf = []
             continue
         if current_qn is not None:
@@ -604,6 +773,20 @@ def _select_question_number_from_text(message: str, available: List[str]) -> Opt
     return best
 
 
+def _extract_requested_question_number(message: str) -> Optional[str]:
+    """Best-effort extraction of a requested question number from user text."""
+    if not message:
+        return None
+    msg = str(message)
+    m = re.search(
+        r"(?:第\s*)?(\d{1,3}(?:\s*\(\s*\d+\s*\)\s*)?(?:[①②③④⑤⑥⑦⑧⑨])?)(?:\s*题)?",
+        msg,
+    )
+    if not m:
+        return None
+    return _normalize_question_number(m.group(1))
+
+
 def _extract_user_correction(message: str) -> Optional[str]:
     """
     Best-effort extraction of user "corrections" to the recognized problem statement.
@@ -624,6 +807,203 @@ def _extract_user_correction(message: str) -> Optional[str]:
     if re.search(r"(确认|应该|原题|题目).{0,30}?是", msg):
         return msg
     return None
+
+
+def _pick_relook_image_url(focus_question: Dict[str, Any]) -> Optional[str]:
+    """Choose the best available image URL for re-reading a specific question."""
+    if not isinstance(focus_question, dict):
+        return None
+    refs = focus_question.get("image_refs")
+    if isinstance(refs, dict):
+        pages = refs.get("pages")
+        if isinstance(pages, list):
+            for p in pages:
+                if not isinstance(p, dict):
+                    continue
+                slice_urls = p.get("slice_image_urls") or p.get("slice_image_url") or []
+                if isinstance(slice_urls, str) and slice_urls:
+                    return slice_urls
+                if isinstance(slice_urls, list) and slice_urls:
+                    for u in slice_urls:
+                        if u:
+                            return str(u)
+    page_urls = focus_question.get("page_image_urls")
+    if isinstance(page_urls, list):
+        for u in page_urls:
+            if u:
+                return str(u)
+    page_url = focus_question.get("page_image_url")
+    if page_url:
+        return str(page_url)
+    return None
+
+
+def _should_relook_focus_question(user_msg: str, focus_question: Dict[str, Any]) -> bool:
+    """Heuristic: decide whether to re-run Vision for a focused question (diagram/pattern issues)."""
+    msg = (user_msg or "").strip()
+    qcontent = str((focus_question or {}).get("question_content") or "")
+    warnings = focus_question.get("warnings") or []
+    warnings_s = " ".join([str(w) for w in warnings]) if isinstance(warnings, list) else str(warnings)
+
+    # User explicitly challenges recognition / asks to see the exact problem.
+    if any(k in msg for k in ("题目不对", "识别错", "你识别到的题目", "看不清", "原题", "题干不对", "你看一下图")):
+        return True
+
+    # Pattern/diagram questions often need the visual example; if missing, relook.
+    if "可能误读规律" in warnings_s or "可能误读公式" in warnings_s:
+        if ("→" not in qcontent) and ("顺序" not in qcontent) and ("规律" in qcontent or "出现" in qcontent):
+            return True
+
+    # Very short stems are suspicious for multi-part questions.
+    if len(qcontent) < 18 and any(k in qcontent for k in ("出现", "规律", "图", "示意")):
+        return True
+
+    return False
+
+
+async def _relook_focus_question_via_vision(
+    *,
+    session_id: str,
+    subject: Subject,
+    question_number: str,
+    focus_question: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Best-effort: run Vision again with a question-specific prompt to recover missing stem/examples.
+    Returns a dict that can be merged into focus_question, or None if relook failed.
+    """
+    settings = get_settings()
+    img_url = _pick_relook_image_url(focus_question)
+    if not img_url:
+        return None
+
+    # Prefer local download + base64 for Qwen3 to avoid Ark URL fetch flakiness.
+    data_uri = _download_as_data_uri(img_url)
+    provider = VisionProvider.QWEN3 if data_uri else VisionProvider.DOUBAO
+    images = [ImageRef(base64=data_uri)] if data_uri else [ImageRef(url=img_url)]
+
+    prompt = (
+        f"请只关注第{question_number}题。"
+        "如果题目包含示意图/箭头/表格/序列示例（如 ABCD 出现顺序、对应数字位置），必须原样抄写示例并用文字说明顺序/位置关系；不要推断。"
+        "请输出：题目原文、选项（如有）、学生作答（如有）、学生作答状态，以及任何“可能误读公式/规律”的风险提示。"
+    )
+    budget = min(15.0, float(settings.grade_vision_timeout_seconds))
+    client = VisionClient()
+    try:
+        res = await _call_blocking_in_thread(
+            client.analyze,
+            images=images,
+            prompt=prompt,
+            provider=provider,
+            timeout_seconds=budget,
+            semaphore=VISION_SEMAPHORE,
+        )
+    except Exception as e:
+        return {"relook_error": f"重识别失败: {e}"}
+
+    # Parse the relook text into a minimal per-question payload.
+    parsed = build_question_bank_from_vision_raw_text(
+        session_id=session_id,
+        subject=subject,
+        vision_raw_text=res.text or "",
+        page_image_urls=[img_url],
+    )
+    q = None
+    qs = parsed.get("questions") if isinstance(parsed, dict) else None
+    if isinstance(qs, dict):
+        q = qs.get(str(question_number))
+    payload: Dict[str, Any] = {"vision_recheck_text": (res.text or "")[:2200]}
+    if isinstance(q, dict):
+        for k in ("question_content", "student_answer", "answer_status", "options"):
+            if q.get(k):
+                payload[k] = q.get(k)
+        vw = q.get("warnings")
+        if isinstance(vw, list) and vw:
+            payload["warnings"] = list(dict.fromkeys((focus_question.get("warnings") or []) + vw))
+    return payload
+
+
+def _format_math_for_display(text: str) -> str:
+    """
+    Make math in assistant messages more readable in demo UI:
+    - Strip LaTeX delimiters like \\( \\) \\[ \\]
+    - Replace a few common TeX commands with Unicode (× ÷ ± ∠ ·)
+    This is best-effort and should never raise.
+    """
+    if not text:
+        return text
+    s = str(text)
+    try:
+        s = s.replace("\\(", "").replace("\\)", "").replace("\\[", "").replace("\\]", "")
+        s = re.sub(r"\\boldsymbol\{([^{}]+)\}", r"\1", s)
+        s = s.replace("\\times", "×").replace("\\div", "÷").replace("\\cdot", "·").replace("\\pm", "±")
+        s = s.replace("\\angle", "∠")
+        # \frac{a}{b} -> a/b (simple)
+        s = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"\1/\2", s)
+
+        # Convert caret-style exponents (e.g., 3^m, x^2, x^(n+1)) to LaTeX inline math to avoid "code-like" style.
+        # Best-effort: avoid touching existing $...$ spans and backticks.
+        def _wrap_symbolic_pow(segment: str) -> str:
+            def repl(m: re.Match) -> str:
+                base = m.group(1)
+                exp = m.group(2)
+                exp = exp.strip()
+                # Normalize parentheses exponent: x^(n+1) -> x^{n+1}
+                if exp.startswith("(") and exp.endswith(")"):
+                    exp = exp[1:-1].strip()
+                return f"${base}^{{{exp}}}$"
+
+            # base can be 1-3 tokens (x, 3, (-x), 3^m already handled above for numeric)
+            return re.sub(
+                r"(?<![\\$])\b([A-Za-z]|\d+|\([^\s()]{1,6}\))\s*\^\s*(\(\s*[A-Za-z0-9+\-\s]+\s*\)|[A-Za-z0-9]+(?:\s*[+\-]\s*[A-Za-z0-9]+)*)",
+                repl,
+                segment,
+            )
+
+        out: List[str] = []
+        plain: List[str] = []
+        mode: str = "plain"  # plain | code | math
+        i = 0
+        while i < len(s):
+            ch = s[i]
+            if mode == "plain":
+                if ch == "`":
+                    if plain:
+                        out.append(_wrap_symbolic_pow("".join(plain)))
+                        plain = []
+                    out.append("`")
+                    mode = "code"
+                    i += 1
+                    continue
+                if ch == "$":
+                    if plain:
+                        out.append(_wrap_symbolic_pow("".join(plain)))
+                        plain = []
+                    out.append("$")
+                    mode = "math"
+                    i += 1
+                    continue
+                plain.append(ch)
+                i += 1
+                continue
+            elif mode == "code":
+                out.append(ch)
+                i += 1
+                if ch == "`":
+                    mode = "plain"
+                continue
+            else:  # math
+                out.append(ch)
+                i += 1
+                if ch == "$":
+                    mode = "plain"
+                continue
+        if plain:
+            out.append(_wrap_symbolic_pow("".join(plain)))
+        s = "".join(out)
+    except Exception:
+        return str(text)
+    return s
 
 
 def _build_question_index_for_pages(page_urls: List[str]) -> Dict[str, Any]:
@@ -930,28 +1310,63 @@ def cache_response(idempotency_key: str, response: GradeResponse) -> None:
 
 async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse:
     """执行批改（同步/后台共用）。"""
-    # 提前确定 session_id，用于所有返回路径
-    session_for_ctx = req.session_id or req.batch_id
+    # 提前确定 session_id，用于所有返回路径（grade→chat 必须可续接）
+    session_for_ctx = _ensure_session_id(req.session_id or req.batch_id)
+    try:
+        # Best-effort: keep request/session aligned for downstream job records.
+        req.session_id = session_for_ctx
+    except Exception:
+        pass
 
     settings = get_settings()
     started = time.monotonic()
     deadline = started + float(settings.grade_completion_sla_seconds)
+    timings_ms: Dict[str, int] = {}
 
     def remaining_seconds() -> float:
         return max(0.0, deadline - time.monotonic())
 
     vision_prompt = (
         "请识别并提取作业内容，包括题目、答案和解题步骤。逐题输出“学生作答状态”：若看到答案/勾选则写明，若未看到答案/空白/未勾选，明确标注“未作答”或“可能未作答”。"
+        "选择题必须完整列出选项（A/B/C/D 每一项的原文），并明确学生选择了哪个选项；若未勾选，标注未作答。"
         "对含幂/分式/下标的公式请双写：先按原式抄写（含上下标、分式），再给出纯文本展开形式（如 10^(n+1)、(a-b)^2/(c+d)）。"
         "特别自检指数/分母的 +1、±、平方/立方等细节，如有疑似误读，直接在结果中标注“可能误读公式：…”。"
+        "对“规律/序列/图示题”（含箭头/示例/表格/图形），必须先原样抄写题目给出的示例（例如 A→B→C→D→C→B 或对应数字位置），不要凭空推断；若示例在图中，请描述图中出现的字母/顺序/位置关系。"
+        "注意：你只负责识别与抄录（OCR+结构化），不要进行解题/判定/推理，不要写出你推断的正确答案或规律（例如“应为6n+3”这类）。如果示例/图中信息没识别出来，请明确写“示例未识别到/看不清”，并在 warnings 中标注风险。"
     )
 
     vision_client = VisionClient()
     vision_fallback_warning: Optional[str] = None
+    meta_base: Dict[str, Any] = {
+        "vision_provider_requested": getattr(req.vision_provider, "value", str(req.vision_provider)),
+        "vision_provider_used": None,
+        "vision_used_base64_fallback": False,
+        "llm_provider_requested": provider_str,
+        "llm_provider_used": None,
+        "llm_used_fallback": False,
+    }
 
     # Vision stage (offload to thread + sub-timeout)
     v_budget = min(float(settings.grade_vision_timeout_seconds), remaining_seconds())
     if v_budget <= 0:
+        # Persist minimal snapshot so chat can deterministically explain the failure.
+        persist_question_bank(
+            session_id=session_for_ctx,
+            bank=_merge_bank_meta(
+                {
+                "session_id": session_for_ctx,
+                "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
+                "vision_raw_text": None,
+                "page_image_urls": [str(img.url) for img in (req.images or []) if getattr(img, "url", None)],
+                "questions": {},
+                },
+                meta_base,
+            ),
+            grade_status="failed",
+            grade_summary="Vision analysis not available",
+            grade_warnings=["grade SLA exceeded before vision started"],
+            timings_ms=timings_ms,
+        )
         return GradeResponse(
             wrong_items=[],
             summary="Vision analysis not available",
@@ -983,13 +1398,37 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         return s or err.__class__.__name__
 
     try:
+        v0 = time.monotonic()
         vision_result = await _run_vision(req.vision_provider, v_budget)
+        timings_ms["vision_ms"] = int((time.monotonic() - v0) * 1000)
+        meta_base["vision_provider_used"] = getattr(req.vision_provider, "value", str(req.vision_provider))
     except Exception as e:
         if req.vision_provider == VisionProvider.DOUBAO:
             probe = _probe_url_head(_first_public_image_url(req.images))
             # Fallback to qwen3 within remaining budget.
             v_budget2 = min(float(settings.grade_vision_timeout_seconds), remaining_seconds())
             if v_budget2 <= 0:
+                persist_question_bank(
+                    session_id=session_for_ctx,
+                    bank=_merge_bank_meta(
+                        {
+                        "session_id": session_for_ctx,
+                        "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
+                        "vision_raw_text": None,
+                        "page_image_urls": [str(img.url) for img in (req.images or []) if getattr(img, "url", None)],
+                        "questions": {},
+                        },
+                        meta_base,
+                    ),
+                    grade_status="failed",
+                    grade_summary="Vision analysis not available",
+                    grade_warnings=[w for w in [
+                        f"Vision(doubao) failed: {_vision_err_str(e, v_budget)}",
+                        probe,
+                        "grade SLA exceeded before vision fallback",
+                    ] if w],
+                    timings_ms=timings_ms,
+                )
                 return GradeResponse(
                     wrong_items=[],
                     summary="Vision analysis not available",
@@ -1037,12 +1476,35 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                     )
                 else:
                     vision_result = await _run_vision(VisionProvider.QWEN3, v_budget2)
+                meta_base["vision_provider_used"] = VisionProvider.QWEN3.value
+                meta_base["vision_used_base64_fallback"] = bool(converted_any)
                 vision_fallback_warning = (
                     f"Vision(doubao) 失败，已回退到 qwen3: {_vision_err_str(e, v_budget)}"
                     + (f"；{probe}" if probe else "")
                     + ("；qwen3 使用本地下载+base64 兜底" if converted_any else "")
                 )
             except Exception as e2:
+                persist_question_bank(
+                    session_id=session_for_ctx,
+                    bank=_merge_bank_meta(
+                        {
+                        "session_id": session_for_ctx,
+                        "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
+                        "vision_raw_text": None,
+                        "page_image_urls": [str(img.url) for img in (req.images or []) if getattr(img, "url", None)],
+                        "questions": {},
+                        },
+                        meta_base,
+                    ),
+                    grade_status="failed",
+                    grade_summary="Vision analysis not available",
+                    grade_warnings=[w for w in [
+                        f"Vision(doubao) failed: {_vision_err_str(e, v_budget)}",
+                        probe,
+                        f"Vision fallback (qwen3) also failed: {_vision_err_str(e2, v_budget2)}",
+                    ] if w],
+                    timings_ms=timings_ms,
+                )
                 return GradeResponse(
                     wrong_items=[],
                     summary="Vision analysis not available",
@@ -1061,6 +1523,23 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                     vision_raw_text=None,
                 )
         else:
+            persist_question_bank(
+                session_id=session_for_ctx,
+                bank=_merge_bank_meta(
+                    {
+                    "session_id": session_for_ctx,
+                    "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
+                    "vision_raw_text": None,
+                    "page_image_urls": [str(img.url) for img in (req.images or []) if getattr(img, "url", None)],
+                    "questions": {},
+                    },
+                    meta_base,
+                ),
+                grade_status="failed",
+                grade_summary="Vision analysis not available",
+                grade_warnings=[f"Vision analysis failed: {_vision_err_str(e, v_budget)}"],
+                timings_ms=timings_ms,
+            )
             return GradeResponse(
                 wrong_items=[],
                 summary="Vision analysis not available",
@@ -1087,7 +1566,9 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             w_str = str(w)
             if any(
                 key in w_str
-                for key in ("InvalidEndpointOrModel", "NotFound", "Error code", "Parse error")
+                # Note: don't treat "Parse error" as fatal here because we may have already fallen back to Qwen3,
+                # and we still want to return a successful grading result if the fallback succeeded.
+                for key in ("InvalidEndpointOrModel", "NotFound", "Error code")
             ):
                 return True
         return False
@@ -1109,10 +1590,17 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                 )
 
             try:
+                g0 = time.monotonic()
                 grading_result = await _grade_math(provider_str)
+                timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
+                meta_base["llm_provider_used"] = provider_str
             except Exception as e:
                 if provider_str == "ark":
+                    g0 = time.monotonic()
                     grading_result = await _grade_math("silicon")
+                    timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
+                    meta_base["llm_provider_used"] = "silicon"
+                    meta_base["llm_used_fallback"] = True
                     grading_result.warnings = (grading_result.warnings or []) + [
                         f"Ark grading error, fell back to qwen3: {str(e)}"
                     ]
@@ -1122,7 +1610,11 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             if provider_str == "ark" and _needs_fallback(grading_result):
                 ark_summary = grading_result.summary
                 ark_warnings = grading_result.warnings or []
+                g0 = time.monotonic()
                 grading_result = await _grade_math("silicon")
+                timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
+                meta_base["llm_provider_used"] = "silicon"
+                meta_base["llm_used_fallback"] = True
                 grading_result.warnings = (grading_result.warnings or []) + [
                     f"Ark grading unavailable, fell back to qwen3. Ark summary: {ark_summary}"
                 ] + ark_warnings
@@ -1170,10 +1662,17 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                 )
 
             try:
+                g0 = time.monotonic()
                 grading_result = await _grade_english(provider_str)
+                timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
+                meta_base["llm_provider_used"] = provider_str
             except Exception as e:
                 if provider_str == "ark":
+                    g0 = time.monotonic()
                     grading_result = await _grade_english("silicon")
+                    timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
+                    meta_base["llm_provider_used"] = "silicon"
+                    meta_base["llm_used_fallback"] = True
                     grading_result.warnings = (grading_result.warnings or []) + [
                         f"Ark grading error, fell back to qwen3: {str(e)}"
                     ]
@@ -1183,7 +1682,11 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             if provider_str == "ark" and _needs_fallback(grading_result):
                 ark_summary = grading_result.summary
                 ark_warnings = grading_result.warnings or []
+                g0 = time.monotonic()
                 grading_result = await _grade_english("silicon")
+                timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
+                meta_base["llm_provider_used"] = "silicon"
+                meta_base["llm_used_fallback"] = True
                 grading_result.warnings = (grading_result.warnings or []) + [
                     f"Ark grading unavailable, fell back to qwen3. Ark summary: {ark_summary}"
                 ] + ark_warnings
@@ -1219,14 +1722,21 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         # Save vision-only qbank so /chat can still route by question number.
         if session_for_ctx:
             page_urls = [img.url for img in req.images if getattr(img, "url", None)]
-            save_question_bank(
-                session_for_ctx,
-                build_question_bank_from_vision_raw_text(
+            persist_question_bank(
+                session_id=session_for_ctx,
+                bank=_merge_bank_meta(
+                    build_question_bank_from_vision_raw_text(
                     session_id=session_for_ctx,
                     subject=req.subject,
                     vision_raw_text=vision_result.text,
                     page_image_urls=[str(u) for u in page_urls if u],
                 ),
+                    meta_base,
+                ),
+                grade_status="failed",
+                grade_summary="LLM grading timeout",
+                grade_warnings=[f"LLM timeout: {str(e)}"],
+                timings_ms=timings_ms,
             )
         return GradeResponse(
             wrong_items=[],
@@ -1244,14 +1754,21 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
     except Exception as e:
         if session_for_ctx:
             page_urls = [img.url for img in req.images if getattr(img, "url", None)]
-            save_question_bank(
-                session_for_ctx,
-                build_question_bank_from_vision_raw_text(
+            persist_question_bank(
+                session_id=session_for_ctx,
+                bank=_merge_bank_meta(
+                    build_question_bank_from_vision_raw_text(
                     session_id=session_for_ctx,
                     subject=req.subject,
                     vision_raw_text=vision_result.text,
                     page_image_urls=[str(u) for u in page_urls if u],
                 ),
+                    meta_base,
+                ),
+                grade_status="failed",
+                grade_summary=f"LLM grading failed: {str(e)}",
+                grade_warnings=[f"LLM error: {str(e)}"],
+                timings_ms=timings_ms,
             )
         return GradeResponse(
             wrong_items=[],
@@ -1271,14 +1788,22 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
     if _needs_fallback(grading_result):
         if session_for_ctx:
             page_urls = [img.url for img in req.images if getattr(img, "url", None)]
-            save_question_bank(
-                session_for_ctx,
-                build_question_bank_from_vision_raw_text(
+            persist_question_bank(
+                session_id=session_for_ctx,
+                bank=_merge_bank_meta(
+                    build_question_bank_from_vision_raw_text(
                     session_id=session_for_ctx,
                     subject=req.subject,
                     vision_raw_text=vision_result.text,
                     page_image_urls=[str(u) for u in page_urls if u],
                 ),
+                    meta_base,
+                ),
+                grade_status="failed",
+                grade_summary=(getattr(grading_result, "summary", "") or "批改失败").strip(),
+                grade_warnings=(getattr(grading_result, "warnings", None) or [])
+                + ([vision_fallback_warning] if vision_fallback_warning else []),
+                timings_ms=timings_ms,
             )
         return GradeResponse(
             wrong_items=sanitize_wrong_items(getattr(grading_result, "wrong_items", []) or []),
@@ -1306,7 +1831,15 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                 vision_raw_text=vision_result.text,
                 page_image_urls=page_urls,
             )
-            save_question_bank(session_for_ctx, bank)
+            persist_question_bank(
+                session_id=session_for_ctx,
+                bank=_merge_bank_meta(bank, meta_base),
+                grade_status="done",
+                grade_summary=(getattr(grading_result, "summary", "") or "").strip(),
+                grade_warnings=(getattr(grading_result, "warnings", None) or [])
+                + ([vision_fallback_warning] if vision_fallback_warning else []),
+                timings_ms=timings_ms,
+            )
 
     # Defensive: if LLM didn't output counts, compute from normalized results.
     if getattr(grading_result, "wrong_count", None) is None:
@@ -1425,6 +1958,10 @@ async def grade_homework(
         if cached_response:
             return cached_response
 
+    # 2.5 Ensure session_id is always present so results can be delivered to /chat
+    session_for_ctx = _ensure_session_id(req.session_id or req.batch_id)
+    req = req.model_copy(update={"session_id": session_for_ctx})
+
     # 3. 决定同步/异步
     is_large_batch = len(req.images) > 5
     provider_str = "silicon" if req.vision_provider == VisionProvider.QWEN3 else "ark"
@@ -1442,7 +1979,6 @@ async def grade_homework(
             ttl_seconds=IDP_TTL_HOURS * 3600,
         )
         background_tasks.add_task(background_grade, job_id, req, provider_str)
-        session_for_ctx = req.session_id or req.batch_id
         return GradeResponse(
             wrong_items=[],
             summary="任务已创建，正在处理中...",
@@ -1456,10 +1992,6 @@ async def grade_homework(
             warnings=["大批量任务已转为异步处理"],
             vision_raw_text=None,
         )
-
-
-    # Determine session_id for context early
-    session_for_ctx = req.session_id or req.batch_id
 
     try:
         response = await perform_grading(req, provider_str)
@@ -1544,6 +2076,17 @@ async def chat_stream(
 
     # 不再做硬性 turn limit 检查
 
+    # Normalize past assistant messages for display (avoid raw LaTeX delimiters in UI).
+    try:
+        hist = session_data.get("history") or []
+        if isinstance(hist, list):
+            for m in hist:
+                if isinstance(m, dict) and m.get("role") == "assistant" and isinstance(m.get("content"), str):
+                    m["content"] = _format_math_for_display(m.get("content") or "")
+            session_data["history"] = hist
+    except Exception:
+        pass
+
     # Heartbeat
     yield b"event: heartbeat\ndata: {}\n\n"
 
@@ -1573,97 +2116,107 @@ async def chat_stream(
             model_override = req.llm_model
         current_turn = session_data["interaction_count"]
 
-        # 限制在 0-4 之间传给模型，模型返回的 interaction_count+1 用于更新
-        # 构造上下文（优先：qbank 全题快照；其次：qindex bbox/slice；最后：mistakes 错题列表）
-        wrong_item_context = None
-        ctx_ids = normalize_context_ids(
-            session_data.get("context_item_ids") or req.context_item_ids or []
-        )
-        session_data["context_item_ids"] = ctx_ids
-        if ctx_ids:
-            wrong_item_context = {"requested_ids": [str(i) for i in ctx_ids]}
-            mistakes = session_id and get_mistakes(session_id)
-            selected, missing = resolve_context_items(ctx_ids, mistakes)
-            if selected:
-                wrong_item_context["items"] = compact_wrong_items_for_chat(selected)
-            if missing:
-                wrong_item_context["missing"] = missing
-            if not mistakes:
-                wrong_item_context["note"] = "no mistakes cached for this session"
-        else:
-            wrong_item_context = wrong_item_context or {}
-
-        # Question bank snapshot (full question list): the primary source of truth for chat routing.
+        # 构造上下文：强制依赖 qbank（全题快照）。
+        # 需求：chat 只能基于 /grade 交付的“识别/判定/题目信息”对话；缺失则直接提示先批改，禁止编造。
         qbank = get_question_bank(session_id) if session_id else None
-        if isinstance(qbank, dict):
-            bank_questions = qbank.get("questions")
-            if isinstance(bank_questions, dict) and bank_questions:
-                # Defensive: normalize keys to strings for matching.
-                bank_questions_str: Dict[str, Any] = {str(k): v for k, v in bank_questions.items()}
-                available_qnums = sorted(bank_questions_str.keys(), key=len, reverse=True)
-                mentioned = _select_question_number_from_text(req.question, available_qnums)
-                if mentioned:
-                    session_data["focus_question_number"] = str(mentioned)
-                focus_q = session_data.get("focus_question_number")
-                focus_q = str(focus_q) if focus_q is not None else None
-                if focus_q and focus_q in bank_questions_str:
-                    focus_payload = dict(bank_questions_str.get(focus_q) or {})
-                    focus_payload["question_number"] = str(focus_q)
-                    # Add image refs if available (bbox/slice index)
-                    qindex = get_question_index(session_id) if session_id else None
-                    if isinstance(qindex, dict):
-                        qidx_questions = qindex.get("questions")
-                        if isinstance(qidx_questions, dict) and focus_q in qidx_questions:
-                            focus_payload["image_refs"] = qidx_questions.get(focus_q)
-                        if qindex.get("warnings"):
-                            wrong_item_context["index_warnings"] = qindex.get("warnings")
-                    # Add page urls for "re-look the page" fallback (geometry etc.)
-                    page_urls = qbank.get("page_image_urls")
-                    if isinstance(page_urls, list) and page_urls:
-                        focus_payload["page_image_urls"] = page_urls
-
-                    wrong_item_context["focus_question_number"] = str(focus_q)
-                    wrong_item_context["focus_question"] = focus_payload
-                else:
-                    # Provide hint to the model so it can ask a targeted follow-up question.
-                    wrong_item_context["available_question_numbers"] = available_qnums[:80]
-
-        # Question index (bbox/slice) binding: allow user to mention "第23题"
         if not (isinstance(qbank, dict) and isinstance(qbank.get("questions"), dict) and qbank.get("questions")):
+            msg = (
+                "我还没有拿到本次作业的“题库快照”（识别原文/判定结果/题目信息）。"
+                "请先在【智能批改】里上传照片并完成批改，然后用返回的 session_id 再来辅导。"
+            )
+            session_data["history"].append({"role": "assistant", "content": msg})
+            save_session(session_id, session_data)
+            payload = ChatResponse(
+                messages=[{"role": "assistant", "content": msg}],
+                session_id=session_id,
+                retry_after_ms=None,
+                cross_subject_flag=None,
+            )
+            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+            yield b"event: done\ndata: {\"status\":\"error\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
+            return
+
+        bank_questions = qbank.get("questions")
+        bank_questions_str: Dict[str, Any] = {str(k): v for k, v in (bank_questions or {}).items()}
+        available_qnums = sorted(bank_questions_str.keys(), key=len, reverse=True)
+
+        wrong_item_context: Dict[str, Any] = {
+            "available_question_numbers": available_qnums[:200],
+        }
+
+        # Determine requested question number (explicit) and bind focus deterministically.
+        requested_qn = _extract_requested_question_number(req.question)
+        requested_qn = _normalize_question_number(requested_qn) if requested_qn else None
+        if requested_qn:
+            # If user explicitly asked for a question that does not exist, do NOT keep old focus.
+            if requested_qn not in bank_questions_str:
+                # Allow prefix matching: "28" -> "28(1)②" etc.
+                candidates = [k for k in available_qnums if str(k).startswith(f"{requested_qn}(") or str(k).startswith(requested_qn)]
+                if candidates:
+                    requested_qn = sorted(candidates, key=len)[0]
+                else:
+                    msg = (
+                        f"我没能在本次批改结果里定位到第{requested_qn}题的题干/选项信息。"
+                        + (f" 当前可聊题号：{', '.join(available_qnums[:30])}。" if available_qnums else "")
+                        + " 你可以换一个题号再问，或重新上传更清晰的照片后再批改一次。"
+                    )
+                    session_data["history"].append({"role": "assistant", "content": msg})
+                    save_session(session_id, session_data)
+                    payload = ChatResponse(
+                        messages=[{"role": "assistant", "content": msg}],
+                        session_id=session_id,
+                        retry_after_ms=None,
+                        cross_subject_flag=None,
+                    )
+                    yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+                    yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
+                    return
+            session_data["focus_question_number"] = str(requested_qn)
+        else:
+            # Heuristic: choose best match among available numbers mentioned in the message.
+            mentioned = _select_question_number_from_text(req.question, available_qnums)
+            if mentioned:
+                session_data["focus_question_number"] = str(mentioned)
+
+        focus_q = session_data.get("focus_question_number")
+        focus_q = str(focus_q) if focus_q is not None else None
+        if focus_q and focus_q in bank_questions_str:
+            focus_payload = dict(bank_questions_str.get(focus_q) or {})
+            focus_payload["question_number"] = str(focus_q)
+
+            # Add image refs if available (bbox/slice index) - optional enhancement only.
             qindex = get_question_index(session_id) if session_id else None
             if isinstance(qindex, dict):
-                questions = qindex.get("questions")
-                if isinstance(questions, dict) and questions:
-                    questions_str: Dict[str, Any] = {str(k): v for k, v in questions.items()}
-                    available_qnums = sorted(questions_str.keys(), key=len, reverse=True)
-                    mentioned = _select_question_number_from_text(req.question, available_qnums)
-                    if mentioned:
-                        session_data["focus_question_number"] = str(mentioned)
-                    focus_q = session_data.get("focus_question_number")
-                    focus_q = str(focus_q) if focus_q is not None else None
-                    if focus_q and focus_q in questions_str:
-                        wrong_item_context["focus_question_number"] = focus_q
-                        wrong_item_context["focus_question"] = questions_str.get(focus_q)
-                    if qindex.get("warnings"):
-                        wrong_item_context["index_warnings"] = qindex.get("warnings")
-            else:
-                # Fallback: if user mentions a question number, bind to cached wrong_items by question_number
-                mistakes = session_id and get_mistakes(session_id)
-                if mistakes:
-                    available = [
-                        str(m.get("question_number"))
-                        for m in mistakes
-                        if m.get("question_number") is not None
-                    ]
-                    mentioned = _select_question_number_from_text(req.question, sorted(set(available), key=len, reverse=True))
-                    if mentioned:
-                        session_data["focus_question_number"] = mentioned
-                        focused = [
-                            m for m in mistakes if str(m.get("question_number")) == str(mentioned)
-                        ]
-                        if focused:
-                            wrong_item_context["focus_question_number"] = mentioned
-                            wrong_item_context["items"] = compact_wrong_items_for_chat(focused)
+                qidx_questions = qindex.get("questions")
+                if isinstance(qidx_questions, dict) and focus_q in qidx_questions:
+                    focus_payload["image_refs"] = qidx_questions.get(focus_q)
+                if qindex.get("warnings"):
+                    wrong_item_context["index_warnings"] = qindex.get("warnings")
+
+            # Always keep page urls for potential "re-look the page" fallback (geometry etc.)
+            page_urls = qbank.get("page_image_urls")
+            if isinstance(page_urls, list) and page_urls:
+                focus_payload["page_image_urls"] = page_urls
+
+            wrong_item_context["focus_question_number"] = str(focus_q)
+            wrong_item_context["focus_question"] = focus_payload
+        else:
+            # No focus yet: ask user to specify a question number (avoid hallucination).
+            msg = (
+                "你想先聊哪一题？请直接说“讲第几题”。"
+                + (f" 当前可聊题号：{', '.join(available_qnums[:30])}。" if available_qnums else "")
+            )
+            session_data["history"].append({"role": "assistant", "content": msg})
+            save_session(session_id, session_data)
+            payload = ChatResponse(
+                messages=[{"role": "assistant", "content": msg}],
+                session_id=session_id,
+                retry_after_ms=None,
+                cross_subject_flag=None,
+            )
+            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+            yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
+            return
 
         # Capture user corrections so the tutor can override OCR/vision misreads during the session.
         focus_q_for_corr = (
@@ -1682,6 +2235,55 @@ async def chat_stream(
             # If we have a focused question payload, attach corrections there too for clarity.
             if isinstance(wrong_item_context.get("focus_question"), dict):
                 wrong_item_context["focus_question"]["user_corrections"] = corr_map[fq]
+
+        # Deterministic routing already handled above; if we reached here without a focus_question,
+        # it's a bug, so fail safe.
+        if "focus_question" not in wrong_item_context:
+            msg = "系统未能绑定到具体题目，请在【智能批改】中重新批改后再试。"
+            session_data["history"].append({"role": "assistant", "content": msg})
+            save_session(session_id, session_data)
+            payload = ChatResponse(
+                messages=[{"role": "assistant", "content": msg}],
+                session_id=session_id,
+                retry_after_ms=None,
+                cross_subject_flag=None,
+            )
+            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+            yield b"event: done\ndata: {\"status\":\"error\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
+            return
+
+        # Best-effort: re-look the focused question when the prompt hints diagram/pattern info was missed.
+        try:
+            focus_obj = wrong_item_context.get("focus_question")
+            fqnum = wrong_item_context.get("focus_question_number")
+            if (
+                isinstance(focus_obj, dict)
+                and fqnum
+                and _should_relook_focus_question(req.question, focus_obj)
+            ):
+                patch = await _relook_focus_question_via_vision(
+                    session_id=session_id,
+                    subject=req.subject,
+                    question_number=str(fqnum),
+                    focus_question=focus_obj,
+                )
+                if isinstance(patch, dict) and patch:
+                    focus_obj.update({k: v for k, v in patch.items() if v is not None})
+                    wrong_item_context["focus_question"] = focus_obj
+                    # Persist patch back to qbank for subsequent turns (best-effort).
+                    try:
+                        qbank_now = get_question_bank(session_id)
+                        if isinstance(qbank_now, dict):
+                            qs = qbank_now.get("questions")
+                            if isinstance(qs, dict) and str(fqnum) in qs and isinstance(qs.get(str(fqnum)), dict):
+                                qs[str(fqnum)].update({k: v for k, v in patch.items() if v is not None})
+                                qbank_now["questions"] = qs
+                                qbank_now = _merge_bank_meta(qbank_now, {"updated_at": datetime.now().isoformat()})
+                                save_question_bank(session_id, qbank_now)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         # ===== True streaming: LLM token stream -> SSE chat events =====
         loop = asyncio.get_running_loop()
@@ -1740,7 +2342,7 @@ async def chat_stream(
 
             chunk = str(item)
             buffer += chunk
-            assistant_msg["content"] = buffer
+            assistant_msg["content"] = _format_math_for_display(buffer)
 
             # throttle event frequency
             now_m = time.monotonic()
@@ -1797,3 +2399,40 @@ async def get_job(job_id: str):
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return job
+
+
+@router.get("/session/{session_id}/qbank")
+async def get_session_qbank_meta(session_id: str):
+    """
+    验收/调试接口：查看本次批改是否已将“识别/判定/题目信息”写入 qbank（供 /chat 使用）。
+    默认不返回整段 vision_raw_text，避免过大。
+    """
+    sid = _ensure_session_id(session_id)
+    bank = get_question_bank(sid)
+    if not bank:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="qbank not found for session_id")
+
+    questions = bank.get("questions") if isinstance(bank, dict) else None
+    qnums: List[str] = []
+    if isinstance(questions, dict):
+        qnums = [str(k) for k in questions.keys()]
+
+    meta = bank.get("meta") if isinstance(bank.get("meta"), dict) else {}
+    out: Dict[str, Any] = {
+        "session_id": sid,
+        "subject": bank.get("subject"),
+        "page_image_urls_count": len(bank.get("page_image_urls") or []) if isinstance(bank.get("page_image_urls"), list) else 0,
+        "vision_raw_len": len(bank.get("vision_raw_text") or ""),
+        "questions_count": len(qnums),
+        "questions_with_options": _count_questions_with_options(bank),
+        "question_numbers": sorted(qnums, key=len, reverse=False)[:300],
+        "meta": meta,
+    }
+    qindex = get_question_index(sid)
+    if isinstance(qindex, dict):
+        out["qindex_available"] = bool(qindex.get("questions"))
+        out["qindex_warnings"] = qindex.get("warnings") or []
+    else:
+        out["qindex_available"] = False
+        out["qindex_warnings"] = []
+    return out

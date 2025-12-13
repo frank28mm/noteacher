@@ -98,6 +98,24 @@ def format_grading_result(result: Dict[str, Any]) -> str:
         for warning in result['warnings']:
             md += f"- {warning}\n"
 
+    # 运行链路（可解释性）：展示后端记录的 qbank 元信息（如果可用）
+    qb = result.get("_qbank_meta")
+    if isinstance(qb, dict):
+        meta = qb.get("meta") if isinstance(qb.get("meta"), dict) else {}
+        md += "\n### 🔎 本次批改链路（后端记录）\n"
+        md += f"- qbank 题数: {qb.get('questions_count', 'N/A')}（含选项: {qb.get('questions_with_options', 'N/A')}）\n"
+        md += f"- vision_raw_len: {qb.get('vision_raw_len', 'N/A')}\n"
+        if meta:
+            md += f"- Vision provider: {meta.get('vision_provider_used', meta.get('vision_provider_requested', 'N/A'))}\n"
+            if meta.get('vision_used_base64_fallback') is not None:
+                md += f"- Vision base64 兜底: {meta.get('vision_used_base64_fallback')}\n"
+            md += f"- LLM provider: {meta.get('llm_provider_used', meta.get('llm_provider_requested', 'N/A'))}\n"
+            if meta.get('llm_used_fallback') is not None:
+                md += f"- LLM fallback: {meta.get('llm_used_fallback')}\n"
+            t = meta.get("timings_ms") or {}
+            if isinstance(t, dict) and t:
+                md += f"- 耗时(ms): vision={t.get('vision_ms','?')} llm={t.get('llm_ms','?')}\n"
+
     # Vision 原文（完整展开）
     vision_raw = result.get("vision_raw_text")
     if vision_raw:
@@ -131,6 +149,20 @@ async def call_grade_api(image_urls: List[str], subject: str, provider: str) -> 
         raise Exception(f"API 调用失败: {response.status_code} - {response.text}")
 
     return response.json()
+
+
+async def call_qbank_meta(session_id: str) -> Optional[Dict[str, Any]]:
+    """读取后端 qbank 元信息，用于解释本次批改链路（vision/llm 走了哪条路、耗时等）。"""
+    if not session_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{API_BASE_URL}/session/{session_id}/qbank")
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except Exception:
+        return None
 
 
 async def call_chat_api(
@@ -220,6 +252,12 @@ async def grade_homework_logic(img_path, subject, provider):
         # Step 2: 调用后端 API
         status_lines.append("🤖 正在调用批改服务...")
         result = await call_grade_api(image_urls, subject, provider)
+        # Pull qbank meta for explainability (best-effort; doesn't block grading completion)
+        sid = result.get("session_id")
+        if sid:
+            qb = await call_qbank_meta(str(sid))
+            if qb:
+                result["_qbank_meta"] = qb
 
         # Step 3: 格式化结果
         formatted_md = format_grading_result(result)
