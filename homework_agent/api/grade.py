@@ -33,6 +33,7 @@ from homework_agent.api.session import (
     save_mistakes,
     get_mistakes,
     save_question_index,
+    save_grade_progress,
     persist_question_bank,
     _merge_bank_meta,
     _ensure_session_id,
@@ -214,6 +215,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
     deadline = started + float(settings.grade_completion_sla_seconds)
     timings_ms: Dict[str, int] = {}
     req_id = getattr(req, "_request_id", None)
+    save_grade_progress(session_for_ctx, "grade_start", "已接收请求，准备识别…", {"request_id": req_id})
 
     def remaining_seconds() -> float:
         return max(0.0, deadline - time.monotonic())
@@ -306,6 +308,12 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             provider=getattr(req.vision_provider, "value", str(req.vision_provider)),
             budget_s=v_budget,
         )
+        save_grade_progress(
+            session_for_ctx,
+            "vision_start",
+            f"Vision 识别中（{getattr(req.vision_provider, 'value', str(req.vision_provider))}）…",
+            {"budget_s": v_budget},
+        )
         v0 = time.monotonic()
         vision_result = await _run_vision(req.vision_provider, v_budget)
         timings_ms["vision_ms"] = int((time.monotonic() - v0) * 1000)
@@ -319,6 +327,12 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             vision_ms=timings_ms.get("vision_ms"),
             vision_text_len=len(getattr(vision_result, "text", "") or ""),
         )
+        save_grade_progress(
+            session_for_ctx,
+            "vision_done",
+            f"Vision 识别完成（{meta_base.get('vision_provider_used')}）",
+            {"vision_ms": timings_ms.get("vision_ms"), "vision_text_len": len(getattr(vision_result, "text", "") or "")},
+        )
     except Exception as e:
         log_event(
             logger,
@@ -330,6 +344,11 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             error_type=e.__class__.__name__,
             error=str(e),
             budget_s=v_budget,
+        )
+        save_grade_progress(
+            session_for_ctx,
+            "vision_failed",
+            f"Vision 识别失败（{getattr(req.vision_provider, 'value', str(req.vision_provider))}）：{_vision_err_str(e, v_budget)}",
         )
         if req.vision_provider == VisionProvider.DOUBAO:
             probe = _probe_url_head(_first_public_image_url(req.images))
@@ -375,6 +394,12 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                     vision_raw_text=None,
                 )
             try:
+                save_grade_progress(
+                    session_for_ctx,
+                    "vision_fallback_start",
+                    "Vision 识别回退到 qwen3（本地下载+base64）…",
+                    {"budget_s": v_budget2},
+                )
                 # Strong fallback: if URL fetch is flaky for cloud providers, convert URLs to base64 locally for Qwen3.
                 converted_images: List[Any] = []
                 converted_any = False
@@ -415,6 +440,12 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                     used_base64=meta_base.get("vision_used_base64_fallback"),
                     vision_text_len=len(getattr(vision_result, "text", "") or ""),
                 )
+                save_grade_progress(
+                    session_for_ctx,
+                    "vision_done",
+                    "Vision 识别完成（qwen3 兜底）",
+                    {"used_base64_fallback": bool(converted_any), "vision_text_len": len(getattr(vision_result, "text", "") or "")},
+                )
                 vision_fallback_warning = (
                     f"Vision(doubao) 失败，已回退到 qwen3: {_vision_err_str(e, v_budget)}"
                     + (f"；{probe}" if probe else "")
@@ -431,6 +462,11 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                     error_type=e2.__class__.__name__,
                     error=str(e2),
                     budget_s=v_budget2,
+                )
+                save_grade_progress(
+                    session_for_ctx,
+                    "vision_failed",
+                    f"Vision 回退也失败：{_vision_err_str(e2, v_budget2)}",
                 )
                 persist_question_bank(
                     session_id=session_for_ctx,
@@ -546,6 +582,12 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                     session_id=session_for_ctx,
                     provider=provider_str,
                 )
+                save_grade_progress(
+                    session_for_ctx,
+                    "llm_start",
+                    "批改中（LLM 推理中）…",
+                    {"provider": provider_str},
+                )
                 grading_result = await _grade_math(provider_str)
                 timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
                 meta_base["llm_provider_used"] = provider_str
@@ -559,6 +601,16 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                     wrong_items=len(getattr(grading_result, "wrong_items", []) or []),
                     questions=len(getattr(grading_result, "questions", []) or []),
                 )
+                save_grade_progress(
+                    session_for_ctx,
+                    "llm_done",
+                    "批改完成（LLM 推理结束）",
+                    {
+                        "provider": meta_base.get("llm_provider_used"),
+                        "llm_ms": timings_ms.get("llm_ms"),
+                        "questions": len(getattr(grading_result, "questions", []) or []),
+                    },
+                )
             except Exception as e:
                 log_event(
                     logger,
@@ -570,6 +622,12 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                     error_type=e.__class__.__name__,
                     error=str(e),
                 )
+                save_grade_progress(
+                    session_for_ctx,
+                    "llm_failed",
+                    f"批改失败：{e.__class__.__name__}: {str(e)}",
+                    {"provider": provider_str},
+                )
                 if provider_str == "ark":
                     g0 = time.monotonic()
                     log_event(
@@ -580,6 +638,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                         session_id=session_for_ctx,
                         provider="silicon",
                     )
+                    save_grade_progress(session_for_ctx, "llm_fallback_start", "批改回退到 qwen3（silicon）…")
                     grading_result = await _grade_math("silicon")
                     timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
                     meta_base["llm_provider_used"] = "silicon"
@@ -591,6 +650,12 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                         session_id=session_for_ctx,
                         provider="silicon",
                         llm_ms=timings_ms.get("llm_ms"),
+                    )
+                    save_grade_progress(
+                        session_for_ctx,
+                        "llm_done",
+                        "批改完成（qwen3 兜底）",
+                        {"provider": "silicon", "llm_ms": timings_ms.get("llm_ms")},
                     )
                     grading_result.warnings = (grading_result.warnings or []) + [
                         f"Ark grading error, fell back to qwen3: {str(e)}"
@@ -867,6 +932,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         wrong_count=getattr(grading_result, "wrong_count", None),
         total_items=getattr(grading_result, "total_items", None),
     )
+    save_grade_progress(session_for_ctx, "done", "批改结果已生成", {"timings_ms": timings_ms})
     return GradeResponse(
         wrong_items=grading_result.wrong_items,
         summary=grading_result.summary,
@@ -991,6 +1057,7 @@ async def grade_homework(
     # 2.5 Ensure session_id is always present so results can be delivered to /chat
     session_for_ctx = _ensure_session_id(req.session_id or req.batch_id)
     req = req.model_copy(update={"session_id": session_for_ctx})
+    save_grade_progress(session_for_ctx, "accepted", "已开始处理…", {"request_id": request_id})
 
     # 3. 决定同步/异步
     is_large_batch = len(req.images) > 5
@@ -1061,6 +1128,7 @@ async def grade_homework(
     except HTTPException:
         raise
     except Exception as e:
+        save_grade_progress(session_for_ctx, "failed", f"系统错误：{str(e)}", {"error_type": e.__class__.__name__})
         log_event(
             logger,
             "grade_failed",

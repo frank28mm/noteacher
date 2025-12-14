@@ -220,6 +220,35 @@ def get_question_bank(session_id: str) -> Optional[Dict[str, Any]]:
     return bank if isinstance(bank, dict) else None
 
 
+def save_grade_progress(session_id: str, stage: str, message: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    """Persist best-effort grade progress for UI polling during long /grade calls."""
+    if not session_id:
+        return
+    payload: Dict[str, Any] = {
+        "session_id": session_id,
+        "stage": str(stage),
+        "message": str(message),
+        "ts": datetime.now().isoformat(),
+    }
+    if isinstance(extra, dict) and extra:
+        payload["extra"] = extra
+    cache_store.set(
+        f"grade_progress:{session_id}",
+        {"progress": payload},
+        ttl_seconds=SESSION_TTL_SECONDS,
+    )
+
+
+def get_grade_progress(session_id: str) -> Optional[Dict[str, Any]]:
+    if not session_id:
+        return None
+    data = cache_store.get(f"grade_progress:{session_id}")
+    if not isinstance(data, dict):
+        return None
+    p = data.get("progress")
+    return p if isinstance(p, dict) else None
+
+
 def _build_question_index_for_pages(page_urls: List[str]) -> Dict[str, Any]:
     """
     Build per-question bbox/slice index using Baidu PaddleOCR-VL.
@@ -328,3 +357,10 @@ async def get_session_qbank_meta(session_id: str):
         out["qindex_available"] = False
         out["qindex_warnings"] = []
     return out
+
+
+@router.get("/session/{session_id}/progress")
+async def get_session_progress(session_id: str):
+    """UI 辅助接口：返回 /grade 的当前进度（best-effort，可能为空）。"""
+    sid = _ensure_session_id(session_id)
+    return get_grade_progress(sid) or {"session_id": sid, "stage": "unknown", "message": "no progress yet"}

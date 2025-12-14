@@ -70,6 +70,65 @@ DEMO_GRADE_TIMEOUT_SECONDS = float(
     os.getenv("DEMO_GRADE_TIMEOUT_SECONDS", str(_settings.grade_completion_sla_seconds + 60))
 )
 
+_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+
+def _render_stage_lines(stage: str, elapsed_s: int) -> str:
+    """
+    Render a simple, UX-friendly pipeline status for demo.
+    This is the reference UX for the future APP frontend.
+    """
+    stage = (stage or "").strip().lower()
+    idx = elapsed_s % len(_SPINNER_FRAMES)
+    spin = _SPINNER_FRAMES[idx]
+
+    def done_line(text: str) -> str:
+        return f"✅ {text}"
+
+    def doing_line(text: str) -> str:
+        return f"{spin} {text}（{elapsed_s}s）"
+
+    def todo_line(text: str) -> str:
+        return f"⬜ {text}"
+
+    # Default pipeline
+    upload = done_line("图片上传完成") if stage not in {"uploading"} else doing_line("图片上传中…")
+    vision = todo_line("Vision 识别中…")
+    grade = todo_line("智能批改中…")
+    done = todo_line("完成")
+
+    if stage in {"accepted", "grade_start"}:
+        vision = doing_line("Vision 识别中…")
+    elif stage in {"vision_start", "vision_fallback_start"}:
+        vision = doing_line("Vision 识别中…")
+    elif stage in {"vision_done"}:
+        vision = done_line("Vision 识别完成")
+        grade = doing_line("智能批改中…")
+    elif stage in {"llm_start", "llm_fallback_start"}:
+        vision = done_line("Vision 识别完成")
+        grade = doing_line("智能批改中…")
+    elif stage in {"llm_done"}:
+        vision = done_line("Vision 识别完成")
+        grade = done_line("智能批改完成")
+        done = doing_line("整理结果…")
+    elif stage in {"done"}:
+        vision = done_line("Vision 识别完成")
+        grade = done_line("智能批改完成")
+        done = done_line("完成")
+    elif stage in {"failed"}:
+        vision = done_line("Vision 识别（已尝试）")
+        grade = done_line("智能批改（已尝试）")
+        done = f"❌ 失败（{elapsed_s}s）"
+
+    return "\n".join(
+        [
+            upload,
+            vision,
+            grade,
+            done,
+        ]
+    )
+
 
 def upload_to_supabase(file_path: str, min_side: int) -> List[str]:
     """上传文件到 Supabase Storage 并返回公网 URL 列表
@@ -167,10 +226,9 @@ def format_grading_result(result: Dict[str, Any]) -> str:
     return md
 
 
-async def call_grade_api(image_urls: List[str], subject: str, provider: str) -> Dict[str, Any]:
+async def call_grade_api(image_urls: List[str], subject: str, provider: str, session_id: str) -> Dict[str, Any]:
     """调用后端 /api/v1/grade API"""
     # 构建请求
-    session_id = f"demo_{uuid.uuid4().hex[:8]}"
     payload = {
         "images": [{"url": u} for u in image_urls],
         "subject": subject,
@@ -189,6 +247,20 @@ async def call_grade_api(image_urls: List[str], subject: str, provider: str) -> 
         raise Exception(f"API 调用失败: {response.status_code} - {response.text}")
 
     return response.json()
+
+async def call_grade_progress(session_id: str) -> Optional[Dict[str, Any]]:
+    """轮询后端 /session/{session_id}/progress，获取实时阶段信息（best-effort）。"""
+    if not session_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{API_BASE_URL}/session/{session_id}/progress")
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 async def call_qbank_meta(session_id: str) -> Optional[Dict[str, Any]]:
@@ -269,51 +341,79 @@ async def call_chat_api(
 
 
 async def grade_homework_logic(img_path, subject, provider):
-    """批改作业的主逻辑（非流式，返回最终结果与状态）"""
+    """批改作业主逻辑（流式状态更新）：上传 → Vision → 批改 → 展示结果"""
     # gr.File returns path string or object with .name
     if hasattr(img_path, "name"):
         img_path = img_path.name
 
     if not img_path:
-        return "**错误**：请上传图片文件。", None, [], None, "❌ 未选择文件"
+        yield "**错误**：请上传图片文件。", None, None, "❌ 未选择文件"
+        return
 
-    status_lines = []
+    session_id = f"demo_{uuid.uuid4().hex[:8]}"
+    started = time.monotonic()
+
     try:
         # 尺寸下限：Qwen3 >=28px，Doubao >=14px
         min_side = 28 if provider == "qwen3" else 14
 
         # Step 1: 上传到 Supabase Storage
-        status_lines.append("📤 正在上传文件到云存储...")
-        image_urls = upload_to_supabase(img_path, min_side=min_side)
+        yield "📝 正在开始批改…", session_id, None, _render_stage_lines("uploading", int(time.monotonic() - started))
+
+        upload_task = asyncio.create_task(asyncio.to_thread(upload_to_supabase, img_path, min_side=min_side))
+        while not upload_task.done():
+            await asyncio.sleep(0.15)
+            yield "📝 正在开始批改…", session_id, None, _render_stage_lines(
+                "uploading", int(time.monotonic() - started)
+            )
+
+        image_urls = await upload_task
         if not image_urls:
-            return "**错误**：上传失败，未获取到 URL。", None, [], None, "❌ 上传失败"
-        status_lines.append(f"✅ 文件已上传，共 {len(image_urls)} 张用于批改")
+            yield "**错误**：上传失败，未获取到 URL。", session_id, None, "❌ 上传失败"
+            return
+
+        page_url = image_urls[0]
+        yield "📝 已上传，等待 Vision 识别与批改…", session_id, page_url, _render_stage_lines(
+            "accepted", int(time.monotonic() - started)
+        )
 
         # Step 2: 调用后端 API
-        status_lines.append("🤖 正在调用批改服务...")
-        result = await call_grade_api(image_urls, subject, provider)
+        grade_task = asyncio.create_task(call_grade_api(image_urls, subject, provider, session_id=session_id))
+
+        last_progress_stage = "accepted"
+        while not grade_task.done():
+            await asyncio.sleep(0.4)
+            p = await call_grade_progress(session_id)
+            if isinstance(p, dict):
+                stage = str(p.get("stage") or "").strip() or last_progress_stage
+                last_progress_stage = stage
+            else:
+                stage = last_progress_stage
+            yield "📝 后端处理中，请耐心等待…", session_id, page_url, _render_stage_lines(
+                stage, int(time.monotonic() - started)
+            )
+
+        result = await grade_task
         # Pull qbank meta for explainability (best-effort; doesn't block grading completion)
-        sid = result.get("session_id")
-        if sid:
-            qb = await call_qbank_meta(str(sid))
+        if session_id:
+            qb = await call_qbank_meta(str(session_id))
             if qb:
                 result["_qbank_meta"] = qb
 
         # Step 3: 格式化结果
         formatted_md = format_grading_result(result)
-        session_id = result.get('session_id')
-
-        status_lines.append("✅ 批改完成！")
-        status_md = "\n".join(status_lines)
-        return formatted_md, session_id, image_urls[0], status_md
+        yield formatted_md, session_id, page_url, _render_stage_lines("done", int(time.monotonic() - started))
+        return
 
     except ValueError as e:
-        return f"**错误**：{str(e)}", None, None, f"❌ 失败：{e}"
+        yield f"**错误**：{str(e)}", session_id, None, f"❌ 失败：{e}"
+        return
     except Exception as e:
         err_msg = str(e)
         if "20040" in err_msg:
             err_msg += "\n\n提示：模型无法下载该 URL，建议检查图片是否可公开访问"
-        return f"**系统错误**：{err_msg}", None, None, f"❌ 失败：{err_msg}"
+        yield f"**系统错误**：{err_msg}", session_id, None, f"❌ 失败：{err_msg}"
+        return
 
 
 async def vision_debug_logic(img_path, provider):
