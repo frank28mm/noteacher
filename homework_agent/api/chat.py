@@ -471,13 +471,35 @@ def _format_math_for_display(text: str) -> str:
         s = s.replace("\\(", "$").replace("\\)", "$")
         s = re.sub(r"\\boldsymbol\{([^{}]+)\}", r"\1", s)
 
+        # Some providers/models return *double-escaped* LaTeX commands inside $...$,
+        # e.g. `\\frac{3}{8}` which breaks MathJax (treated as a newline `\\` + text).
+        # Fix ONLY inside math blocks to avoid mangling normal text.
+        def _fix_latex_inner(inner: str) -> str:
+            if not inner:
+                return inner
+            # Convert "\\frac" -> "\frac", "\\pm" -> "\pm", etc. (only when a command name follows).
+            inner = re.sub(r"\\\\([A-Za-z]+)", r"\\\1", inner)
+            # Spacing commands: "\\," "\\;" "\\!" -> "\," "\;" "\!"
+            inner = re.sub(r"\\\\([,;!])", r"\\\1", inner)
+            # Improve mixed-number readability: 99\frac{3}{8} -> 99\,\frac{3}{8}
+            inner = re.sub(r"(\d)(\\(?:frac|tfrac)\b)", r"\1\\,\2", inner)
+            return inner
+
+        def _fix_display(m: re.Match) -> str:
+            inner = _fix_latex_inner(m.group(1))
+            # Also remove nested single-$ markers inside display blocks.
+            inner = inner.replace("$", "")
+            return "$$" + inner + "$$"
+
+        def _fix_inline(m: re.Match) -> str:
+            return "$" + _fix_latex_inner(m.group(1)) + "$"
+
+        # Fix display first, then inline (avoid $$ being caught by inline regex).
+        s = re.sub(r"\$\$(.*?)\$\$", _fix_display, s, flags=re.S)
+        s = re.sub(r"(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)", _fix_inline, s, flags=re.S)
+
         # Models sometimes produce invalid nested $ inside $$...$$ blocks (e.g. $$ ... $t^2$ ... $$).
         # Fix by removing single-$ markers inside display-math blocks.
-        def _fix_display_block(m: re.Match) -> str:
-            inner = m.group(1)
-            return "$$" + inner.replace("$", "") + "$$"
-
-        s = re.sub(r"\$\$(.*?)\$\$", _fix_display_block, s, flags=re.S)
     except Exception:
         return str(text)
     return s
