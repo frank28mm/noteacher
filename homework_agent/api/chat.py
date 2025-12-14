@@ -196,6 +196,17 @@ def _extract_requested_question_number(message: str) -> Optional[str]:
     if not msg:
         return None
 
+    # Normalize common fullwidth punctuation for Chinese input / voice transcription.
+    msg = (
+        msg.replace("（", "(")
+        .replace("）", ")")
+        .replace("，", ",")
+        .replace("。", ".")
+        .replace("？", "?")
+        .replace("：", ":")
+        .replace("；", ";")
+    )
+
     qtoken = r"(\d{1,3}(?:\s*\(\s*\d+\s*\)\s*)?(?:[①②③④⑤⑥⑦⑧⑨])?)"
 
     # Case 1: user sends a bare question number like "20(2)" / "28(1)②" / "27".
@@ -203,10 +214,72 @@ def _extract_requested_question_number(message: str) -> Optional[str]:
     if bare:
         return _normalize_question_number(bare.group(1))
 
+    # Case 1.25: inline sub-question token anywhere (e.g. "我的20(3)哪里有问题？").
+    # Safe because it requires a numeric "(n)" pattern, unlikely to appear in algebraic expressions.
+    inline_sub = re.search(r"(\d{1,3}\s*\(\s*\d+\s*\)\s*(?:[①②③④⑤⑥⑦⑧⑨])?)", msg)
+    if inline_sub:
+        return _normalize_question_number(inline_sub.group(1))
+
+    # Case 1.5: Chinese-style "第20题第一小题 / 20题的第一小题 / 二十题第一小题" (voice input friendly).
+    # We only support a small set of Chinese ordinals for sub-question mapping.
+    cn_ord_map = {
+        "一": 1,
+        "二": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
+
+    def _parse_cn_int(s: str) -> Optional[int]:
+        s = (s or "").strip()
+        if not s:
+            return None
+        if s.isdigit():
+            try:
+                return int(s)
+            except ValueError:
+                return None
+        # Basic Chinese numerals up to 99: 十, 二十, 二十一, 十一, 三十六
+        chars = [c for c in s if c in "零一二三四五六七八九十两"]
+        if not chars:
+            return None
+        s2 = "".join("二" if c == "两" else c for c in chars)
+        if s2 == "十":
+            return 10
+        if "十" in s2:
+            parts = s2.split("十")
+            left = parts[0]
+            right = parts[1] if len(parts) > 1 else ""
+            tens = cn_ord_map.get(left, 1) if left else 1
+            ones = cn_ord_map.get(right, 0) if right else 0
+            return tens * 10 + ones
+        # single digit
+        return cn_ord_map.get(s2)
+
+    # Match like: "讲解20题的第一小题" / "二十题第一小题" / "第20题(1)" etc.
+    m_sub = re.search(
+        r"(?:第\s*)?([0-9一二三四五六七八九十两]{1,6})\s*题.*?(?:第\s*)?([0-9一二三四五六七八九十]{1,3})\s*(?:小题|小问|问)",
+        msg,
+    )
+    if m_sub:
+        base = _parse_cn_int(m_sub.group(1))
+        sub = _parse_cn_int(m_sub.group(2))
+        if base and sub:
+            return _normalize_question_number(f"{base}({sub})")
+
     # Case 2: explicit "question" context. Avoid capturing negatives: "-8" should not mean "第8题".
     if re.search(r"(第\s*\d|题\s*\d|\d+\s*题|讲|聊|解释|辅导|说说|再讲|再聊)", msg):
         # Prefer forms like "第20题" / "讲20(2)" / "聊第28(1)②题" / "题27".
         m = re.search(rf"第\s*{qtoken}\s*题", msg)
+        if m:
+            return _normalize_question_number(m.group(1))
+        # "20题" form (common Chinese input)
+        m = re.search(rf"{qtoken}\s*题", msg)
         if m:
             return _normalize_question_number(m.group(1))
         m = re.search(rf"(?:题\s*|题号\s*){qtoken}", msg)
@@ -224,10 +297,13 @@ def _has_explicit_question_switch_intent(message: str) -> bool:
     msg = (message or "").strip()
     if not msg:
         return False
+    msg = msg.replace("（", "(").replace("）", ")")
     # Explicit cues.
     if re.search(r"(第\s*\d|题\s*\d|\d+\s*题|讲|聊|解释|辅导|换一题|下一题)", msg):
         return True
     # A bare question number should also count (e.g. "20(2)").
+    if re.search(r"\d{1,3}\s*\(\s*\d+\s*\)", msg):
+        return True
     return _extract_requested_question_number(msg) is not None
 
 
@@ -379,74 +455,29 @@ def _format_math_for_display(text: str) -> str:
     s = str(text)
     try:
         # Avoid markdown artifacts in a chat bubble (code / strikethrough feel "unnatural" for students).
-        s = s.replace("~~", "")
+        s = re.sub(r"[~～]{2,}", "", s)
         s = re.sub(r"```+", "", s)
         s = s.replace("`", "")
+        # Strip HTML strikethrough tags if the model emits them.
+        s = re.sub(r"</?\s*(?:del|s|strike)\b[^>]*>", "", s, flags=re.IGNORECASE)
+        # Strip unicode combining long stroke (strikethrough-like) if present.
+        s = re.sub(r"[\u0336\u0335\u0334\u0333]", "", s)
 
-        # Normalize LaTeX delimiters to $...$ for MathJax (demo UI injects MathJax).
+        # Best-effort normalization:
+        # - keep TeX in-place (Gradio Chatbot handles LaTeX rendering via latex_delimiters)
+        # - normalize \(...\), \[...\] to $...$, $$...$$
+        # - strip boldsymbol wrappers for readability
         s = s.replace("\\[", "$$").replace("\\]", "$$")
         s = s.replace("\\(", "$").replace("\\)", "$")
+        s = re.sub(r"\\boldsymbol\{([^{}]+)\}", r"\1", s)
 
-        # Convert caret-style exponents (e.g., 3^m, x^2, x^(n+1)) to LaTeX inline math to avoid "code-like" style.
-        # Best-effort: avoid touching existing $...$ spans and backticks.
-        def _wrap_symbolic_pow(segment: str) -> str:
-            def repl(m: re.Match) -> str:
-                base = m.group(1)
-                exp = m.group(2)
-                exp = exp.strip()
-                # Normalize parentheses exponent: x^(n+1) -> x^{n+1}
-                if exp.startswith("(") and exp.endswith(")"):
-                    exp = exp[1:-1].strip()
-                return f"${base}^{{{exp}}}$"
+        # Models sometimes produce invalid nested $ inside $$...$$ blocks (e.g. $$ ... $t^2$ ... $$).
+        # Fix by removing single-$ markers inside display-math blocks.
+        def _fix_display_block(m: re.Match) -> str:
+            inner = m.group(1)
+            return "$$" + inner.replace("$", "") + "$$"
 
-            # base can be 1-3 tokens (x, 3, (-x), 3^m already handled above for numeric)
-            return re.sub(
-                r"(?<![\\$])\b([A-Za-z]|\d+|\([^\s()]{1,6}\))\s*\^\s*(\(\s*[A-Za-z0-9+\-\s]+\s*\)|[A-Za-z0-9]+(?:\s*[+\-]\s*[A-Za-z0-9]+)*)",
-                repl,
-                segment,
-            )
-
-        out: List[str] = []
-        plain: List[str] = []
-        mode: str = "plain"  # plain | code | math
-        i = 0
-        while i < len(s):
-            ch = s[i]
-            if mode == "plain":
-                if ch == "`":
-                    if plain:
-                        out.append(_wrap_symbolic_pow("".join(plain)))
-                        plain = []
-                    out.append("`")
-                    mode = "code"
-                    i += 1
-                    continue
-                if ch == "$":
-                    if plain:
-                        out.append(_wrap_symbolic_pow("".join(plain)))
-                        plain = []
-                    out.append("$")
-                    mode = "math"
-                    i += 1
-                    continue
-                plain.append(ch)
-                i += 1
-                continue
-            elif mode == "code":
-                out.append(ch)
-                i += 1
-                if ch == "`":
-                    mode = "plain"
-                continue
-            else:  # math
-                out.append(ch)
-                i += 1
-                if ch == "$":
-                    mode = "plain"
-                continue
-        if plain:
-            out.append(_wrap_symbolic_pow("".join(plain)))
-        s = "".join(out)
+        s = re.sub(r"\$\$(.*?)\$\$", _fix_display_block, s, flags=re.S)
     except Exception:
         return str(text)
     return s
