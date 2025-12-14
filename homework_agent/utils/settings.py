@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
 
 
 class Settings(BaseSettings):
@@ -84,6 +85,11 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     allow_origins: list[str] = Field(default=["*"], validation_alias="ALLOW_ORIGINS")
+    log_to_file: bool = Field(default=True, validation_alias="LOG_TO_FILE")
+    log_file_path: str = Field(
+        default=os.path.join("logs", "backend.log"),
+        validation_alias="LOG_FILE_PATH",
+    )
 
 
 @lru_cache(maxsize=1)

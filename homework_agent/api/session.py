@@ -1,0 +1,330 @@
+from __future__ import annotations
+
+import logging
+import time
+import uuid
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, HTTPException, status
+
+from homework_agent.core.qbank import _normalize_question_number
+from homework_agent.services.ocr_baidu import BaiduPaddleOCRVLClient
+from homework_agent.core.layout_index import (
+    build_question_layouts_from_blocks,
+    crop_and_upload_slices,
+)
+from homework_agent.utils.cache import BaseCache, get_cache_store
+from homework_agent.utils.settings import get_settings
+from homework_agent.utils.observability import log_event
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+# 缓存：可配置 Redis，默认进程内存
+cache_store: BaseCache = get_cache_store()
+
+# 常量
+# 取消硬性 5 轮上限；仅保留计数用于提示递进
+MAX_SOCRATIC_TURNS = 999999
+SESSION_TTL_HOURS = 24
+IDP_TTL_HOURS = 24
+SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
+
+
+def _ensure_session_id(value: Optional[str]) -> str:
+    """Ensure we always have a stable session_id for grade→chat delivery."""
+    v = (value or "").strip()
+    if v:
+        return v
+    return f"session_{uuid.uuid4().hex[:8]}"
+
+
+def _count_questions_with_options(bank: Dict[str, Any]) -> int:
+    qs = bank.get("questions")
+    if not isinstance(qs, dict):
+        return 0
+    n = 0
+    for q in qs.values():
+        if isinstance(q, dict) and q.get("options"):
+            n += 1
+    return n
+
+
+def persist_question_bank(
+    *,
+    session_id: str,
+    bank: Dict[str, Any],
+    grade_status: str,
+    grade_summary: str,
+    grade_warnings: List[str],
+    timings_ms: Optional[Dict[str, int]] = None,
+) -> None:
+    """Persist the canonical qbank snapshot that /chat must rely on."""
+    if not session_id:
+        return
+    now = datetime.now().isoformat()
+    meta = bank.get("meta") if isinstance(bank.get("meta"), dict) else {}
+    meta.update(
+        {
+            "updated_at": now,
+            "grade_status": grade_status,
+            "grade_summary": grade_summary,
+            "warnings": grade_warnings or [],
+        }
+    )
+    if timings_ms:
+        meta["timings_ms"] = {str(k): int(v) for k, v in timings_ms.items() if v is not None}
+    # Derived stats for acceptance checks
+    try:
+        meta["vision_raw_len"] = int(len(bank.get("vision_raw_text") or ""))
+        meta["questions_count"] = int(len(bank.get("questions") or {})) if isinstance(bank.get("questions"), dict) else 0
+        meta["questions_with_options"] = int(_count_questions_with_options(bank))
+    except Exception:
+        pass
+    bank["meta"] = meta
+    save_question_bank(session_id, bank)
+    try:
+        log_event(
+            logger,
+            "qbank_saved",
+            session_id=session_id,
+            status=grade_status,
+            questions=meta.get("questions_count"),
+            questions_with_options=meta.get("questions_with_options"),
+            vision_raw_len=meta.get("vision_raw_len"),
+            timings_ms=meta.get("timings_ms"),
+        )
+    except Exception:
+        pass
+
+
+def _merge_bank_meta(bank: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(bank, dict):
+        return bank
+    meta = bank.get("meta") if isinstance(bank.get("meta"), dict) else {}
+    meta.update({k: v for k, v in (extra or {}).items() if v is not None})
+    bank["meta"] = meta
+    return bank
+
+
+def _now_ts() -> float:
+    return time.time()
+
+
+def _coerce_ts(v: Any) -> Optional[float]:
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, datetime):
+        return float(v.timestamp())
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except Exception:
+            pass
+        try:
+            return float(datetime.fromisoformat(s).timestamp())
+        except Exception:
+            return None
+    return None
+
+
+def get_session(session_id: str) -> Optional[Dict[str, Any]]:
+    data = cache_store.get(f"sess:{session_id}")
+    if not isinstance(data, dict):
+        return None
+    # Normalize timestamps for runtime logic.
+    for k in ("created_at", "updated_at"):
+        ts = _coerce_ts(data.get(k))
+        if ts is not None:
+            data[k] = ts
+    return data
+
+
+def save_session(session_id: str, data: Dict[str, Any]) -> None:
+    copy = dict(data or {})
+    copy["created_at"] = _coerce_ts(copy.get("created_at")) or _now_ts()
+    copy["updated_at"] = _coerce_ts(copy.get("updated_at")) or _now_ts()
+    cache_store.set(f"sess:{session_id}", copy, ttl_seconds=SESSION_TTL_SECONDS)
+
+
+def delete_session(session_id: str) -> None:
+    cache_store.delete(f"sess:{session_id}")
+
+
+def save_mistakes(session_id: str, wrong_items: List[Dict[str, Any]]) -> None:
+    """缓存错题列表供辅导上下文使用，仅限当前批次，会话 TTL 同步。"""
+    # 为每个 wrong_item 补充本地索引与稳定 item_id，便于后续检索
+    enriched = []
+    for idx, item in enumerate(wrong_items):
+        enriched_item = dict(item)
+        # ensure question_number preserved as string
+        qn = _normalize_question_number(enriched_item.get("question_number") or enriched_item.get("question_index"))
+        if qn is not None:
+            enriched_item["question_number"] = qn
+        item_id = enriched_item.get("item_id") or enriched_item.get("id")
+        if not item_id:
+            item_id = f"item-{idx}"
+        enriched_item["item_id"] = str(item_id)
+        enriched_item.setdefault("id", idx)
+        enriched.append(enriched_item)
+    cache_store.set(
+        f"mistakes:{session_id}",
+        {"wrong_items": enriched, "ts": datetime.now().isoformat()},
+        ttl_seconds=SESSION_TTL_SECONDS,
+    )
+
+
+def get_mistakes(session_id: str) -> Optional[List[Dict[str, Any]]]:
+    data = cache_store.get(f"mistakes:{session_id}")
+    if not data:
+        return None
+    return data.get("wrong_items")
+
+
+def save_question_index(session_id: str, index: Dict[str, Any]) -> None:
+    cache_store.set(
+        f"qindex:{session_id}",
+        {"index": index, "ts": datetime.now().isoformat()},
+        ttl_seconds=SESSION_TTL_SECONDS,
+    )
+
+
+def get_question_index(session_id: str) -> Optional[Dict[str, Any]]:
+    data = cache_store.get(f"qindex:{session_id}")
+    if not data:
+        return None
+    idx = data.get("index")
+    return idx if isinstance(idx, dict) else None
+
+
+def save_question_bank(session_id: str, bank: Dict[str, Any]) -> None:
+    cache_store.set(
+        f"qbank:{session_id}",
+        {"bank": bank, "ts": datetime.now().isoformat()},
+        ttl_seconds=SESSION_TTL_SECONDS,
+    )
+
+
+def get_question_bank(session_id: str) -> Optional[Dict[str, Any]]:
+    data = cache_store.get(f"qbank:{session_id}")
+    if not data:
+        return None
+    bank = data.get("bank")
+    return bank if isinstance(bank, dict) else None
+
+
+def _build_question_index_for_pages(page_urls: List[str]) -> Dict[str, Any]:
+    """
+    Build per-question bbox/slice index using Baidu PaddleOCR-VL.
+    Returns dict keyed by question_number.
+    """
+    settings = get_settings()
+    ocr = BaiduPaddleOCRVLClient()
+    if not ocr.is_configured():
+        return {"questions": {}, "warnings": ["BAIDU_OCR 未配置，跳过 bbox/slice 生成"]}
+
+    questions: Dict[str, Any] = {}
+    warnings: List[str] = []
+    for page_idx, page_url in enumerate(page_urls or []):
+        if not page_url:
+            continue
+        try:
+            task_id = ocr.submit(image_url=page_url)
+            task = ocr.wait(task_id)
+            blocks = ocr.extract_text_blocks(task.raw)
+            if not blocks:
+                warnings.append(f"page[{page_idx}]: OCR 未返回可用 blocks，改用整页")
+                continue
+
+            # We need image size for normalization. Prefer reading from first bbox if provided;
+            # otherwise infer via download in crop_and_upload_slices (it loads the image anyway).
+            # Here we download once for size.
+            from homework_agent.core.layout_index import download_image
+
+            img = download_image(page_url, timeout=30.0)
+            w, h = img.size
+
+            layouts = build_question_layouts_from_blocks(
+                blocks=blocks,
+                page_width=w,
+                page_height=h,
+                padding_ratio=settings.slice_padding_ratio,
+            )
+            # Upload slices (best-effort)
+            layouts = crop_and_upload_slices(
+                page_image_url=page_url,
+                layouts=layouts,
+                prefix=f"slices/{datetime.now().strftime('%Y%m%d')}/",
+            )
+
+            for qn, layout in layouts.items():
+                # If same qn appears on multiple pages, keep first and attach extra pages as list
+                entry = questions.get(qn) or {"question_number": qn, "pages": []}
+                entry["pages"].append(
+                    {
+                        "page_index": page_idx,
+                        "page_image_url": page_url,
+                        "question_bboxes": [{"coords": b} for b in layout.bboxes_norm] if layout.bboxes_norm else [],
+                        "slice_image_urls": layout.slice_image_urls,
+                        "warnings": layout.warnings,
+                        "ocr": {"provider": "baidu_paddleocr_vl", "task_id": task.task_id, "status": task.status},
+                    }
+                )
+                questions[qn] = entry
+        except Exception as e:
+            warnings.append(f"page[{page_idx}]: OCR/切片失败，改用整页：{str(e)}")
+            continue
+
+    return {"questions": questions, "warnings": warnings}
+
+
+@router.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    job = cache_store.get(f"job:{job_id}")
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return job
+
+
+@router.get("/session/{session_id}/qbank")
+async def get_session_qbank_meta(session_id: str):
+    """
+    验收/调试接口：查看本次批改是否已将“识别/判定/题目信息”写入 qbank（供 /chat 使用）。
+    默认不返回整段 vision_raw_text，避免过大。
+    """
+    sid = _ensure_session_id(session_id)
+    bank = get_question_bank(sid)
+    if not bank:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="qbank not found for session_id")
+
+    questions = bank.get("questions") if isinstance(bank, dict) else None
+    qnums: List[str] = []
+    if isinstance(questions, dict):
+        qnums = [str(k) for k in questions.keys()]
+
+    meta = bank.get("meta") if isinstance(bank.get("meta"), dict) else {}
+    out: Dict[str, Any] = {
+        "session_id": sid,
+        "subject": bank.get("subject"),
+        "page_image_urls_count": len(bank.get("page_image_urls") or []) if isinstance(bank.get("page_image_urls"), list) else 0,
+        "vision_raw_len": len(bank.get("vision_raw_text") or ""),
+        "questions_count": len(qnums),
+        "questions_with_options": _count_questions_with_options(bank),
+        "question_numbers": sorted(qnums, key=len, reverse=False)[:300],
+        "meta": meta,
+    }
+    qindex = get_question_index(sid)
+    if isinstance(qindex, dict):
+        out["qindex_available"] = bool(qindex.get("questions"))
+        out["qindex_warnings"] = qindex.get("warnings") or []
+    else:
+        out["qindex_available"] = False
+        out["qindex_warnings"] = []
+    return out

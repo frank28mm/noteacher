@@ -28,6 +28,7 @@ from homework_agent.services.qindex_queue import (
     QIndexJob,
     store_qindex_result,
 )
+from homework_agent.utils.observability import log_event
 
 # Reuse the same builder used by the API, but run it out-of-process.
 from homework_agent.api.routes import _build_question_index_for_pages  # noqa: E402
@@ -67,7 +68,7 @@ def main() -> int:
         ttl_seconds = 24 * 3600
 
     qkey = queue_key()
-    logger.info("QIndex worker started. queue=%s", qkey)
+    log_event(logger, "qindex_worker_started", queue=qkey)
 
     while not stopper.stop:
         try:
@@ -79,19 +80,31 @@ def main() -> int:
             if not job.session_id or not job.page_urls:
                 continue
 
-            logger.info("Processing qindex job: session_id=%s pages=%d", job.session_id, len(job.page_urls))
+            log_event(logger, "qindex_job_start", session_id=job.session_id, pages=len(job.page_urls))
             index: dict[str, Any] = _build_question_index_for_pages(job.page_urls)
             store_qindex_result(job.session_id, index, ttl_seconds=ttl_seconds)
-            logger.info("Stored qindex: session_id=%s questions=%d", job.session_id, len(index.get("questions") or {}))
+            log_event(
+                logger,
+                "qindex_job_done",
+                session_id=job.session_id,
+                questions=len(index.get("questions") or {}),
+                warnings=index.get("warnings") or [],
+            )
 
         except Exception as e:  # pragma: no cover
+            log_event(
+                logger,
+                "qindex_worker_error",
+                level="error",
+                error_type=e.__class__.__name__,
+                error=str(e),
+            )
             logger.exception("QIndex worker error: %s", e)
             time.sleep(1)
 
-    logger.info("QIndex worker stopped.")
+    log_event(logger, "qindex_worker_stopped")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

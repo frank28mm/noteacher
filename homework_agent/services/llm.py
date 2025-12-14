@@ -33,6 +33,7 @@ from homework_agent.core.prompts import (
 )
 from homework_agent.models.schemas import Subject, SimilarityMode, Severity
 from homework_agent.utils.settings import get_settings
+from homework_agent.utils.observability import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -268,9 +269,29 @@ class LLMClient:
                     for it in result_data["wrong_items"] or []:
                         if isinstance(it, dict):
                             it.pop("standard_answer", None)
+                log_event(
+                    logger,
+                    "llm_grade_math_parsed",
+                    provider=provider,
+                    model=model,
+                    content_len=len(content or ""),
+                    questions=len(result_data.get("questions") or []) if isinstance(result_data.get("questions"), list) else None,
+                    wrong_items=len(result_data.get("wrong_items") or []) if isinstance(result_data.get("wrong_items"), list) else None,
+                    usage=getattr(response, "usage", None) and getattr(response.usage, "model_dump", lambda: None)(),
+                )
                 return MathGradingResult(**result_data)
             except Exception as parse_err:
-                logger.error(f"Math grading parse failed: {parse_err}; raw content: {content}")
+                log_event(
+                    logger,
+                    "llm_grade_math_parse_failed",
+                    level="error",
+                    provider=provider,
+                    model=model,
+                    error_type=parse_err.__class__.__name__,
+                    error=str(parse_err),
+                    content_len=len(content or ""),
+                    content_tail=(content or "")[-200:],
+                )
                 return MathGradingResult(
                     wrong_items=[],
                     summary="批改结果解析失败",
@@ -281,7 +302,15 @@ class LLMClient:
             # Re-raise network/timeout errors so tenacity can trigger retries
             raise e
         except Exception as e:
-            logger.error(f"Math grading failed: {str(e)}")
+            log_event(
+                logger,
+                "llm_grade_math_failed",
+                level="error",
+                provider=provider,
+                model=model if "model" in locals() else None,
+                error_type=e.__class__.__name__,
+                error=str(e),
+            )
             # Return error result for non-retryable errors (or after retries exhausted if wrapped elsewhere)
             # Note: Since tenacity reraise=True, final timeout will propagate out. 
             # If we want to return a Result object on final failure, we'd need an outer wrapper.
@@ -347,9 +376,29 @@ class LLMClient:
             content = response.choices[0].message.content
             try:
                 result_data = json.loads(content)
+                log_event(
+                    logger,
+                    "llm_grade_english_parsed",
+                    provider=provider,
+                    model=model,
+                    content_len=len(content or ""),
+                    questions=len(result_data.get("questions") or []) if isinstance(result_data.get("questions"), list) else None,
+                    wrong_items=len(result_data.get("wrong_items") or []) if isinstance(result_data.get("wrong_items"), list) else None,
+                    usage=getattr(response, "usage", None) and getattr(response.usage, "model_dump", lambda: None)(),
+                )
                 return EnglishGradingResult(**result_data)
             except Exception as parse_err:
-                logger.error(f"English grading parse failed: {parse_err}; raw content: {content}")
+                log_event(
+                    logger,
+                    "llm_grade_english_parse_failed",
+                    level="error",
+                    provider=provider,
+                    model=model,
+                    error_type=parse_err.__class__.__name__,
+                    error=str(parse_err),
+                    content_len=len(content or ""),
+                    content_tail=(content or "")[-200:],
+                )
                 return EnglishGradingResult(
                     wrong_items=[],
                     summary="批改结果解析失败",
@@ -359,7 +408,15 @@ class LLMClient:
         except (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
             raise e
         except Exception as e:
-            logger.error(f"English grading failed: {str(e)}")
+            log_event(
+                logger,
+                "llm_grade_english_failed",
+                level="error",
+                provider=provider,
+                model=model if "model" in locals() else None,
+                error_type=e.__class__.__name__,
+                error=str(e),
+            )
             return EnglishGradingResult(
                 wrong_items=[],
                 summary=f"批改失败: {str(e)}",

@@ -10,6 +10,7 @@ import time
 import httpx
 import gradio as gr
 from dotenv import load_dotenv
+import inspect
 
 from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple
 from homework_agent.models.schemas import Subject, VisionProvider, WrongItem, Message, ImageRef
@@ -22,6 +23,45 @@ from homework_agent.utils.settings import get_settings
 from pathlib import Path
 _project_root = Path(__file__).resolve().parent.parent
 load_dotenv(_project_root / ".env")
+
+# MathJax: render $...$ / $$...$$ formulas in chat bubbles (Route A).
+# NOTE: This loads MathJax from CDN; demo requires network.
+MATHJAX_HEAD = """
+<script>
+  window.MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
+      displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
+      processEscapes: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+    }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<script>
+  (function () {
+    function typeset() {
+      if (window.MathJax && window.MathJax.typesetPromise) {
+        window.MathJax.typesetPromise().catch(function(){});
+      }
+    }
+    function setup() {
+      try {
+        const obs = new MutationObserver(function () {
+          // Debounce a little to avoid excessive typesets during streaming.
+          clearTimeout(window.__mjx_to);
+          window.__mjx_to = setTimeout(typeset, 120);
+        });
+        obs.observe(document.body, { childList: true, subtree: true });
+      } catch (e) {}
+      typeset();
+    }
+    window.addEventListener('load', setup);
+  })();
+</script>
+"""
 
 # API 基础 URL - 从环境变量读取，默认为本地
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000/api/v1")
@@ -409,7 +449,16 @@ async def tutor_chat_logic(
 
 def create_demo():
     """创建 Gradio Demo"""
-    with gr.Blocks(title="作业检查大师 (Homework Agent)") as demo:
+    blocks_kwargs: Dict[str, Any] = {"title": "作业检查大师 (Homework Agent)"}
+    supports_head = "head" in inspect.signature(gr.Blocks.__init__).parameters
+    if supports_head:
+        blocks_kwargs["head"] = MATHJAX_HEAD
+
+    with gr.Blocks(**blocks_kwargs) as demo:
+        # Older gradio: no `head` support, inject MathJax via HTML component.
+        if not supports_head:
+            gr.HTML(MATHJAX_HEAD)
+
         gr.Markdown("""
         # 🎓 作业检查大师 (Homework Agent)
 
@@ -470,7 +519,15 @@ def create_demo():
                     "- 系统会尝试根据题号在本次 session 中定位对应题目（若定位不确定会回退为整页）。\n"
                 )
 
-                chatbot = gr.Chatbot(label="💬 辅导对话", height=400)
+                # Enable LaTeX rendering in chat bubbles (Route A).
+                chatbot = gr.Chatbot(
+                    label="💬 辅导对话",
+                    height=400,
+                    latex_delimiters=[
+                        {"left": "$$", "right": "$$", "display": True},
+                        {"left": "$", "right": "$", "display": False},
+                    ],
+                )
                 msg = gr.Textbox(
                     label="💭 你的问题",
                     placeholder="这道题为什么错了？应该怎么思考？"
