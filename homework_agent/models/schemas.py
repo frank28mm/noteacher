@@ -160,12 +160,16 @@ class WrongItem(BaseModel):
 
 class GradeRequest(BaseModel):
     images: List[ImageRef] = Field(..., description="List of image references (url or base64)")
+    upload_id: Optional[str] = Field(
+        None,
+        description="Optional upload id returned by /api/v1/uploads; when present, backend will resolve images from storage for this user",
+    )
     subject: Subject
     batch_id: Optional[str] = Field(None, description="Client-side batch identifier")
     session_id: Optional[str] = Field(None, description="Session identifier for the batch")
     vision_provider: VisionProvider = Field(
         VisionProvider.DOUBAO,
-        description="Vision provider selection, default doubao (URL-only); qwen3 is optional fallback (URL or base64)",
+        description="Vision provider selection, default doubao (URL preferred; may use data-url(base64) fallback); qwen3 is optional fallback (URL or data-url)",
     )
     mode: Optional[SimilarityMode] = Field(
         None, description="normal/strict (applies to English grading)"

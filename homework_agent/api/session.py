@@ -9,11 +9,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, status
 
 from homework_agent.core.qbank import _normalize_question_number
-from homework_agent.services.ocr_baidu import BaiduPaddleOCRVLClient
-from homework_agent.core.layout_index import (
-    build_question_layouts_from_blocks,
-    crop_and_upload_slices,
-)
+from homework_agent.core.qindex import build_question_index_for_pages
 from homework_agent.utils.cache import BaseCache, get_cache_store
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.observability import log_event
@@ -28,7 +24,7 @@ cache_store: BaseCache = get_cache_store()
 # 常量
 # 取消硬性 5 轮上限；仅保留计数用于提示递进
 MAX_SOCRATIC_TURNS = 999999
-SESSION_TTL_HOURS = 24
+SESSION_TTL_HOURS = 24 * 7
 IDP_TTL_HOURS = 24
 SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
 
@@ -204,6 +200,25 @@ def get_question_index(session_id: str) -> Optional[Dict[str, Any]]:
     return idx if isinstance(idx, dict) else None
 
 
+def save_qindex_placeholder(session_id: str, warning: str) -> bool:
+    """
+    Persist a client-visible qindex status placeholder, without overwriting real results.
+    Returns True if placeholder was written.
+    """
+    if not session_id or not warning:
+        return False
+    current = get_question_index(session_id)
+    if isinstance(current, dict):
+        # Do not overwrite real results or an existing queued marker.
+        if current.get("questions"):
+            return False
+        ws = current.get("warnings") or []
+        if isinstance(ws, list) and any("queued" in str(w) for w in ws):
+            return False
+    save_question_index(session_id, {"questions": {}, "warnings": [str(warning)]})
+    return True
+
+
 def save_question_bank(session_id: str, bank: Dict[str, Any]) -> None:
     cache_store.set(
         f"qbank:{session_id}",
@@ -249,69 +264,10 @@ def get_grade_progress(session_id: str) -> Optional[Dict[str, Any]]:
     return p if isinstance(p, dict) else None
 
 
-def _build_question_index_for_pages(page_urls: List[str]) -> Dict[str, Any]:
-    """
-    Build per-question bbox/slice index using Baidu PaddleOCR-VL.
-    Returns dict keyed by question_number.
-    """
-    settings = get_settings()
-    ocr = BaiduPaddleOCRVLClient()
-    if not ocr.is_configured():
-        return {"questions": {}, "warnings": ["BAIDU_OCR 未配置，跳过 bbox/slice 生成"]}
-
-    questions: Dict[str, Any] = {}
-    warnings: List[str] = []
-    for page_idx, page_url in enumerate(page_urls or []):
-        if not page_url:
-            continue
-        try:
-            task_id = ocr.submit(image_url=page_url)
-            task = ocr.wait(task_id)
-            blocks = ocr.extract_text_blocks(task.raw)
-            if not blocks:
-                warnings.append(f"page[{page_idx}]: OCR 未返回可用 blocks，改用整页")
-                continue
-
-            # We need image size for normalization. Prefer reading from first bbox if provided;
-            # otherwise infer via download in crop_and_upload_slices (it loads the image anyway).
-            # Here we download once for size.
-            from homework_agent.core.layout_index import download_image
-
-            img = download_image(page_url, timeout=30.0)
-            w, h = img.size
-
-            layouts = build_question_layouts_from_blocks(
-                blocks=blocks,
-                page_width=w,
-                page_height=h,
-                padding_ratio=settings.slice_padding_ratio,
-            )
-            # Upload slices (best-effort)
-            layouts = crop_and_upload_slices(
-                page_image_url=page_url,
-                layouts=layouts,
-                prefix=f"slices/{datetime.now().strftime('%Y%m%d')}/",
-            )
-
-            for qn, layout in layouts.items():
-                # If same qn appears on multiple pages, keep first and attach extra pages as list
-                entry = questions.get(qn) or {"question_number": qn, "pages": []}
-                entry["pages"].append(
-                    {
-                        "page_index": page_idx,
-                        "page_image_url": page_url,
-                        "question_bboxes": [{"coords": b} for b in layout.bboxes_norm] if layout.bboxes_norm else [],
-                        "slice_image_urls": layout.slice_image_urls,
-                        "warnings": layout.warnings,
-                        "ocr": {"provider": "baidu_paddleocr_vl", "task_id": task.task_id, "status": task.status},
-                    }
-                )
-                questions[qn] = entry
-        except Exception as e:
-            warnings.append(f"page[{page_idx}]: OCR/切片失败，改用整页：{str(e)}")
-            continue
-
-    return {"questions": questions, "warnings": warnings}
+def _build_question_index_for_pages(page_urls: List[str], *, session_id: str | None = None) -> Dict[str, Any]:
+    """Backward-compatible wrapper for worker/session imports."""
+    # Keep this symbol stable, but route implementation to shared module to avoid path drift.
+    return build_question_index_for_pages(page_urls, session_id=session_id)
 
 
 @router.get("/jobs/{job_id}")

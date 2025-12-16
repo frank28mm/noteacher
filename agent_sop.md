@@ -24,8 +24,8 @@
 - 后端框架：FastAPI 0.100+ (Python 3.10+)；HTTP 直连 LLM/Vision API（OpenAI/Anthropic），不使用 Claude Agent SDK、不依赖 .claude 目录。
 - AI 模型（Reasoning/Chat）：Phase 1 `/grade` 与 `/chat` 当 provider=ark 时均使用 `ARK_REASONING_MODEL` 指定的 Doubao 模型（测试环境可指向 `doubao-seed-1-6-vision-250815`）；`ARK_REASONING_MODEL_THINKING` 不作为必需项。Qwen3 推理仅作为内部调试/备用，不对外暴露或新增其他 LLM 选项。保留 OpenAI/Anthropic 作为内部备用，不向终端暴露。
 - 视觉/OCR：用户可选 `"doubao"`(Ark doubao-seed-1-6-vision-250815) 或 `"qwen3"`(SiliconFlow Qwen/Qwen3-VL-32B-Thinking)，默认 `"doubao"`；不对外提供 OpenAI 视觉选项。`doubao` 仅支持公网 URL 输入；`qwen3` 支持 URL 或 Base64 兜底。备选 Azure Computer Vision；备用 Tesseract（本地）。
-- 数据存储：PostgreSQL (主存)、Redis (缓存/会话)。
-- 队列：Celery + Redis（异步任务，可先用内存占位）。
+- 数据存储：Supabase（Postgres + Storage）作为持久化主存；Redis 作为缓存/队列（会话、qbank/qindex、异步任务协调）。
+- 队列：Redis list + 独立 worker（qindex 通过 `BRPOP` 消费队列）。
 - 部署：Docker；可选 K8s/云函数。
 
 #### 1.0.2 模块划分（建议）
@@ -51,14 +51,14 @@ homework_agent/
 #### 1.0.4 会话/幂等/异步
 - 幂等：`X-Idempotency-Key` 头，24h 生命周期；冲突返回 409。
 - 同步/异步：小批量/预估 <60s 尽量同步；预估超时/大批量返回 202+job_id，GET /jobs 查询（或回调）。
-- 会话：session 24h；辅导链只读当前批次，不读历史画像；长期画像仅写入。
+- 会话（chat_history）：对话历史保留 7 天（定期清理）；辅导链只读当前 Submission（单次上传）上下文，不读历史画像/历史错题；报告链可读取历史用于长期分析。
 
 #### 1.0.5 存储与坐标
 - 坐标统一归一化 `[ymin, xmin, ymax, xmax]`，原点左上。
 - bbox/切片为可选增强能力：允许 `bbox=None` / `slice_image_url=None`，但必须在 `warnings` 说明“定位不确定，改用整页”。
 - bbox 对象（MVP）：整题区域（题干 + 学生作答）；允许多 bbox 列表（题干/作答分离时）。
 - 裁剪策略（MVP）：默认 5% padding；裁剪前 clamp 到 [0,1]；裁剪失败回退为整页。
-- 图像/切片存 Supabase Storage：切片 TTL 必须可配置（Demo 可 24h；生产建议 7d）；Redis 缓存/会话 24h；PG 持久化错题/历史（后续）。
+- 图像/切片存 Supabase Storage：切片 TTL 固定 7 天（可配置）；原始图片 + 识别原文 + 批改结果长期保留（除非用户删除或静默 180 天清理）；对话历史 7 天。
 
 ### 1.1 核心流程图
 
@@ -110,9 +110,10 @@ graph TD
 ```python
 ✅ 验证字段完整性:
   - images: 1-20张图片，每张<10MB，支持jpg/png/webp
+  - upload_id: 可选（推荐；一次上传=一次 Submission；images 为空时由后端反查补齐）
   - subject: math 或 english
   - mode: normal (默认) 或 strict
-  - session_id: 可选，24小时有效
+  - session_id: 可选；为空时后端生成用于 grade→chat 交付（chat 对话历史保留 7 天）
   - batch_id: 可选
   - header: X-Idempotency-Key（推荐）
 
@@ -122,8 +123,7 @@ graph TD
   - 转换异常记录到warnings
 
 ✅ 生成作业ID:
-  - 如果没有batch_id，生成格式: batch-{timestamp}-{random4}
-  - 如果没有session_id，使用batch_id作为session_id
+  - 如果没有session_id，生成格式: session_{random8}
 ```
 
 **失败处理**:
@@ -141,17 +141,21 @@ graph TD
   - history: 最多20条消息，role/content 格式
   - question: 非空字符串
   - subject: math 或 english
-  - session_id: 必需，来自已完成批改的批次（即便全对也允许辅导），24小时有效
+  - session_id: 必需，来自已完成批改的批次（即便全对也允许辅导）；对话历史保留 7 天
 
 ✅ 会话状态检查:
   - 检查 session_id 是否存在于活跃会话中
-  - 验证会话是否超时（>24小时）
+  - 验证会话是否超时（>7天；超时不恢复对话，仅允许查看该次批改结果/识别原文）
   - 记录当前交互次数（默认不限轮；如需可在错题上下文场景下设置软性上限）
 
 ✅ 上下文关联:
   - 验证 context_item_ids 是否存在于之前的批改结果中
   - 加载错题详情作为辅导上下文（若未提供，视为泛辅导但仍限数学/英语）
   - 仅读取当前批次上下文，不读取历史画像；长期画像仅写入不读取
+
+✅ 看图保底（产品要求）:
+  - 若用户提出“看图/图形/表格/统计图”等视觉诉求：必须触发 qindex（生成切片）与 relook（Vision 重识别）
+  - 若仍拿不到图/切片：必须明确说明“看不到图”，禁止臆测式解释（禁止“从图形来看…”）
 ```
 
 ### 2.2 阶段2：图像处理与内容识别
@@ -524,14 +528,14 @@ graph TD
 #### 敏感数据处理
 ```python
 ✅ 图像数据:
-  - 处理完成后7天自动删除
+  - 原始图片（Submission）长期保留（除非用户删除（未来）或静默 180 天清理）
+  - qindex 切片仅保留 7 天（可重建）
   - 传输中加密（HTTPS）
   - 存储加密（AES-256）
 
 ✅ 对话历史:
   - session_id关联存储
-  - 24小时后归档为"历史"
-  - 用户可请求删除特定会话
+  - 7天后自动清理（不保证恢复旧对话上下文）
 
 ✅ 批改结果:
   - 错题数据用于个性化分析
@@ -587,8 +591,8 @@ graph TD
 
 ✅ 结果缓存:
   - 相同作业ID返回缓存结果
-  - 缓存有效期：24小时
-  - 缓存键：batch_id + subject + mode
+  - 缓存有效期：按业务配置（幂等键默认 24h；chat_history 7d；切片 7d）
+  - 缓存键：session_id / upload_id + subject + mode
 ```
 
 #### 性能基准
@@ -610,13 +614,13 @@ graph TD
 ```python
 ✅ 会话生命周期:
   - 活跃会话: 常驻内存
-  - 24小时后: 归档至数据库
-  - 7天后: 删除过期会话
+  - 7天后: 清理对话历史（chat_history）
+  - 静默180天: 清理用户数据（定时任务；以 last_active_at 为准）
 
 ✅ 图像缓存:
   - 处理中: 内存缓存
-  - 处理完: 写入OSS
-  - 7天后: OSS自动清理
+  - 处理完: 写入 Supabase Storage
+  - 切片: 7天后自动清理（原始图片按 Submission 策略保留）
 ```
 
 ---
@@ -703,33 +707,27 @@ graph TD
 ### A.1 常用命令
 
 ```python
-# 启动Agent服务
-python -m homework_agent.main
+# 启动 Agent 服务（FastAPI）
+uvicorn homework_agent.main:app --host 127.0.0.1 --port 8000 --reload
 
 # 运行测试
-pytest tests/
+python -m pytest -q
 
-# 验证API契约
-python scripts/validate_contract.py
+# 启动 qindex worker（需要 Redis）
+python -m homework_agent.workers.qindex_worker
 
-# 性能测试
-python scripts/performance_test.py
+# 验证脚本（按需）
+python scripts/verify_stability.py
 ```
 
 ### A.2 配置参数
 
 ```python
-# .env.example
-OPENAI_API_KEY=your_key_here        # 主选 LLM/Vision
-VISION_API_KEY=your_key_here        # 如与 OPENAI_API_KEY 不同则单独配置
-ANTHROPIC_API_KEY=optional_fallback # 备选模型可选
-MODEL_NAME=gpt-4o
-VISION_MODEL=gpt-4v
-MAX_BATCH_SIZE=20
-MAX_IMAGE_MB=10
-OCR_TIMEOUT=30
-GRADING_TIMEOUT=60
-SESSION_TTL=86400  # 24小时
+# 参考 .env.template / .env.example（节选）
+DEV_USER_ID=dev_user
+SLICE_TTL_SECONDS=604800  # 切片 7 天
+CHAT_HISTORY_TTL_DAYS=7
+SUBMISSION_INACTIVITY_PURGE_DAYS=180
 ```
 
 ### A.3 故障排除

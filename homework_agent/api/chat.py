@@ -18,20 +18,47 @@ from homework_agent.models.schemas import (
 )
 from homework_agent.services.llm import LLMClient
 from homework_agent.services.vision import VisionClient
+from homework_agent.services.qindex_queue import enqueue_qindex_job
 from homework_agent.utils.settings import get_settings
-from homework_agent.core.qbank import _normalize_question_number
+from homework_agent.core.qbank import _normalize_question_number, build_question_bank_from_vision_raw_text
+from homework_agent.core.slice_policy import analyze_visual_risk, should_create_slices_for_bank, pick_question_numbers_for_slices
+from homework_agent.core.qindex import qindex_is_configured
 from homework_agent.api.session import (
     SESSION_TTL_SECONDS,
     get_session, save_session, delete_session,
     get_question_bank, save_question_bank, get_question_index,
+    save_question_index,
+    save_qindex_placeholder,
     _merge_bank_meta,
     _now_ts, _coerce_ts,
 )
 from homework_agent.utils.observability import get_request_id_from_headers, log_event
+from homework_agent.utils.user_context import get_user_id
+from homework_agent.utils.submission_store import touch_submission, load_qindex_image_refs
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# 并发保护：防止线程池堆积导致“越跑越慢/无响应”
+_settings_for_limits = get_settings()
+VISION_SEMAPHORE = asyncio.Semaphore(max(1, int(_settings_for_limits.max_concurrent_vision)))
+LLM_SEMAPHORE = asyncio.Semaphore(max(1, int(_settings_for_limits.max_concurrent_llm)))
+
+
+async def _call_blocking_in_thread(
+    fn,
+    *args,
+    timeout_seconds: float,
+    semaphore: asyncio.Semaphore,
+    **kwargs,
+):
+    """Run a blocking function in a thread with a timeout + concurrency guard."""
+    async with semaphore:
+        return await asyncio.wait_for(
+            asyncio.to_thread(fn, *args, **kwargs),
+            timeout=timeout_seconds,
+        )
 
 
 def _download_as_data_uri(url: str) -> Optional[str]:
@@ -358,6 +385,74 @@ def _pick_relook_image_url(focus_question: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _qindex_has_slices_for_question(qindex: Dict[str, Any], question_number: str) -> bool:
+    if not isinstance(qindex, dict) or not question_number:
+        return False
+    qs = qindex.get("questions")
+    if not isinstance(qs, dict):
+        return False
+    q = qs.get(str(question_number))
+    if not isinstance(q, dict):
+        return False
+    pages = q.get("pages")
+    if not isinstance(pages, list):
+        return False
+    for p in pages:
+        if not isinstance(p, dict):
+            continue
+        su = p.get("slice_image_urls") or p.get("slice_image_url")
+        if isinstance(su, str) and su.strip():
+            return True
+        if isinstance(su, list) and any(str(u).strip() for u in su if u):
+            return True
+        regions = p.get("regions")
+        if isinstance(regions, list) and any(isinstance(r, dict) and r.get("slice_image_url") for r in regions):
+            return True
+    return False
+
+
+def _user_requests_visual_check(message: str) -> bool:
+    msg = (message or "").strip()
+    if not msg:
+        return False
+    return any(
+        k in msg
+        for k in (
+            "看图",
+            "如图",
+            "见图",
+            "你看不到图",
+            "看不到图",
+            "看不到图片",
+            "你没看到图",
+            "你没看图",
+            "形状"
+            "位置关系",
+            "表格",
+            "统计图",
+            "折线图",
+            "柱状图",
+            "图形拼接",
+            "数列规律",
+            "图不对",
+            "和图对不上",
+            "图不正确",
+            "二次函数",
+            "二次函数图",
+            "函数图像",
+            "几何",
+            "正方形",
+            "长方形",
+            "三角形",
+            "平行四边形",
+            "矩形",
+            "正方体",
+            "长方体",
+            "圆锥",
+        )
+    )
+
+
 def _should_relook_focus_question(user_msg: str, focus_question: Dict[str, Any]) -> bool:
     """Heuristic: decide whether to re-run Vision for a focused question (diagram/pattern issues)."""
     msg = (user_msg or "").strip()
@@ -365,9 +460,38 @@ def _should_relook_focus_question(user_msg: str, focus_question: Dict[str, Any])
     warnings = focus_question.get("warnings") or []
     warnings_s = " ".join([str(w) for w in warnings]) if isinstance(warnings, list) else str(warnings)
 
+    # Avoid repeated re-looks unless the user explicitly challenges recognition again.
+    already_relooked = bool((focus_question or {}).get("vision_recheck_text")) or bool((focus_question or {}).get("relook_error"))
+
     # User explicitly challenges recognition / asks to see the exact problem.
-    if any(k in msg for k in ("题目不对", "识别错", "你识别到的题目", "看不清", "原题", "题干不对", "你看一下图")):
+    if any(
+        k in msg
+        for k in (
+            "题目不对",
+            "识别错",
+            "你识别到的题目",
+            "看不清",
+            "原题",
+            "题干不对",
+            "你看一下图",
+            "看不到图",
+            "看不到图片",
+            "你看不到图",
+            "你没看到图",
+            "你没看图",
+            "你有没有看图",
+            "图在哪里",
+        )
+    ):
         return True
+
+    if already_relooked:
+        return False
+
+    # If grade flagged this question as visually risky, proactively re-look once on first entry.
+    if (focus_question or {}).get("visual_risk") is True:
+        if _extract_requested_question_number(msg) or _has_explicit_question_switch_intent(msg):
+            return True
 
     # Pattern/diagram questions often need the visual example; if missing, relook.
     if "可能误读规律" in warnings_s or "可能误读公式" in warnings_s:
@@ -377,6 +501,11 @@ def _should_relook_focus_question(user_msg: str, focus_question: Dict[str, Any])
     # Very short stems are suspicious for multi-part questions.
     if len(qcontent) < 18 and any(k in qcontent for k in ("出现", "规律", "图", "示意")):
         return True
+
+    # Geometry/diagram disputes: if the user argues about angle/position relations, relook once.
+    if any(k in msg for k in ("同位角", "内错角", "位置关系", "像F", "像Z", "左侧", "右侧", "上方", "下方")):
+        if ("图" in qcontent) or ((focus_question or {}).get("visual_risk") is True):
+            return True
 
     return False
 
@@ -397,9 +526,10 @@ async def _relook_focus_question_via_vision(
     if not img_url:
         return None
 
-    # Prefer local download + base64 for Qwen3 to avoid Ark URL fetch flakiness.
+    # Prefer local download + data URI to avoid provider-side URL fetch flakiness.
     data_uri = _download_as_data_uri(img_url)
-    provider = VisionProvider.QWEN3 if data_uri else VisionProvider.DOUBAO
+    prefer_ark = bool(settings.ark_api_key and settings.ark_base_url)
+    provider = VisionProvider.DOUBAO if prefer_ark else VisionProvider.QWEN3
     images = [ImageRef(base64=data_uri)] if data_uri else [ImageRef(url=img_url)]
 
     prompt = (
@@ -407,7 +537,8 @@ async def _relook_focus_question_via_vision(
         "如果题目包含示意图/箭头/表格/序列示例（如 ABCD 出现顺序、对应数字位置），必须原样抄写示例并用文字说明顺序/位置关系；不要推断。"
         "请输出：题目原文、选项（如有）、学生作答（如有）、学生作答状态，以及任何“可能误读公式/规律”的风险提示。"
     )
-    budget = min(15.0, float(settings.grade_vision_timeout_seconds))
+    # Re-look is user-facing; keep it bounded but not so short that it always times out on slow vision.
+    budget = min(60.0, float(settings.grade_vision_timeout_seconds))
     client = VisionClient()
     try:
         res = await _call_blocking_in_thread(
@@ -418,6 +549,8 @@ async def _relook_focus_question_via_vision(
             timeout_seconds=budget,
             semaphore=VISION_SEMAPHORE,
         )
+    except asyncio.TimeoutError:
+        return {"relook_error": f"重识别超时: {int(budget)}s"}
     except Exception as e:
         return {"relook_error": f"重识别失败: {e}"}
 
@@ -455,7 +588,8 @@ def _format_math_for_display(text: str) -> str:
     s = str(text)
     try:
         # Avoid markdown artifacts in a chat bubble (code / strikethrough feel "unnatural" for students).
-        s = re.sub(r"[~～]{2,}", "", s)
+        # Hard-ban tildes because they trigger markdown strikethrough and also appear as casual tone markers.
+        s = s.replace("~", "").replace("～", "")
         s = re.sub(r"```+", "", s)
         s = s.replace("`", "")
         # Strip HTML strikethrough tags if the model emits them.
@@ -498,8 +632,27 @@ def _format_math_for_display(text: str) -> str:
         s = re.sub(r"\$\$(.*?)\$\$", _fix_display, s, flags=re.S)
         s = re.sub(r"(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)", _fix_inline, s, flags=re.S)
 
-        # Models sometimes produce invalid nested $ inside $$...$$ blocks (e.g. $$ ... $t^2$ ... $$).
-        # Fix by removing single-$ markers inside display-math blocks.
+        # Best-effort: convert programming-style powers outside math blocks, e.g. x^(6n) -> $x^{6n}$.
+        # This is intentionally conservative (avoid touching already-formatted LaTeX).
+        def _protect_math(m: re.Match) -> str:
+            idx = len(_protected)
+            _protected.append(m.group(0))
+            return f"@@MATH{idx}@@"
+
+        _protected: List[str] = []
+        s2 = re.sub(r"\$\$.*?\$\$", _protect_math, s, flags=re.S)
+        s2 = re.sub(r"(?<!\$)\$(?!\$).*?(?<!\$)\$(?!\$)", _protect_math, s2, flags=re.S)
+        s2 = re.sub(
+            r"\b([A-Za-z][A-Za-z0-9]*)\s*\^\s*\(\s*([0-9A-Za-z+\-*/ ]{1,12})\s*\)",
+            lambda m: f"${m.group(1)}^{{{m.group(2).strip().replace(' ', '')}}}$",
+            s2,
+        )
+        for i, chunk in enumerate(_protected):
+            s2 = s2.replace(f"@@MATH{i}@@", chunk)
+        s = s2
+
+        # Re-apply tilde ban in case the model emitted it inside math blocks.
+        s = s.replace("~", "").replace("～", "")
     except Exception:
         return str(text)
     return s
@@ -614,6 +767,7 @@ async def chat_stream(
     # session恢复或创建；last_event_id 用于断线续接（仅恢复 session_id）
     session_id = req.session_id or last_event_id or f"session_{uuid.uuid4().hex[:8]}"
     request_id = get_request_id_from_headers(request.headers) or f"req_{uuid.uuid4().hex[:12]}"
+    user_id = get_user_id(request.headers.get("X-User-Id"))
     started_m = time.monotonic()
     now_ts = _now_ts()
     session_data = get_session(session_id)
@@ -622,10 +776,17 @@ async def chat_stream(
         "chat_request",
         request_id=request_id,
         session_id=session_id,
+        user_id=user_id,
         subject=getattr(req.subject, "value", str(req.subject)),
         question_len=len(req.question or ""),
         has_last_event_id=bool(last_event_id),
     )
+
+    # Best-effort: touch Submission last_active_at (180-day inactivity cleanup uses this).
+    try:
+        touch_submission(user_id=user_id, session_id=session_id)
+    except Exception:
+        pass
 
     # TTL检查，超期则报错
     if session_data:
@@ -831,6 +992,245 @@ async def chat_stream(
             yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
             return
 
+        # If the user didn't explicitly switch focus this turn, emit a small log for debugging.
+        try:
+            if not requested_qn and not _has_explicit_question_switch_intent(req.question):
+                log_event(
+                    logger,
+                    "chat_focus_question_maintained",
+                    request_id=request_id,
+                    session_id=session_id,
+                    focus_question_number=session_data.get("focus_question_number"),
+                )
+        except Exception:
+            pass
+
+        # Optional optimization: if this session likely contains visual/diagram risks, enqueue qindex slices in background.
+        # This is best-effort and must never block chat (user should not be aware of it).
+        try:
+            qindex_now = get_question_index(session_id) if session_id else None
+            queued_already = False
+            if isinstance(qindex_now, dict):
+                ws = qindex_now.get("warnings") or []
+                if isinstance(ws, list) and any("queued" in str(w) for w in ws):
+                    queued_already = True
+                if qindex_now.get("questions"):
+                    queued_already = True
+
+            focus_obj_for_qindex = wrong_item_context.get("focus_question")
+            focus_qn_for_qindex = wrong_item_context.get("focus_question_number")
+            user_visual_hint = False
+            try:
+                user_visual_hint, _ = analyze_visual_risk(
+                    subject=req.subject,
+                    question_content=req.question,
+                    warnings=None,
+                )
+            except Exception:
+                user_visual_hint = False
+            if (
+                not queued_already
+                and isinstance(focus_obj_for_qindex, dict)
+                and (focus_obj_for_qindex.get("visual_risk") is True or user_visual_hint)
+            ):
+                qbank_now = get_question_bank(session_id) if session_id else None
+                if isinstance(qbank_now, dict) and (should_create_slices_for_bank(qbank_now) or user_visual_hint):
+                    page_urls = qbank_now.get("page_image_urls")
+                    if isinstance(page_urls, list) and page_urls:
+                        allow = pick_question_numbers_for_slices(qbank_now)
+                        # If user explicitly hints there is a diagram/table/etc, make sure we slice the focused question.
+                        if user_visual_hint and focus_qn_for_qindex:
+                            fq = str(focus_qn_for_qindex).strip()
+                            if fq and fq not in allow:
+                                allow = [*allow, fq]
+                        if not allow and focus_qn_for_qindex:
+                            allow = [str(focus_qn_for_qindex).strip()]
+
+                        ok, reason = qindex_is_configured()
+                        if not ok:
+                            save_qindex_placeholder(session_id, f"qindex skipped: {reason}")
+                        else:
+                            if enqueue_qindex_job(
+                                session_id,
+                                [str(u) for u in page_urls if u],
+                                question_numbers=allow,
+                            ):
+                                save_question_index(session_id, {"questions": {}, "warnings": ["qindex queued (chat)"]})
+                                log_event(logger, "chat_qindex_enqueued", request_id=request_id, session_id=session_id)
+                            else:
+                                save_qindex_placeholder(session_id, "qindex skipped: redis_unavailable")
+        except Exception:
+            pass
+
+        # ---- Mandatory visual path (product requirement) ----
+        # When the user requests "look at the picture"/diagram-related judgement:
+        # - Ensure qindex slices exist (enqueue + wait).
+        # - Run vision relook on the slice.
+        # - If still unavailable, explicitly say we cannot see the diagram (no guessing).
+        try:
+            focus_obj = wrong_item_context.get("focus_question")
+            fqnum = wrong_item_context.get("focus_question_number")
+            if isinstance(focus_obj, dict) and fqnum:
+                user_visual_hint, _ = analyze_visual_risk(
+                    subject=req.subject,
+                    question_content=req.question,
+                    warnings=None,
+                )
+                explicit_visual = bool(_user_requests_visual_check(req.question))
+                must_visual = bool(explicit_visual or user_visual_hint)
+
+                if must_visual:
+                    # 1) Ensure qindex slices (for focused question)
+                    qindex_now = get_question_index(session_id) if session_id else None
+                    ready = isinstance(qindex_now, dict) and _qindex_has_slices_for_question(qindex_now, str(fqnum))
+                    if not ready:
+                        # DB fallback: if Redis lost/restarted, still try to load slices within TTL.
+                        try:
+                            db_refs = load_qindex_image_refs(
+                                user_id=user_id,
+                                session_id=session_id,
+                                question_number=str(fqnum),
+                            )
+                            if isinstance(db_refs, dict) and db_refs:
+                                focus_obj["image_refs"] = db_refs
+                                ready = True
+                        except Exception:
+                            pass
+
+                    if not ready:
+                        ok, reason = qindex_is_configured()
+                        if not ok:
+                            save_qindex_placeholder(session_id, f"qindex skipped: {reason}")
+                            reply = (
+                                "这题需要看图/切片才能确认关键位置关系，但当前环境未配置可用的切片能力，"
+                                f"所以我看不到图（{reason}）。你可以补齐配置后重试，或把该题局部截图发我。"
+                            )
+                            session_data["history"].append({"role": "user", "content": req.question})
+                            session_data["history"].append({"role": "assistant", "content": reply})
+                            save_session(session_id, session_data)
+                            payload = ChatResponse(messages=[{"role": "assistant", "content": reply}], session_id=session_id, retry_after_ms=None)
+                            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+                            yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
+                            return
+
+                        # Enqueue if not already queued.
+                        queued_already = False
+                        if isinstance(qindex_now, dict):
+                            ws = qindex_now.get("warnings") or []
+                            if isinstance(ws, list) and any("queued" in str(w) for w in ws):
+                                queued_already = True
+                            if qindex_now.get("questions"):
+                                queued_already = True
+
+                        qbank_now = get_question_bank(session_id) if session_id else None
+                        page_urls = (qbank_now or {}).get("page_image_urls") if isinstance(qbank_now, dict) else None
+                        allow = pick_question_numbers_for_slices(qbank_now) if isinstance(qbank_now, dict) else []
+                        fq = str(fqnum).strip()
+                        if fq and fq not in allow:
+                            allow = [*allow, fq] if allow else [fq]
+
+                        if (not queued_already) and isinstance(page_urls, list) and page_urls:
+                            if enqueue_qindex_job(session_id, [str(u) for u in page_urls if u], question_numbers=allow):
+                                save_question_index(session_id, {"questions": {}, "warnings": ["qindex queued (chat)"]})
+                            else:
+                                save_qindex_placeholder(session_id, "qindex skipped: redis_unavailable")
+
+                        # Tell user we are reading the picture and wait for slices.
+                        wait_s = 120.0
+                        poll = 1.0
+                        info = f"我正在读取图片并生成切片（第{fq}题），请稍等…"
+                        session_data["history"].append({"role": "user", "content": req.question})
+                        session_data["history"].append({"role": "assistant", "content": info})
+                        save_session(session_id, session_data)
+                        payload = ChatResponse(messages=[{"role": "assistant", "content": info}], session_id=session_id, retry_after_ms=1500)
+                        yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+
+                        deadline = time.monotonic() + wait_s
+                        last_beat = time.monotonic()
+                        while time.monotonic() < deadline:
+                            await asyncio.sleep(poll)
+                            qindex_now = get_question_index(session_id) if session_id else None
+                            if isinstance(qindex_now, dict) and _qindex_has_slices_for_question(qindex_now, str(fqnum)):
+                                ready = True
+                                break
+                            # Also check DB as a fallback (Redis may have been restarted).
+                            if time.monotonic() - last_beat >= 5.0:
+                                try:
+                                    db_refs = load_qindex_image_refs(
+                                        user_id=user_id,
+                                        session_id=session_id,
+                                        question_number=str(fqnum),
+                                    )
+                                    if isinstance(db_refs, dict) and db_refs:
+                                        focus_obj["image_refs"] = db_refs
+                                        ready = True
+                                        break
+                                except Exception:
+                                    pass
+                            if time.monotonic() - last_beat >= 5.0:
+                                yield b"event: heartbeat\ndata: {}\n\n"
+                                last_beat = time.monotonic()
+
+                        if not ready:
+                            qindex_now = get_question_index(session_id) if session_id else None
+                            ws = (qindex_now or {}).get("warnings") if isinstance(qindex_now, dict) else None
+                            ws_txt = f"（{ws[0]}）" if isinstance(ws, list) and ws else ""
+                            reply = (
+                                "我这边还没成功拿到切片，所以目前看不到图，无法判断图形位置关系。"
+                                + ws_txt
+                                + "你可以再等一会儿再问，或直接把该题局部截图发我。"
+                            )
+                            session_data["history"].append({"role": "assistant", "content": reply})
+                            save_session(session_id, session_data)
+                            payload = ChatResponse(messages=[{"role": "assistant", "content": reply}], session_id=session_id, retry_after_ms=2000)
+                            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+                            yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
+                            return
+
+                    # 2) Refresh image refs into focus_obj for relook
+                    qindex_now = get_question_index(session_id) if session_id else None
+                    if isinstance(qindex_now, dict):
+                        qs = qindex_now.get("questions")
+                        if isinstance(qs, dict) and str(fqnum) in qs:
+                            focus_obj["image_refs"] = qs.get(str(fqnum))
+                        if qindex_now.get("warnings"):
+                            wrong_item_context["index_warnings"] = qindex_now.get("warnings")
+
+                    # 3) Force relook when user explicitly asks to "看图"
+                    if explicit_visual and (not focus_obj.get("vision_recheck_text") or focus_obj.get("relook_error")):
+                        patch = await _relook_focus_question_via_vision(
+                            session_id=session_id,
+                            subject=req.subject,
+                            question_number=str(fqnum),
+                            focus_question=focus_obj,
+                        )
+                        if isinstance(patch, dict) and patch:
+                            focus_obj.update({k: v for k, v in patch.items() if v is not None})
+                            wrong_item_context["focus_question"] = focus_obj
+                            try:
+                                qbank_now = get_question_bank(session_id)
+                                if isinstance(qbank_now, dict):
+                                    qs = qbank_now.get("questions")
+                                    if isinstance(qs, dict) and str(fqnum) in qs and isinstance(qs.get(str(fqnum)), dict):
+                                        qs[str(fqnum)].update({k: v for k, v in patch.items() if v is not None})
+                                        qbank_now["questions"] = qs
+                                        qbank_now = _merge_bank_meta(qbank_now, {"updated_at": datetime.now().isoformat()})
+                                        save_question_bank(session_id, qbank_now)
+                            except Exception:
+                                pass
+
+                    # 4) Fail closed if user requested visual check but we still have no relook text.
+                    if explicit_visual and not focus_obj.get("vision_recheck_text"):
+                        reply = "我目前看不到图/没有拿到足够的图像信息，所以不能判断图形位置关系；请把该题局部截图发我，或稍后再试。"
+                        session_data["history"].append({"role": "assistant", "content": reply})
+                        save_session(session_id, session_data)
+                        payload = ChatResponse(messages=[{"role": "assistant", "content": reply}], session_id=session_id, retry_after_ms=None)
+                        yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+                        yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
+                        return
+        except Exception:
+            pass
+
         # Capture user corrections so the tutor can override OCR/vision misreads during the session.
         focus_q_for_corr = (
             wrong_item_context.get("focus_question_number")
@@ -890,6 +1290,12 @@ async def chat_stream(
                         patch_keys=list(patch.keys()),
                     )
                     focus_obj.update({k: v for k, v in patch.items() if v is not None})
+                    # If we successfully relooked, clear stale error so we can proceed.
+                    if patch.get("vision_recheck_text"):
+                        try:
+                            focus_obj.pop("relook_error", None)
+                        except Exception:
+                            pass
                     wrong_item_context["focus_question"] = focus_obj
                     # Persist patch back to qbank for subsequent turns (best-effort).
                     try:
@@ -898,11 +1304,52 @@ async def chat_stream(
                             qs = qbank_now.get("questions")
                             if isinstance(qs, dict) and str(fqnum) in qs and isinstance(qs.get(str(fqnum)), dict):
                                 qs[str(fqnum)].update({k: v for k, v in patch.items() if v is not None})
+                                if patch.get("vision_recheck_text"):
+                                    qs[str(fqnum)].pop("relook_error", None)
                                 qbank_now["questions"] = qs
                                 qbank_now = _merge_bank_meta(qbank_now, {"updated_at": datetime.now().isoformat()})
                                 save_question_bank(session_id, qbank_now)
                     except Exception:
                         pass
+        except Exception as e:
+            # Never crash chat for a best-effort relook, but record a hint so the tutor won't "guess the picture".
+            try:
+                focus_obj = wrong_item_context.get("focus_question")
+                if isinstance(focus_obj, dict) and not focus_obj.get("vision_recheck_text"):
+                    focus_obj["relook_error"] = f"重识别失败: {e}"
+                    wrong_item_context["focus_question"] = focus_obj
+            except Exception:
+                pass
+
+        # Guardrail: if the user is asking about diagram/position relations but vision re-look failed,
+        # do NOT let the text-only tutor "guess the picture".
+        try:
+            focus_obj = wrong_item_context.get("focus_question")
+            msg = (req.question or "").strip()
+            asking_diagram = any(k in msg for k in ("看不到图", "没看到图", "同位角", "内错角", "位置关系", "像F", "像Z", "如图", "看图"))
+            if asking_diagram and isinstance(focus_obj, dict):
+                qcontent = str(focus_obj.get("question_content") or "")
+                likely_needs_image = (focus_obj.get("visual_risk") is True) or ("如图" in qcontent) or ("图" in qcontent)
+                has_any_image = bool(_pick_relook_image_url(focus_obj))
+                if likely_needs_image and not focus_obj.get("vision_recheck_text") and (not has_any_image or focus_obj.get("relook_error")):
+                    # Persist user msg + assistant response for session continuity.
+                    session_data["history"].append({"role": "user", "content": req.question})
+                    reply = (
+                        "这题需要看图才能判断角的位置关系，但我这边目前没有成功拿到该题的图像/切片信息，"
+                        "所以不能直接断言它是同位角还是内错角。"
+                        "你可以等一会儿让系统生成切片后再问，或直接把第9题（含图）的局部截图发我。"
+                    )
+                    session_data["history"].append({"role": "assistant", "content": reply})
+                    save_session(session_id, session_data)
+                    payload = ChatResponse(
+                        messages=[{"role": "assistant", "content": reply}],
+                        session_id=session_id,
+                        retry_after_ms=1500,
+                        cross_subject_flag=None,
+                    )
+                    yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+                    yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
+                    return
         except Exception:
             pass
 
@@ -912,7 +1359,18 @@ async def chat_stream(
         DONE = object()
 
         # Update session immediately with user's message so LLM can see the conversation history.
-        session_data["history"].append({"role": "user", "content": req.question})
+        # Avoid duplicating the same user message when we already appended it earlier
+        # (e.g. during mandatory "读图/切片" prelude).
+        already_has_user = False
+        try:
+            for m in reversed(session_data.get("history") or []):
+                if isinstance(m, dict) and m.get("role") == "user":
+                    already_has_user = (str(m.get("content") or "") == str(req.question))
+                    break
+        except Exception:
+            already_has_user = False
+        if not already_has_user:
+            session_data["history"].append({"role": "user", "content": req.question})
         llm_history = list(session_data["history"][-12:])
 
         def _producer():

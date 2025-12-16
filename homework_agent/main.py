@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from homework_agent.api import routes
 from homework_agent.utils.settings import get_settings
-from homework_agent.utils.logging_setup import setup_file_logging
+from homework_agent.utils.logging_setup import setup_file_logging, silence_noisy_loggers
 from contextlib import asynccontextmanager
 
 
@@ -17,6 +17,7 @@ def create_app() -> FastAPI:
             import logging
 
             level = getattr(logging, str(settings.log_level).upper(), logging.INFO)
+            silence_noisy_loggers()
             setup_file_logging(log_file_path=str(settings.log_file_path), level=level)
         yield
 

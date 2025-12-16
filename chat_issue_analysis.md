@@ -309,3 +309,21 @@ else:
 ---
 
 **报告结论**: 问题根源明确，解决方案可行。建议立即开始修复，优先级高于新功能开发。
+
+---
+
+## 新增问题记录（2025-12-15）
+
+### 1) Chat 输出出现 `~` 导致删除线/干扰阅读（P1）
+
+**现象**：在 demo 的苏格拉底辅导对话中，回复偶发出现 `~` / `~~`，在 Markdown 渲染下会触发删除线或造成视觉噪音。  
+**影响**：用户误解内容“被划掉/不可信”，影响教材风格呈现。  
+**要求**：Chat 输出中严禁出现 `~` 字符（单个和多个都不允许）。  
+**待办（待 demo 本轮验证结束后处理）**：
+- 在后端 chat 输出通道增加“最终输出过滤器”（对 assistant 的最终文本进行替换/拒绝/重写），确保不含 `~`。
+- 在 tutor prompt 中增加硬约束：不要输出 `~`、不要输出 Markdown 删除线语法。
+
+### ✅ 实施状态（2025-12-16）
+- 已在 `homework_agent/api/chat.py` 的 `_format_math_for_display()` 中对 assistant 输出做最终过滤：移除所有 `~`/`～`、代码块/行内代码标记，并清理 HTML 删除线标签。
+- 已在 `homework_agent/core/prompts.py` 的 `SOCRATIC_TUTOR_SYSTEM_PROMPT` 中增加硬约束：严禁输出 `~`/`～`、Markdown 删除线、代码块/行内代码、表情符号。
+- 已新增单测 `homework_agent/tests/spec_chat_format_math_for_display.py` 覆盖：`~` 清理、`\\frac`/`\\times` 双转义修复、`x^(6n)` 转 LaTeX。

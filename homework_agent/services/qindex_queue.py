@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from homework_agent.utils.settings import get_settings
+from homework_agent.utils.observability import log_event, redact_url
+from homework_agent.utils.cache import get_cache_store
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,8 @@ except ImportError:  # pragma: no cover
 class QIndexJob:
     session_id: str
     page_urls: list[str]
+    # Optional allowlist: only slice/index these question numbers (best-effort).
+    question_numbers: list[str]
     enqueued_at: float
 
     def to_json(self) -> str:
@@ -36,6 +40,7 @@ class QIndexJob:
             {
                 "session_id": self.session_id,
                 "page_urls": self.page_urls,
+                "question_numbers": self.question_numbers,
                 "enqueued_at": self.enqueued_at,
             },
             ensure_ascii=False,
@@ -47,6 +52,7 @@ class QIndexJob:
         return QIndexJob(
             session_id=str(obj.get("session_id")),
             page_urls=[str(u) for u in (obj.get("page_urls") or []) if u],
+            question_numbers=[str(q) for q in (obj.get("question_numbers") or []) if str(q).strip()],
             enqueued_at=float(obj.get("enqueued_at") or time.time()),
         )
 
@@ -72,22 +78,43 @@ def queue_key() -> str:
     return f"{prefix}{settings.qindex_queue_name}"
 
 
-def enqueue_qindex_job(session_id: str, page_urls: list[str]) -> bool:
+def enqueue_qindex_job(session_id: str, page_urls: list[str], *, question_numbers: Optional[list[str]] = None) -> bool:
     client = get_redis_client()
     if client is None:
+        log_event(logger, "qindex_enqueue_skipped", level="warning", session_id=session_id, reason="redis_unavailable")
         return False
-    job = QIndexJob(session_id=session_id, page_urls=page_urls, enqueued_at=time.time())
+    job = QIndexJob(
+        session_id=session_id,
+        page_urls=page_urls,
+        question_numbers=[str(q) for q in (question_numbers or []) if str(q).strip()],
+        enqueued_at=time.time(),
+    )
     client.lpush(queue_key(), job.to_json())
+    log_event(
+        logger,
+        "qindex_enqueued",
+        session_id=session_id,
+        pages=len(page_urls or []),
+        questions=len(job.question_numbers),
+        page_image_urls=[redact_url(u) for u in (page_urls or [])[:3]] if page_urls else None,
+    )
     return True
 
 
 def store_qindex_result(session_id: str, index: dict[str, Any], *, ttl_seconds: int) -> None:
     """Store qindex in the same shape as routes.save_question_index()."""
-    client = get_redis_client()
-    if client is None:
+    if not session_id:
         return
-    prefix = os.getenv("CACHE_PREFIX", "")
-    key = f"{prefix}qindex:{session_id}"
+    cache_store = get_cache_store()
     payload = {"index": index, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    client.set(key, json.dumps(payload, ensure_ascii=False), ex=ttl_seconds)
-
+    try:
+        cache_store.set(f"qindex:{session_id}", payload, ttl_seconds=ttl_seconds)
+    except Exception:
+        # Best-effort: storing qindex should not crash the worker loop.
+        return
+    try:
+        questions = index.get("questions") if isinstance(index, dict) else None
+        qn = len(questions or {}) if isinstance(questions, dict) else None
+        log_event(logger, "qindex_stored", session_id=session_id, questions=qn, ttl_seconds=ttl_seconds)
+    except Exception:
+        return

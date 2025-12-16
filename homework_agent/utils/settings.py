@@ -45,10 +45,61 @@ class Settings(BaseSettings):
     )
     baidu_ocr_timeout_seconds: int = Field(default=60, validation_alias="BAIDU_OCR_TIMEOUT_SECONDS")
     baidu_ocr_poll_interval_seconds: float = Field(
-        default=1.0, validation_alias="BAIDU_OCR_POLL_INTERVAL_SECONDS"
+        # Baidu doc recommends polling every 5-10 seconds (query QPS limit applies).
+        default=5.0, validation_alias="BAIDU_OCR_POLL_INTERVAL_SECONDS"
     )
     baidu_ocr_poll_max_seconds: int = Field(
         default=60, validation_alias="BAIDU_OCR_POLL_MAX_SECONDS"
+    )
+
+    # OCR provider for qindex (bbox/slice). Default: SiliconFlow DeepSeek-OCR.
+    # Values:
+    # - siliconflow_qwen3_vl: use SiliconFlow vision model (Qwen3-VL) to locate per-question bbox (recommended)
+    # - siliconflow_deepseek: use SiliconFlow chat-completions with deepseek-ai/DeepSeek-OCR
+    # - baidu_paddleocr_vl: use Baidu PaddleOCR-VL (legacy; can be disabled if quota is limited)
+    # - disabled: do not run OCR (qindex will be skipped)
+    ocr_provider: str = Field(default="siliconflow_qwen3_vl", validation_alias="OCR_PROVIDER")
+
+    # SiliconFlow OCR model (OpenAI-compatible chat completions)
+    silicon_ocr_model: str = Field(
+        default="deepseek-ai/DeepSeek-OCR",
+        validation_alias="SILICON_OCR_MODEL",
+    )
+    silicon_ocr_timeout_seconds: int = Field(
+        default=60,
+        validation_alias="SILICON_OCR_TIMEOUT_SECONDS",
+    )
+    silicon_ocr_max_tokens: int = Field(
+        default=2048,
+        validation_alias="SILICON_OCR_MAX_TOKENS",
+    )
+
+    # SiliconFlow qindex locator model (vision, bbox-only; recommended for slices)
+    silicon_qindex_model: str = Field(
+        default="Qwen/Qwen3-VL-32B-Thinking",
+        validation_alias="SILICON_QINDEX_MODEL",
+    )
+    silicon_qindex_timeout_seconds: int = Field(
+        default=180,
+        validation_alias="SILICON_QINDEX_TIMEOUT_SECONDS",
+    )
+    silicon_qindex_max_tokens: int = Field(
+        default=900,
+        validation_alias="SILICON_QINDEX_MAX_TOKENS",
+    )
+
+    # Ark qindex locator model (vision, bbox-only; optional)
+    ark_qindex_model: str = Field(
+        default="doubao-seed-1-6-vision-250815",
+        validation_alias="ARK_QINDEX_MODEL",
+    )
+    ark_qindex_timeout_seconds: int = Field(
+        default=180,
+        validation_alias="ARK_QINDEX_TIMEOUT_SECONDS",
+    )
+    ark_qindex_max_tokens: int = Field(
+        default=900,
+        validation_alias="ARK_QINDEX_MAX_TOKENS",
     )
 
     # Slice generation (BBox + Slice)

@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from homework_agent.models.schemas import GeometryInfo, Severity, Subject
+from homework_agent.core.slice_policy import analyze_visual_risk
 
 
 def _normalize_question_number(value: Any) -> Optional[str]:
@@ -147,8 +148,9 @@ def build_question_bank(
     """Build a queryable question bank snapshot keyed by question_number."""
     qlist = normalize_questions(questions)
 
-    # Enrich question_content/options/student_answer from Vision raw text when possible.
-    # This avoids relying on the grader to re-state long stems/options (reduces token use + prevents hallucination).
+    # Always parse Vision raw text to build a stable baseline:
+    # - guarantees /chat can route by question_number even if the grader forgets to output a full list
+    # - keeps stems/options grounded in OCR rather than grader hallucinations
     vision_qbank = build_question_bank_from_vision_raw_text(
         session_id=session_id,
         subject=subject,
@@ -159,27 +161,58 @@ def build_question_bank(
     vision_questions = vision_questions if isinstance(vision_questions, dict) else {}
 
     by_qn: Dict[str, Any] = {}
+    # 1) Baseline: all questions extracted from Vision.
+    for qn, vq in vision_questions.items():
+        if not qn or not isinstance(vq, dict):
+            continue
+        base = dict(vq)
+        base["question_number"] = str(qn)
+        # Ensure a minimal contract for chat routing.
+        base.setdefault("verdict", "uncertain")
+        base.setdefault("warnings", [])
+        base.setdefault("knowledge_tags", [])
+        by_qn[str(qn)] = base
+
+    # 2) Overlay: grader's structured judgments (verdict/reason/steps/tags).
     for q in qlist:
         qn = q.get("question_number")
         if not qn:
             continue
         qn_str = str(qn)
-        vq = vision_questions.get(qn_str)
-        if isinstance(vq, dict):
-            # Prefer OCR/vision-grounded content to prevent grader-side drift.
-            if vq.get("question_content"):
-                q["question_content"] = vq.get("question_content")
-            if vq.get("student_answer"):
-                q["student_answer"] = vq.get("student_answer")
-            if vq.get("options"):
-                q["options"] = vq.get("options")
-            if vq.get("answer_status"):
-                q["answer_status"] = vq.get("answer_status")
-            # Preserve "可能误读公式" hints from vision.
-            vw = vq.get("warnings")
-            if isinstance(vw, list) and vw:
-                q["warnings"] = list(dict.fromkeys((q.get("warnings") or []) + vw))
-        by_qn[qn_str] = q
+        merged = dict(by_qn.get(qn_str) or {})
+
+        # Keep OCR-grounded fields when available; only fill from grader if missing.
+        for field in ("question_content", "student_answer", "options", "answer_status"):
+            if not merged.get(field) and q.get(field):
+                merged[field] = q.get(field)
+
+        # Always take grader judgments when present.
+        for field in ("verdict", "reason", "knowledge_tags", "math_steps", "warnings", "cross_subject_flag"):
+            if q.get(field) is not None:
+                merged[field] = q.get(field)
+
+        # Merge warnings (vision risk hints are critical).
+        vw = merged.get("warnings") if isinstance(merged.get("warnings"), list) else []
+        qw = q.get("warnings") if isinstance(q.get("warnings"), list) else []
+        if vw or qw:
+            merged["warnings"] = list(dict.fromkeys([*vw, *qw]))
+
+        merged["question_number"] = qn_str
+        by_qn[qn_str] = merged
+
+    # 3) Annotate per-question visual risk for chat re-look decisions.
+    for qn, q in list(by_qn.items()):
+        if not isinstance(q, dict):
+            continue
+        vr, reasons = analyze_visual_risk(
+            subject=subject,
+            question_content=q.get("question_content"),
+            warnings=q.get("warnings") if isinstance(q.get("warnings"), list) else [],
+        )
+        q["visual_risk"] = bool(vr)
+        if reasons:
+            q["visual_risk_reasons"] = reasons
+        by_qn[str(qn)] = q
     return {
         "session_id": session_id,
         "subject": subject.value if hasattr(subject, "value") else str(subject),
@@ -298,6 +331,14 @@ def build_question_bank_from_vision_raw_text(
             "answer_status": answer_status or None,
             "options": options or None,
         }
+        vr, reasons = analyze_visual_risk(
+            subject=subject,
+            question_content=questions[str(current_qn)].get("question_content"),
+            warnings=warnings,
+        )
+        questions[str(current_qn)]["visual_risk"] = bool(vr)
+        if reasons:
+            questions[str(current_qn)]["visual_risk_reasons"] = reasons
         current_buf = []
 
     for line in lines:
@@ -417,4 +458,3 @@ def dedupe_wrong_items(wrong_items: List[Dict[str, Any]]) -> List[Dict[str, Any]
         seen.add(key)
         deduped.append(item)
     return deduped
-

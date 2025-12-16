@@ -14,14 +14,13 @@ Requires:
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import signal
 import time
 from typing import Any
 
 from homework_agent.utils.settings import get_settings
+from homework_agent.utils.logging_setup import setup_file_logging, silence_noisy_loggers
 from homework_agent.services.qindex_queue import (
     get_redis_client,
     queue_key,
@@ -30,8 +29,11 @@ from homework_agent.services.qindex_queue import (
 )
 from homework_agent.utils.observability import log_event
 
-# Reuse the same builder used by the API, but run it out-of-process.
-from homework_agent.api.routes import _build_question_index_for_pages  # noqa: E402
+# Keep the qindex builder in a stable shared module (avoid import path drift).
+from homework_agent.core.qindex import build_question_index_for_pages  # noqa: E402
+from homework_agent.api.session import get_question_bank  # noqa: E402
+from homework_agent.core.slice_policy import pick_question_numbers_for_slices  # noqa: E402
+from homework_agent.utils.submission_store import resolve_submission_for_session, persist_qindex_slices  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,12 @@ def _install_signal_handlers(stopper: _Stopper) -> None:
 def main() -> int:
     settings = get_settings()
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+    silence_noisy_loggers()
+
+    # Also write worker logs to file by default (same opt-out flag as backend).
+    if getattr(settings, "log_to_file", True):
+        level = getattr(logging, settings.log_level.upper(), logging.INFO)
+        setup_file_logging(log_file_path="logs/qindex_worker.log", level=level, logger_names=["", "homework_agent"])
 
     client = get_redis_client()
     if client is None:
@@ -80,9 +88,30 @@ def main() -> int:
             if not job.session_id or not job.page_urls:
                 continue
 
-            log_event(logger, "qindex_job_start", session_id=job.session_id, pages=len(job.page_urls))
-            index: dict[str, Any] = _build_question_index_for_pages(job.page_urls)
+            bank = get_question_bank(job.session_id) or {}
+            allow = job.question_numbers or pick_question_numbers_for_slices(bank)
+            log_event(
+                logger,
+                "qindex_job_start",
+                session_id=job.session_id,
+                pages=len(job.page_urls),
+                questions=len(allow or []),
+            )
+            index: dict[str, Any] = build_question_index_for_pages(
+                job.page_urls,
+                question_numbers=allow,
+                session_id=job.session_id,
+            )
             store_qindex_result(job.session_id, index, ttl_seconds=ttl_seconds)
+            # Best-effort: persist per-question slice refs to Postgres (7d TTL) for robustness.
+            try:
+                sub = resolve_submission_for_session(job.session_id) or {}
+                sid = str(sub.get("submission_id") or "").strip()
+                uid = str(sub.get("user_id") or "").strip()
+                if sid and uid:
+                    persist_qindex_slices(user_id=uid, submission_id=sid, session_id=job.session_id, qindex=index)
+            except Exception:
+                pass
             log_event(
                 logger,
                 "qindex_job_done",

@@ -2,7 +2,7 @@
 
 ## 1. 架构总览 (Architecture Overview)
 
-采用 **"Dual-Engine" (双引擎)** 架构，结合 Node.js 的高并发 IO 能力与 Python 的 AI 生态优势。
+当前仓库聚焦 **Python Agent 服务 + qindex worker** 的后端实现（FastAPI + Redis + Supabase）。Node.js BFF/前端属于后续工程，不在本仓库范围内；文档中仅保留为“可选上层”。
 
 ```mermaid
 graph TD
@@ -10,61 +10,49 @@ graph TD
         App[Mobile App]
     end
 
-    subgraph Cloud [Cloud Infrastructure]
-        subgraph BFF [Application Layer - Node.js]
-            Gateway[API Gateway / BFF]
-            Auth[Auth Service]
-            Biz[Business Logic]
-        end
-
-        subgraph AI [Core AI Layer - Python]
-            Agent[Agent Service (FastAPI)]
-            Planner[ReAct Planner]
-            Tools[Tool Set: OCR/Search/Math]
-        end
-
-        subgraph Data [Data Persistence]
-            DB_Biz[(PostgreSQL: User/Biz Data)]
-            DB_Vec[(Vector DB: Knowledge Base)]
-            OSS[Object Storage (Images)]
-        end
+    subgraph Backend [Backend (This Repo)]
+        API[FastAPI Agent Service]
+        Worker[qindex Worker]
+        Redis[(Redis: cache + queue)]
     end
 
-    App <-->|SSE / WebSocket| Gateway
-    Gateway <-->|HTTP (REST)| Agent
-    Gateway <--> DB_Biz
-    Agent <--> DB_Vec
-    App -->|Upload| OSS
-    Agent -->|Read| OSS
+    subgraph Data [Supabase]
+        PG[(Postgres: submissions/user data)]
+        Storage[(Storage: pages/slices/proxy)]
+    end
+
+    App -->|Upload file| API
+    API -->|Store pages| Storage
+    API -->|Write metadata| PG
+    API -->|/grade| API
+    API -->|enqueue qindex| Redis
+    Worker -->|BRPOP queue| Redis
+    Worker -->|Download pages| Storage
+    Worker -->|Upload slices| Storage
+    Worker -->|Write qindex:{session_id}| Redis
+    App <-->|SSE /chat| API
 ```
 
 ## 2. 技术选型 (Tech Stack)
 
-### 2.1 应用层 (BFF & Business)
-*   **Language**: TypeScript / Node.js
-*   **Framework**: **NestJS** (推荐企业级框架) 或 Koa.
+### 2.1 可选上层 (BFF & Business, Out of Scope)
+*   **Language**: TypeScript / Node.js（可选）
 *   **Responsibilities**:
-    *   WebSocket / SSE 连接管理。
-    *   用户鉴权 (JWT)。
-    *   业务数据 CRUD (错题本管理、班级管理)。
-    *   作为 AI 服务的 "Client"，转发 Prompt 并流式回传结果。
+    *   用户鉴权、业务聚合、与移动端的 SSE/WebSocket 连接管理（未来扩展点）。
 
 ### 2.2 AI 核心层 (AI Engine)
 *   **Language**: Python 3.10+
 *   **Framework**: **FastAPI** (高性能异步 Web 框架)。
-*   **Core Libraries**:
-    *   **Orchestration**: LangChain / LangGragh (Agent 编排)。
-    *   **LLM SDK**: OpenAI SDK (兼容各大多模型)。
-    *   **Data**: Pandas, NumPy (数据分析)。
 *   **Responsibilities**:
-    *   图像 OCR 与预处理。
-    *   作业批改逻辑推理。
-    *   学生知识点画像分析。
+    *   `/uploads`: 后端权威上传（将原始文件落到 Storage，返回 `upload_id/page_image_urls`）。
+    *   `/grade`: Vision 识别 + LLM 批改，产出 `vision_raw_text` 与结构化批改结果，并写入 session/qbank（后续会持久化为 submissions）。
+    *   `/chat`: SSE 辅导；当用户要求看图/图形判断时必须触发 qindex/relook，拿不到图则明确说明“看不到图”（禁止嘴硬）。
+    *   qindex worker: 题目定位(bbox) + 切片裁剪上传（重任务离线化）。
 
 ### 2.3 数据存储 (Storage)
-*   **Relational DB**: **PostgreSQL** (用户、错题元数据、结构化记录)。
-*   **Vector DB**: **Chroma / Pinecone** (如果需要根据知识点检索相似错题)。
-*   **Object Storage**: AWS S3 / Aliyun OSS (存储原始作业图片、切片)。
+*   **PostgreSQL (Supabase Postgres)**：用户/Submission/报告等结构化数据（长期保留，支持按时间查询）。
+*   **Object Storage (Supabase Storage)**：原始图片、proxy 轻量副本、切片（切片默认 7 天 TTL）。
+*   **Redis**：缓存与队列（`qbank/qindex/sess/mistakes` 以及 `qindex:queue`）。
 
 ## 3. 核心交互流程 (Interaction Flow)
 
@@ -73,42 +61,49 @@ graph TD
 sequenceDiagram
     participant User
     participant App
-    participant NestJS as BFF (Node)
-    participant Python as AI Agent
-    participant DB
+    participant API as FastAPI Agent
+    participant Storage as Supabase Storage
+    participant PG as Supabase Postgres
+    participant Redis as Redis
+    participant Worker as qindex Worker
 
     User->>App: 拍照上传 (Math/English)
-    App->>NestJS: POST /upload (Images)
-    NestJS->>DB: 创建作业任务 (Status: PENDING)
-    NestJS-->>App: Upload Success
+    App->>API: POST /api/v1/uploads (file, X-User-Id)
+    API->>Storage: Upload pages (users/{user_id}/uploads/{upload_id}/...)
+    API->>PG: Insert metadata (upload_id/session_id/page_image_urls...)
+    API-->>App: {upload_id,page_image_urls}
 
-    loop Async Processing
-        NestJS->>Python: POST /grade (Images, Subject)
-        Python->>Python: OCR -> Identify -> Grade
-        Python->>DB: Save Results (Wrong Items, Tags)
-        Python->>NestJS: POST /webhook/callback (JobId, Status)
+    App->>API: POST /api/v1/grade (upload_id, subject, vision_provider)
+    API->>API: Vision -> Grade -> Persist qbank/mistakes (Redis; 后续落库为 submissions)
+    API-->>App: GradeResponse (summary/wrong_items/warnings/vision_raw_text/session_id)
+
+    alt 视觉风险命中（must-slice）
+        API->>Redis: enqueue qindex job (session_id, page_urls, allowlist)
+        Worker->>Redis: BRPOP qindex:queue
+        Worker->>Storage: download pages + upload slices
+        Worker->>Redis: write qindex:{session_id}
     end
-
-    NestJS->>App: Push Notification (Done)
-    User->>App: 查看详情
-    App->>NestJS: GET /report
-    NestJS-->>App: Return JSON Report
 ```
 
 ### 3.2 错题辅导流程 (Socratic Tutoring)
 ```mermaid
 sequenceDiagram
     participant Student
-    participant NestJS as BFF
-    participant Python as AI Agent
+    participant App
+    participant API as FastAPI Agent
+    participant Redis as Redis
+    participant Worker as qindex Worker
 
-    Student->>NestJS: "这道题我不懂" (Text/Audio)
-    NestJS->>Python: POST /chat (History, Context, Question)
-    
-    loop Stream Response
-        Python-->>NestJS: SSE Chunk (Thinking...)
-        NestJS-->>Student: SSE Chunk (Thinking...)
-        Python-->>NestJS: SSE Chunk (Hint: "先看看三角形...")
-        NestJS-->>Student: SSE Chunk (Hint)
+    Student->>App: "讲讲第9题/你看不到图吗"
+    App->>API: POST /api/v1/chat (session_id, question)  (SSE)
+
+    alt 用户要求看图/图形判断
+        API->>Redis: Ensure qindex queued (if needed)
+        API-->>App: "正在读取图片并生成切片，请稍等…" (SSE)
+        Worker->>Redis: BRPOP -> build slices -> write qindex:{session_id}
+        API->>API: relook via Vision using slice (or page)
+        API-->>App: 仅基于可见信息输出（拿不到图则明确“看不到图”）
+    else 普通文本辅导
+        API-->>App: 苏格拉底式引导（不直接给答案）
     end
 ```

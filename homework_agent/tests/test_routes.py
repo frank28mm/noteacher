@@ -77,3 +77,8 @@ def test_assistant_tail_replays_last_messages_in_order():
     ]
     tail = assistant_tail(history, max_messages=3)
     assert [m["content"] for m in tail] == ["a2", "a3", "a4"]
+
+
+def test_upload_route_exists_validation_error_without_file():
+    resp = client.post("/api/v1/uploads")
+    assert resp.status_code == 422

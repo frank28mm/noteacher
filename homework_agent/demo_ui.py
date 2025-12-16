@@ -1,5 +1,5 @@
 """作业检查大师 Demo UI
-真实业务场景模拟：用户上传图片 → Supabase Storage → 公网 URL → 后端 API
+真实业务场景模拟：用户上传文件 → 后端 /uploads → Supabase Storage → /grade(upload_id) → /chat
 """
 import os
 import uuid
@@ -14,7 +14,6 @@ import inspect
 
 from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple
 from homework_agent.models.schemas import Subject, VisionProvider, WrongItem, Message, ImageRef
-from homework_agent.utils.supabase_client import get_storage_client
 from homework_agent.services.vision import VisionClient
 from homework_agent.utils.settings import get_settings
 
@@ -69,6 +68,8 @@ _settings = get_settings()
 DEMO_GRADE_TIMEOUT_SECONDS = float(
     os.getenv("DEMO_GRADE_TIMEOUT_SECONDS", str(_settings.grade_completion_sla_seconds + 60))
 )
+DEMO_USER_ID = (os.getenv("DEMO_USER_ID") or os.getenv("DEV_USER_ID") or "dev_user").strip() or "dev_user"
+DEMO_HEADERS = {"X-User-Id": DEMO_USER_ID}
 
 _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
@@ -130,11 +131,8 @@ def _render_stage_lines(stage: str, elapsed_s: int) -> str:
     )
 
 
-def upload_to_supabase(file_path: str, min_side: int) -> List[str]:
-    """上传文件到 Supabase Storage 并返回公网 URL 列表
-
-    支持：图片（含 HEIC/HEIF 自动转码），PDF（拆页最多 8 页转图片）。
-    """
+def upload_to_backend(file_path: str, *, session_id: Optional[str]) -> Dict[str, Any]:
+    """上传文件到后端 /uploads，并返回 {upload_id, page_image_urls, ...}。"""
     if not file_path or not os.path.exists(file_path):
         raise ValueError("文件不存在")
 
@@ -143,10 +141,22 @@ def upload_to_supabase(file_path: str, min_side: int) -> List[str]:
     if file_size > 20 * 1024 * 1024:
         raise ValueError(f"文件超过 20MB: {file_size / 1024 / 1024:.2f}MB")
 
-    storage_client = get_storage_client()
-    public_urls = storage_client.upload_files(file_path, prefix="demo/", min_side=min_side)
+    filename = os.path.basename(file_path)
+    content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+    params: Dict[str, str] = {}
+    if session_id:
+        params["session_id"] = str(session_id)
 
-    return public_urls
+    with open(file_path, "rb") as f:
+        files = {"file": (filename, f, content_type)}
+        with httpx.Client(timeout=120.0) as client:
+            r = client.post(f"{API_BASE_URL}/uploads", files=files, params=params, headers=DEMO_HEADERS)
+    if r.status_code != 200:
+        raise Exception(f"上传失败: {r.status_code} - {r.text}")
+    data = r.json()
+    if not isinstance(data, dict) or not data.get("upload_id"):
+        raise Exception(f"上传失败：响应异常 {data}")
+    return data
 
 
 def format_grading_result(result: Dict[str, Any]) -> str:
@@ -226,11 +236,11 @@ def format_grading_result(result: Dict[str, Any]) -> str:
     return md
 
 
-async def call_grade_api(image_urls: List[str], subject: str, provider: str, session_id: str) -> Dict[str, Any]:
-    """调用后端 /api/v1/grade API"""
-    # 构建请求
+async def call_grade_api(*, upload_id: str, subject: str, provider: str, session_id: str) -> Dict[str, Any]:
+    """调用后端 /api/v1/grade（推荐：upload_id -> 后端反查 images）。"""
     payload = {
-        "images": [{"url": u} for u in image_urls],
+        "images": [],
+        "upload_id": upload_id,
         "subject": subject,
         "session_id": session_id,
         "vision_provider": provider
@@ -240,7 +250,8 @@ async def call_grade_api(image_urls: List[str], subject: str, provider: str, ses
     async with httpx.AsyncClient(timeout=DEMO_GRADE_TIMEOUT_SECONDS) as client:
         response = await client.post(
             f"{API_BASE_URL}/grade",
-            json=payload
+            json=payload,
+            headers=DEMO_HEADERS,
         )
 
     if response.status_code != 200:
@@ -307,7 +318,8 @@ async def call_chat_api(
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
             f"{API_BASE_URL}/chat",
-            json=payload
+            json=payload,
+            headers=DEMO_HEADERS,
         )
 
     if response.status_code != 200:
@@ -354,31 +366,35 @@ async def grade_homework_logic(img_path, subject, provider):
     started = time.monotonic()
 
     try:
-        # 尺寸下限：Qwen3 >=28px，Doubao >=14px
-        min_side = 28 if provider == "qwen3" else 14
-
-        # Step 1: 上传到 Supabase Storage
+        # Step 1: 上传到后端 /uploads（后端落 Supabase Storage，返回 upload_id）
         yield "📝 正在开始批改…", session_id, None, _render_stage_lines("uploading", int(time.monotonic() - started))
 
-        upload_task = asyncio.create_task(asyncio.to_thread(upload_to_supabase, img_path, min_side=min_side))
+        upload_task = asyncio.create_task(asyncio.to_thread(upload_to_backend, img_path, session_id=session_id))
         while not upload_task.done():
             await asyncio.sleep(0.15)
             yield "📝 正在开始批改…", session_id, None, _render_stage_lines(
                 "uploading", int(time.monotonic() - started)
             )
 
-        image_urls = await upload_task
-        if not image_urls:
-            yield "**错误**：上传失败，未获取到 URL。", session_id, None, "❌ 上传失败"
+        upload_resp = await upload_task
+        upload_id = str(upload_resp.get("upload_id") or "").strip()
+        page_urls = upload_resp.get("page_image_urls") or []
+        if not upload_id:
+            yield "**错误**：上传失败，未获取到 upload_id。", session_id, None, "❌ 上传失败"
+            return
+        if not (isinstance(page_urls, list) and page_urls):
+            yield "**错误**：上传失败，未获取到 page_image_urls。", session_id, None, "❌ 上传失败"
             return
 
-        page_url = image_urls[0]
+        page_url = str(page_urls[0])
         yield "📝 已上传，等待 Vision 识别与批改…", session_id, page_url, _render_stage_lines(
             "accepted", int(time.monotonic() - started)
         )
 
-        # Step 2: 调用后端 API
-        grade_task = asyncio.create_task(call_grade_api(image_urls, subject, provider, session_id=session_id))
+        # Step 2: 调用后端 /grade（upload_id -> 后端反查 images）
+        grade_task = asyncio.create_task(
+            call_grade_api(upload_id=upload_id, subject=subject, provider=provider, session_id=session_id)
+        )
 
         last_progress_stage = "accepted"
         while not grade_task.done():
@@ -426,13 +442,13 @@ async def vision_debug_logic(img_path, provider):
         return "**错误**：请上传图片文件。", ""
 
     try:
-        min_side = 28 if provider == "qwen3" else 14
-        gr.Info("📤 上传到 Supabase (调试用)...")
-        urls = upload_to_supabase(img_path, min_side=min_side)
-        if not urls:
+        gr.Info("📤 上传到后端 /uploads ...")
+        upload_resp = await asyncio.to_thread(upload_to_backend, img_path, session_id=None)
+        urls = upload_resp.get("page_image_urls") or []
+        if not (isinstance(urls, list) and urls):
             return "**错误**：上传失败，未获取到 URL。", ""
-        img_url = urls[0]
-        gr.Info(f"✅ 上传成功，URL: {img_url}")
+        img_url = str(urls[0])
+        gr.Info(f"✅ 上传成功，URL: {img_url} (upload_id={upload_resp.get('upload_id')})")
 
         # 调用 Vision
         client = VisionClient()
@@ -494,7 +510,7 @@ async def tutor_chat_logic(
 
     try:
         async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("POST", f"{API_BASE_URL}/chat", json=payload) as resp:
+            async with client.stream("POST", f"{API_BASE_URL}/chat", json=payload, headers=DEMO_HEADERS) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread()).decode("utf-8", errors="ignore")
                     raise Exception(f"API 调用失败: {resp.status_code} - {body}")
@@ -563,10 +579,10 @@ def create_demo():
         # 🎓 作业检查大师 (Homework Agent)
 
         ### 🔄 真实业务场景模拟
-        - **Step 1**: 上传本地图片 → Supabase Storage (云存储)
-        - **Step 2**: 获取公网 URL
-        - **Step 3**: 调用后端 `/api/v1/grade` 进行批改
-        - **Step 4**: 调用后端 `/api/v1/chat` 进行苏格拉底辅导
+        - **Step 1**: 上传本地文件 → 后端 `/api/v1/uploads`
+        - **Step 2**: 后端写入 Supabase Storage（权威原图），返回 `upload_id` + `page_image_urls`
+        - **Step 3**: 调用后端 `/api/v1/grade`（携带 `upload_id`，后端反查 images 并批改）
+        - **Step 4**: 调用后端 `/api/v1/chat`（SSE）进行苏格拉底辅导
 
         ### 📝 使用说明
         - ✅ 支持格式：JPG、PNG、WebP
@@ -680,7 +696,7 @@ def create_demo():
         ### 🔧 技术架构
         - **前端**: Gradio (端口 7890)
         - **后端**: FastAPI (端口 8000)
-        - **存储**: Supabase Storage (Public Bucket)
+        - **存储**: Supabase Storage（由后端写入，前端不直传）
         - **模型**: Qwen3-VL (SiliconFlow) / Doubao-Vision (Ark)
 
         ### ⚡ 性能说明

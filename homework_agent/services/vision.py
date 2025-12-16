@@ -102,16 +102,17 @@ class VisionClient:
                 else:
                     blocks.append({"type": "image_url", "image_url": {"url": str(ref.url)}})
             elif ref.base64:
-                # Some providers may not accept raw base64; callers should prefer URL uploads
-                # Note: Qwen3 (SiliconFlow) expects full Data URI (data:image/...) in 'url' field.
+                # Prefer URL uploads when possible, but allow Data URI fallback:
+                # - Qwen3 (SiliconFlow) expects full Data URI in 'url' field.
+                # - Doubao (Ark) accepts Data URI via `input_image.image_url` in practice (helps bypass provider-side URL fetch timeouts).
                 # Do NOT strip prefix.
-                
+
                 # Approximate size check: 4/3 of base64 length
                 est_bytes = int(len(ref.base64) * 0.75)
                 if est_bytes > 20 * 1024 * 1024:
                     raise ValueError("Image size exceeds 20MB limit; use URL instead")
                 if provider == VisionProvider.DOUBAO:
-                    raise ValueError("Doubao/Ark only supports public URLs; base64 is not accepted")
+                    blocks.append({"type": "input_image", "image_url": ref.base64})
                 else:
                     blocks.append({"type": "image_url", "image_url": {"url": ref.base64}})
         return blocks

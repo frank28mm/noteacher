@@ -19,6 +19,10 @@ SILICON_VISION_MODEL=Qwen/Qwen3-VL-32B-Thinking
 ARK_API_KEY=ark-xxxxxxxxxxxxxxxxxxxxxxxx
 ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 ARK_VISION_MODEL=doubao-seed-1-6-vision-250815
+
+# QIndex Locator（题号+bbox，bbox-only）
+# - 若模型名以 doubao- 开头，locator 走 Ark（responses.create）
+ARK_QINDEX_MODEL=doubao-seed-1-6-vision-250815
 ```
 
 ## 3. 调用示例
@@ -78,7 +82,8 @@ resp = client.responses.create(
 
 ## 5. 注意事项（URL First）
 - 优先使用公网 HTTP/HTTPS URL，禁止 localhost/127/内网；单文件不超过 20 MB。
-- Doubao 仅接受 URL，Base64 会被拒绝；Qwen3 支持 URL（推荐）或 Base64 兜底（去掉 `data:image/...;base64,` 前缀）。
+- Doubao 对外输入优先用 URL；后端在遇到“供应商抓 URL 超时/不稳定”时，会走内部兜底：先后端下载图片→转 data-url(base64)→直接喂给 Doubao（绕开对方抓 URL）。
+- Qwen3 支持 URL（推荐）或 Base64 兜底；Doubao 的 base64 仅接受 data URL 形态（`data:image/...;base64,...`，用于后端内部兜底，不建议客户端直接使用）。
 - 不要将真实 API Key 提交到仓库；运行前在 `.env` 设置。
 - 确认 `base_url` 与 provider 一致，避免调用默认 openai.com。
 - 确保限流与重试策略按契约执行（幂等键、防重复）。 

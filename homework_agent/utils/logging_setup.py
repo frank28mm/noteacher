@@ -64,3 +64,14 @@ def setup_file_logging(
     for name in targets:
         _ensure(logging.getLogger(name))
 
+
+def silence_noisy_loggers() -> None:
+    """
+    Reduce verbosity of third-party libraries that may log request details.
+    Keep this conservative: we only raise log levels for known noisy libs.
+    """
+    try:
+        for name in ("httpx", "httpcore", "openai", "urllib3"):
+            logging.getLogger(name).setLevel(logging.WARNING)
+    except Exception:
+        return

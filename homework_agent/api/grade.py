@@ -7,6 +7,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
+import io
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple
 import re
 
@@ -20,6 +21,7 @@ from homework_agent.services.vision import VisionClient
 from homework_agent.services.llm import LLMClient, MathGradingResult, EnglishGradingResult
 from homework_agent.services.qindex_queue import enqueue_qindex_job
 from homework_agent.utils.settings import get_settings
+from homework_agent.core.qindex import qindex_is_configured
 from homework_agent.core.qbank import (
     assign_stable_item_ids,
     build_question_bank,
@@ -28,18 +30,29 @@ from homework_agent.core.qbank import (
     derive_wrong_items_from_questions,
     sanitize_wrong_items,
 )
+from homework_agent.core.slice_policy import should_create_slices_for_bank
+from homework_agent.core.slice_policy import pick_question_numbers_for_slices
 from homework_agent.api.session import (
     cache_store,
     save_mistakes,
     get_mistakes,
+    get_question_bank,
     save_question_index,
     save_grade_progress,
     persist_question_bank,
+    save_qindex_placeholder,
     _merge_bank_meta,
     _ensure_session_id,
     IDP_TTL_HOURS,
 )
 from homework_agent.utils.observability import get_request_id_from_headers, log_event
+from homework_agent.utils.user_context import get_user_id
+from homework_agent.utils.submission_store import (
+    resolve_page_image_urls,
+    touch_submission,
+    update_submission_after_grade,
+    link_session_to_submission,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +79,23 @@ async def _call_blocking_in_thread(
 
 # 常量
 # 取消硬性 5 轮上限；仅保留计数用于提示递进
+
+def _bank_has_visual_risk(bank: Any) -> bool:
+    try:
+        if not isinstance(bank, dict):
+            return False
+        qs = bank.get("questions")
+        if not isinstance(qs, dict):
+            return False
+        return any(isinstance(q, dict) and q.get("visual_risk") is True for q in qs.values())
+    except Exception:
+        return False
+
+
+def _visual_risk_warning_text() -> str:
+    # Short, client-friendly.
+    return "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+
 
 def validate_vision_provider(provider: VisionProvider) -> VisionProvider:
     """验证vision_provider是否在白名单中"""
@@ -101,6 +131,16 @@ def _first_public_image_url(images: List[Any]) -> Optional[str]:
         if url:
             return str(url)
     return None
+
+
+def _normalize_public_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    s = str(url).strip()
+    if not s:
+        return None
+    # Supabase SDK may return URLs with a trailing "?" which can confuse downstream fetchers.
+    return s.rstrip("?")
 
 
 def _probe_url_head(url: str) -> Optional[str]:
@@ -144,6 +184,85 @@ def _download_as_data_uri(url: str) -> Optional[str]:
         return None
 
 
+def _is_provider_image_fetch_issue(err: Exception) -> bool:
+    msg = str(err or "").strip()
+    if not msg:
+        return False
+    return any(
+        s in msg
+        for s in (
+            "Timeout while fetching image_url",
+            "timeout while fetching image_url",
+            "InvalidParameter",
+            "image_url",
+            "20040",
+        )
+    )
+
+
+def _create_proxy_image_urls(
+    urls: List[str],
+    *,
+    session_id: str,
+    prefix: str = "proxy/",
+    max_side: int = 1600,
+    jpeg_quality: int = 85,
+) -> Optional[List[str]]:
+    """
+    Best-effort: create a smaller, stable public URL copy in Supabase to reduce provider-side fetch failures.
+    Only call this when URL fetch is unstable/failing (it downloads + uploads, not cheap).
+    """
+    cleaned = [str(u).strip() for u in (urls or []) if str(u).strip()]
+    if not cleaned:
+        return None
+
+    try:
+        import httpx
+        from PIL import Image
+        from homework_agent.utils.supabase_client import get_storage_client
+    except Exception:
+        return None
+
+    out: List[str] = []
+    storage = get_storage_client()
+    base_prefix = f"{prefix.rstrip('/')}/{session_id}/"
+
+    for u in cleaned:
+        try:
+            with httpx.Client(timeout=25.0, follow_redirects=True, trust_env=False) as client:
+                r = client.get(u)
+            r.raise_for_status()
+            data = r.content or b""
+            if not data:
+                continue
+
+            img = Image.open(io.BytesIO(data))
+            img.load()
+            w, h = img.size
+            if max(w, h) > int(max_side):
+                ratio = float(max_side) / float(max(w, h))
+                nw = max(1, int(round(w * ratio)))
+                nh = max(1, int(round(h * ratio)))
+                img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=int(jpeg_quality), optimize=True)
+            proxy_url = storage.upload_bytes(
+                buf.getvalue(),
+                mime_type="image/jpeg",
+                suffix=".jpg",
+                prefix=base_prefix,
+            )
+            out.append(_normalize_public_url(proxy_url) or proxy_url)
+        except Exception:
+            # Keep a stable list length so downstream can safely index by page.
+            out.append(_normalize_public_url(u) or u)
+
+    return out if out else None
+
+
 def validate_images_payload(images: List[Dict[str, Any]], vision_provider: VisionProvider) -> None:
     """Early validation for /grade to reduce invalid calls."""
     if not images:
@@ -163,7 +282,12 @@ def validate_images_payload(images: List[Dict[str, Any]], vision_provider: Visio
             if est_bytes > 20 * 1024 * 1024:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image size exceeds 20MB; use URL")
             if vision_provider == VisionProvider.DOUBAO:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Doubao only supports URL; base64 not accepted")
+                # Ark/Doubao is URL-preferred but can accept data-url fallback (avoids provider-side URL fetch).
+                if not str(b64).lstrip().lower().startswith("data:image/"):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Doubao base64 must be a data URL (data:image/...;base64,...)",
+                    )
         else:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Each image must provide url or base64")
 
@@ -235,10 +359,16 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         "vision_provider_requested": getattr(req.vision_provider, "value", str(req.vision_provider)),
         "vision_provider_used": None,
         "vision_used_base64_fallback": False,
+        "vision_used_proxy_url": False,
         "llm_provider_requested": provider_str,
         "llm_provider_used": None,
         "llm_used_fallback": False,
     }
+    # Track canonical page image URLs for downstream (qbank->chat->qindex).
+    page_image_urls: List[str] = [
+        v for img in (req.images or []) for v in [_normalize_public_url(getattr(img, "url", None))] if v
+    ]
+    page_image_urls_original = list(page_image_urls)
 
     # Vision stage (offload to thread + sub-timeout)
     v_budget = min(float(settings.grade_vision_timeout_seconds), remaining_seconds())
@@ -259,7 +389,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                 "session_id": session_for_ctx,
                 "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
                 "vision_raw_text": None,
-                "page_image_urls": [str(img.url) for img in (req.images or []) if getattr(img, "url", None)],
+                "page_image_urls": [v for img in (req.images or []) for v in [_normalize_public_url(getattr(img, "url", None))] if v],
                 "questions": {},
                 },
                 meta_base,
@@ -352,7 +482,8 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         )
         if req.vision_provider == VisionProvider.DOUBAO:
             probe = _probe_url_head(_first_public_image_url(req.images))
-            # Fallback to qwen3 within remaining budget.
+            # Retry doubao with local download + data-url to avoid provider-side URL fetch flakiness,
+            # then fallback to qwen3 if needed (within remaining budget).
             v_budget2 = min(float(settings.grade_vision_timeout_seconds), remaining_seconds())
             if v_budget2 <= 0:
                 persist_question_bank(
@@ -362,7 +493,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                         "session_id": session_for_ctx,
                         "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
                         "vision_raw_text": None,
-                        "page_image_urls": [str(img.url) for img in (req.images or []) if getattr(img, "url", None)],
+                        "page_image_urls": [v for img in (req.images or []) for v in [_normalize_public_url(getattr(img, "url", None))] if v],
                         "questions": {},
                         },
                         meta_base,
@@ -394,6 +525,118 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                     vision_raw_text=None,
                 )
             try:
+                # 0) If provider-side image_url fetch is flaky, create a lightweight proxy URL and retry.
+                proxy_urls: Optional[List[str]] = None
+                proxy_retry_succeeded = False
+                if _is_provider_image_fetch_issue(e) and page_image_urls:
+                    save_grade_progress(
+                        session_for_ctx,
+                        "vision_proxy_start",
+                        "生成轻量图片副本（降低拉取失败）…",
+                        None,
+                    )
+                    proxy_urls = _create_proxy_image_urls(page_image_urls, session_id=session_for_ctx, prefix="proxy/")
+                    if proxy_urls:
+                        page_image_urls = proxy_urls
+                        meta_base["page_image_urls_original"] = page_image_urls_original
+                        meta_base["page_image_urls_proxy"] = proxy_urls
+
+                        save_grade_progress(
+                            session_for_ctx,
+                            "vision_retry_start",
+                            "Vision 识别重试（doubao：使用轻量副本 URL）…",
+                            {"budget_s": v_budget2},
+                        )
+                        v_retry0 = time.monotonic()
+                        vision_result = await _call_blocking_in_thread(
+                            vision_client.analyze,
+                            images=[ImageRef(url=u) for u in proxy_urls],
+                            prompt=vision_prompt,
+                            provider=VisionProvider.DOUBAO,
+                            timeout_seconds=v_budget2,
+                            semaphore=VISION_SEMAPHORE,
+                        )
+                        timings_ms["vision_ms"] = int((time.monotonic() - v_retry0) * 1000)
+                        meta_base["vision_provider_used"] = VisionProvider.DOUBAO.value
+                        meta_base["vision_used_proxy_url"] = True
+                        proxy_retry_succeeded = True
+                        log_event(
+                            logger,
+                            "vision_retry_done",
+                            request_id=req_id,
+                            session_id=session_for_ctx,
+                            provider=meta_base.get("vision_provider_used"),
+                            used_proxy_url=True,
+                            vision_text_len=len(getattr(vision_result, "text", "") or ""),
+                        )
+                        save_grade_progress(
+                            session_for_ctx,
+                            "vision_done",
+                            "Vision 识别完成（doubao：轻量副本 URL 兜底）",
+                            {"used_proxy_url": True, "vision_text_len": len(getattr(vision_result, "text", "") or "")},
+                        )
+                        vision_fallback_warning = (
+                            f"Vision(doubao) URL 拉取失败，已生成轻量副本 URL 兜底：{_vision_err_str(e, v_budget)}"
+                            + (f"；{probe}" if probe else "")
+                        )
+                if proxy_retry_succeeded:
+                    # proxy retry succeeded; continue without base64 retry.
+                    pass
+                else:
+
+                    # 1) doubao retry with local base64 (data-url) if we can convert at least one url
+                    save_grade_progress(
+                        session_for_ctx,
+                        "vision_retry_start",
+                        "Vision 识别重试（doubao：本地下载+base64）…",
+                        {"budget_s": v_budget2},
+                    )
+                    converted_images: List[Any] = []
+                    converted_any = False
+                    for u in page_image_urls or page_image_urls_original:
+                        data_uri = _download_as_data_uri(str(u))
+                        if data_uri:
+                            converted_any = True
+                            converted_images.append(ImageRef(base64=data_uri))
+                        else:
+                            converted_images.append(ImageRef(url=str(u)))
+
+                    if converted_any:
+                        v_retry0 = time.monotonic()
+                        vision_result = await _call_blocking_in_thread(
+                            vision_client.analyze,
+                            images=converted_images,
+                            prompt=vision_prompt,
+                            provider=VisionProvider.DOUBAO,
+                            timeout_seconds=v_budget2,
+                            semaphore=VISION_SEMAPHORE,
+                        )
+                        timings_ms["vision_ms"] = int((time.monotonic() - v_retry0) * 1000)
+                        meta_base["vision_provider_used"] = VisionProvider.DOUBAO.value
+                        meta_base["vision_used_base64_fallback"] = True
+                        log_event(
+                            logger,
+                            "vision_retry_done",
+                            request_id=req_id,
+                            session_id=session_for_ctx,
+                            provider=meta_base.get("vision_provider_used"),
+                            used_base64=True,
+                            vision_text_len=len(getattr(vision_result, "text", "") or ""),
+                        )
+                        save_grade_progress(
+                            session_for_ctx,
+                            "vision_done",
+                            "Vision 识别完成（doubao：base64 兜底）",
+                            {"used_base64_fallback": True, "vision_text_len": len(getattr(vision_result, "text", "") or "")},
+                        )
+                        vision_fallback_warning = (
+                            f"Vision(doubao) URL 拉取失败，已使用本地下载+base64 兜底：{_vision_err_str(e, v_budget)}"
+                            + (f"；{probe}" if probe else "")
+                        )
+                    else:
+                        raise RuntimeError("no_convertible_image_url_for_base64_retry")
+
+            except Exception as e_retry:
                 save_grade_progress(
                     session_for_ctx,
                     "vision_fallback_start",
@@ -403,20 +646,13 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                 # Strong fallback: if URL fetch is flaky for cloud providers, convert URLs to base64 locally for Qwen3.
                 converted_images: List[Any] = []
                 converted_any = False
-                for img in req.images or []:
-                    if getattr(img, "base64", None):
-                        converted_images.append(img)
-                        continue
-                    url = getattr(img, "url", None)
-                    if url:
-                        data_uri = _download_as_data_uri(str(url))
-                        if data_uri:
-                            converted_any = True
-                            converted_images.append(type(img)(base64=data_uri))
-                        else:
-                            converted_images.append(img)
+                for u in page_image_urls or page_image_urls_original:
+                    data_uri = _download_as_data_uri(str(u))
+                    if data_uri:
+                        converted_any = True
+                        converted_images.append(ImageRef(base64=data_uri))
                     else:
-                        converted_images.append(img)
+                        converted_images.append(ImageRef(url=str(u)))
 
                 if converted_any:
                     vision_result = await _call_blocking_in_thread(
@@ -447,7 +683,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                     {"used_base64_fallback": bool(converted_any), "vision_text_len": len(getattr(vision_result, "text", "") or "")},
                 )
                 vision_fallback_warning = (
-                    f"Vision(doubao) 失败，已回退到 qwen3: {_vision_err_str(e, v_budget)}"
+                    f"Vision(doubao) 失败（含 base64 重试），已回退到 qwen3: {_vision_err_str(e, v_budget)}"
                     + (f"；{probe}" if probe else "")
                     + ("；qwen3 使用本地下载+base64 兜底" if converted_any else "")
                 )
@@ -475,7 +711,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                         "session_id": session_for_ctx,
                         "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
                         "vision_raw_text": None,
-                        "page_image_urls": [str(img.url) for img in (req.images or []) if getattr(img, "url", None)],
+                        "page_image_urls": [v for img in (req.images or []) for v in [_normalize_public_url(getattr(img, "url", None))] if v],
                         "questions": {},
                         },
                         meta_base,
@@ -514,7 +750,7 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
                     "session_id": session_for_ctx,
                     "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
                     "vision_raw_text": None,
-                    "page_image_urls": [str(img.url) for img in (req.images or []) if getattr(img, "url", None)],
+                    "page_image_urls": [v for img in (req.images or []) for v in [_normalize_public_url(getattr(img, "url", None))] if v],
                     "questions": {},
                     },
                     meta_base,
@@ -787,20 +1023,22 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         # Save vision-only qbank so /chat can still route by question number.
         if session_for_ctx:
             page_urls = [img.url for img in req.images if getattr(img, "url", None)]
+            bank_fallback = build_question_bank_from_vision_raw_text(
+                session_id=session_for_ctx,
+                subject=req.subject,
+                vision_raw_text=vision_result.text,
+                page_image_urls=[v for u in page_urls for v in [_normalize_public_url(str(u))] if v],
+            )
+            extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
             persist_question_bank(
                 session_id=session_for_ctx,
                 bank=_merge_bank_meta(
-                    build_question_bank_from_vision_raw_text(
-                    session_id=session_for_ctx,
-                    subject=req.subject,
-                    vision_raw_text=vision_result.text,
-                    page_image_urls=[str(u) for u in page_urls if u],
-                ),
+                    bank_fallback,
                     meta_base,
                 ),
                 grade_status="failed",
                 grade_summary="LLM grading timeout",
-                grade_warnings=[f"LLM timeout: {str(e)}"],
+                grade_warnings=[w for w in [f"LLM timeout: {str(e)}", extra_warn] if w],
                 timings_ms=timings_ms,
             )
         return GradeResponse(
@@ -813,26 +1051,27 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             total_items=None,
             wrong_count=None,
             cross_subject_flag=None,
-            warnings=[f"LLM timeout: {str(e)}"],
+            warnings=[w for w in [f"LLM timeout: {str(e)}", extra_warn] if w] if session_for_ctx else [f"LLM timeout: {str(e)}"],
             vision_raw_text=vision_result.text,
         )
     except Exception as e:
         if session_for_ctx:
-            page_urls = [img.url for img in req.images if getattr(img, "url", None)]
+            bank_fallback = build_question_bank_from_vision_raw_text(
+                session_id=session_for_ctx,
+                subject=req.subject,
+                vision_raw_text=vision_result.text,
+                page_image_urls=page_image_urls,
+            )
+            extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
             persist_question_bank(
                 session_id=session_for_ctx,
                 bank=_merge_bank_meta(
-                    build_question_bank_from_vision_raw_text(
-                    session_id=session_for_ctx,
-                    subject=req.subject,
-                    vision_raw_text=vision_result.text,
-                    page_image_urls=[str(u) for u in page_urls if u],
-                ),
+                    bank_fallback,
                     meta_base,
                 ),
                 grade_status="failed",
                 grade_summary=f"LLM grading failed: {str(e)}",
-                grade_warnings=[f"LLM error: {str(e)}"],
+                grade_warnings=[w for w in [f"LLM error: {str(e)}", extra_warn] if w],
                 timings_ms=timings_ms,
             )
         return GradeResponse(
@@ -845,29 +1084,31 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             total_items=None,
             wrong_count=None,
             cross_subject_flag=None,
-            warnings=[f"LLM error: {str(e)}"],
+            warnings=[w for w in [f"LLM error: {str(e)}", extra_warn] if w] if session_for_ctx else [f"LLM error: {str(e)}"],
             vision_raw_text=vision_result.text,
         )
 
     # If parsing still failed after fallbacks, treat grading as failed (avoid "done but empty").
     if _needs_fallback(grading_result):
         if session_for_ctx:
-            page_urls = [img.url for img in req.images if getattr(img, "url", None)]
+            bank_fallback = build_question_bank_from_vision_raw_text(
+                session_id=session_for_ctx,
+                subject=req.subject,
+                vision_raw_text=vision_result.text,
+                page_image_urls=page_image_urls,
+            )
+            extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
             persist_question_bank(
                 session_id=session_for_ctx,
                 bank=_merge_bank_meta(
-                    build_question_bank_from_vision_raw_text(
-                    session_id=session_for_ctx,
-                    subject=req.subject,
-                    vision_raw_text=vision_result.text,
-                    page_image_urls=[str(u) for u in page_urls if u],
-                ),
+                    bank_fallback,
                     meta_base,
                 ),
                 grade_status="failed",
                 grade_summary=(getattr(grading_result, "summary", "") or "批改失败").strip(),
                 grade_warnings=(getattr(grading_result, "warnings", None) or [])
-                + ([vision_fallback_warning] if vision_fallback_warning else []),
+                + ([vision_fallback_warning] if vision_fallback_warning else [])
+                + ([extra_warn] if extra_warn else []),
                 timings_ms=timings_ms,
             )
         return GradeResponse(
@@ -880,31 +1121,34 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             total_items=getattr(grading_result, "total_items", None),
             wrong_count=getattr(grading_result, "wrong_count", None),
             cross_subject_flag=getattr(grading_result, "cross_subject_flag", None),
-            warnings=(getattr(grading_result, "warnings", None) or []) + ([vision_fallback_warning] if vision_fallback_warning else []),
+            warnings=(getattr(grading_result, "warnings", None) or [])
+            + ([vision_fallback_warning] if vision_fallback_warning else [])
+            + ([extra_warn] if session_for_ctx and extra_warn else []),
             vision_raw_text=vision_result.text,
         )
 
     # Persist question bank snapshot (full question list) for chat routing.
     if session_for_ctx:
-        page_urls = [img.url for img in req.images if getattr(img, "url", None)]
-        questions = getattr(grading_result, "questions", None) or []
-        if isinstance(questions, list) and questions:
-            bank = build_question_bank(
-                session_id=session_for_ctx,
-                subject=req.subject,
-                questions=questions,
-                vision_raw_text=vision_result.text,
-                page_image_urls=page_urls,
-            )
-            persist_question_bank(
-                session_id=session_for_ctx,
-                bank=_merge_bank_meta(bank, meta_base),
-                grade_status="done",
-                grade_summary=(getattr(grading_result, "summary", "") or "").strip(),
-                grade_warnings=(getattr(grading_result, "warnings", None) or [])
-                + ([vision_fallback_warning] if vision_fallback_warning else []),
-                timings_ms=timings_ms,
-            )
+        questions_raw = getattr(grading_result, "questions", None)
+        questions_list: List[Dict[str, Any]] = questions_raw if isinstance(questions_raw, list) else []
+        bank = build_question_bank(
+            session_id=session_for_ctx,
+            subject=req.subject,
+            questions=questions_list,
+            vision_raw_text=vision_result.text,
+            page_image_urls=page_image_urls,
+        )
+        extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank) else None
+        persist_question_bank(
+            session_id=session_for_ctx,
+            bank=_merge_bank_meta(bank, meta_base),
+            grade_status="done",
+            grade_summary=(getattr(grading_result, "summary", "") or "").strip(),
+            grade_warnings=(getattr(grading_result, "warnings", None) or [])
+            + ([vision_fallback_warning] if vision_fallback_warning else [])
+            + ([extra_warn] if extra_warn else []),
+            timings_ms=timings_ms,
+        )
 
     # Defensive: if LLM didn't output counts, compute from normalized results.
     if getattr(grading_result, "wrong_count", None) is None:
@@ -943,7 +1187,8 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         total_items=grading_result.total_items,
         wrong_count=grading_result.wrong_count,
         cross_subject_flag=grading_result.cross_subject_flag,
-        warnings=((grading_result.warnings or []) + ([vision_fallback_warning] if vision_fallback_warning else [])),
+        warnings=((grading_result.warnings or []) + ([vision_fallback_warning] if vision_fallback_warning else []))
+        + ([extra_warn] if session_for_ctx and extra_warn else []),
         vision_raw_text=vision_result.text,
     )
 
@@ -979,12 +1224,9 @@ async def background_grade(job_id: str, req: GradeRequest, provider_str: str):
 
 
 def background_build_question_index(session_id: str, page_urls: List[str]) -> None:
-    """Best-effort background job: build bbox/slice index and store in cache."""
-    try:
-        index = _build_question_index_for_pages(page_urls)
-        save_question_index(session_id, index)
-    except Exception as e:
-        save_question_index(session_id, {"questions": {}, "warnings": [f"question index build failed: {str(e)}"]})
+    """Deprecated: qindex is handled by an external worker (see `qindex_queue.py`)."""
+    logger.warning("background_build_question_index called but is deprecated; session_id=%s pages=%s", session_id, len(page_urls or []))
+    return None
 
 
 def validate_images(images: List[Any], provider: VisionProvider):
@@ -1004,10 +1246,12 @@ def validate_images(images: List[Any], provider: VisionProvider):
                 )
         elif img.base64:
             if provider == VisionProvider.DOUBAO:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Image index {idx}: Doubao provider only accepts URLs, not Base64"
-                )
+                # Prefer URLs, but allow Data URL base64 as an internal fallback (avoids provider-side URL fetch).
+                if not str(img.base64).lstrip().lower().startswith("data:image/"):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Image index {idx}: Doubao base64 must be a data URL (data:image/...;base64,...)",
+                    )
             # Estimate size: len * 0.75
             est_size = len(img.base64) * 0.75
             if est_size > 20 * 1024 * 1024:
@@ -1017,17 +1261,37 @@ def validate_images(images: List[Any], provider: VisionProvider):
                 )
 
 
+def _resolve_images_from_upload_id(upload_id: str, *, user_id: str) -> List[str]:
+    """
+    Backward-compatible name: we treat upload_id as submission_id (one upload == one Submission).
+    Resolve canonical page_image_urls from Supabase Postgres.
+    """
+    return [str(u).strip() for u in (resolve_page_image_urls(user_id=user_id, submission_id=str(upload_id)) or []) if str(u).strip()]
+
+
 @router.post("/grade", response_model=GradeResponse, status_code=status.HTTP_200_OK)
 async def grade_homework(
     req: GradeRequest,
     request: Request,
     background_tasks: BackgroundTasks,
     x_idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
 ):
     """
     批改作业 API (Stub)
     """
-    # 1. Early Validation（公共 URL/20MB/Doubao+base64 等）
+    # 1. Resolve images (optional upload_id) + Early Validation
+    user_id = get_user_id(x_user_id)
+    upload_id = (getattr(req, "upload_id", None) or "").strip()
+    if upload_id and not (req.images or []):
+        urls = _resolve_images_from_upload_id(upload_id, user_id=user_id)
+        if not urls:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="upload_id not found for this user")
+        req = req.model_copy(update={"images": [ImageRef(url=u) for u in urls]})
+
+    if not (req.images or []):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Images cannot be empty (provide images or upload_id)")
+
     validate_images(req.images, req.vision_provider)
 
     request_id = get_request_id_from_headers(request.headers) or f"req_{uuid.uuid4().hex[:12]}"
@@ -1040,11 +1304,20 @@ async def grade_homework(
         "grade_request",
         request_id=request_id,
         session_id=req.session_id or req.batch_id,
+        user_id=user_id,
+        upload_id=upload_id or None,
         subject=getattr(req.subject, "value", str(req.subject)),
         images=len(req.images or []),
         vision_provider=getattr(req.vision_provider, "value", str(req.vision_provider)),
         has_idempotency=bool(x_idempotency_key),
     )
+
+    # Best-effort: touch Submission last_active_at (180-day inactivity cleanup uses this).
+    if upload_id:
+        try:
+            touch_submission(user_id=user_id, submission_id=upload_id)
+        except Exception:
+            pass
 
     # 2. 幂等性校验
     idempotency_key = get_idempotency_key(None, x_idempotency_key)
@@ -1058,6 +1331,14 @@ async def grade_homework(
     session_for_ctx = _ensure_session_id(req.session_id or req.batch_id)
     req = req.model_copy(update={"session_id": session_for_ctx})
     save_grade_progress(session_for_ctx, "accepted", "已开始处理…", {"request_id": request_id})
+
+    # Best-effort: link session_id back to durable Submission for later history/chat mapping.
+    if upload_id:
+        try:
+            subj = req.subject.value if hasattr(req.subject, "value") else str(req.subject)
+            link_session_to_submission(user_id=user_id, submission_id=upload_id, session_id=session_for_ctx, subject=subj)
+        except Exception:
+            pass
 
     # 3. 决定同步/异步
     is_large_batch = len(req.images) > 5
@@ -1100,6 +1381,35 @@ async def grade_homework(
 
     try:
         response = await perform_grading(req, provider_str)
+
+        # Best-effort: persist Submission facts to Supabase Postgres (long-term "hard disk").
+        # We treat upload_id as submission_id.
+        if upload_id:
+            try:
+                bank_now = get_question_bank(session_for_ctx) if session_for_ctx else None
+                meta_now = (bank_now or {}).get("meta") if isinstance(bank_now, dict) else None
+                meta_now = meta_now if isinstance(meta_now, dict) else {}
+                page_urls_now = (bank_now or {}).get("page_image_urls") if isinstance(bank_now, dict) else None
+                page_urls_now = page_urls_now if isinstance(page_urls_now, list) else None
+                proxy_urls_now = meta_now.get("page_image_urls_proxy")
+                proxy_urls_now = proxy_urls_now if isinstance(proxy_urls_now, list) else None
+
+                subj = req.subject.value if hasattr(req.subject, "value") else str(req.subject)
+                update_submission_after_grade(
+                    user_id=user_id,
+                    submission_id=upload_id,
+                    session_id=session_for_ctx,
+                    subject=subj,
+                    page_image_urls=[str(u) for u in (page_urls_now or []) if str(u).strip()] if page_urls_now else None,
+                    proxy_page_image_urls=[str(u) for u in (proxy_urls_now or []) if str(u).strip()] if proxy_urls_now else None,
+                    vision_raw_text=getattr(response, "vision_raw_text", None),
+                    grade_result=response.model_dump() if hasattr(response, "model_dump") else {},
+                    warnings=list(getattr(response, "warnings", None) or []),
+                    meta={k: v for k, v in meta_now.items() if v is not None} if isinstance(meta_now, dict) else None,
+                )
+            except Exception:
+                pass
+
         if session_for_ctx:
             wrong_items_payload: List[Dict[str, Any]] = []
             for item in response.wrong_items or []:
@@ -1114,14 +1424,43 @@ async def grade_homework(
                     except Exception:
                         continue
             save_mistakes(session_for_ctx, wrong_items_payload)
-            # QIndex: enqueue bbox/slice indexing job to external worker (Redis required)
-            page_urls = [img.url for img in req.images if getattr(img, "url", None)]
-            if page_urls:
-                enqueued = enqueue_qindex_job(session_for_ctx, [str(u) for u in page_urls if u])
-                if enqueued:
-                    save_question_index(session_for_ctx, {"questions": {}, "warnings": ["qindex queued"]})
+            # QIndex: optional background optimization (bbox/slice). Default: skip for speed.
+            bank = get_question_bank(session_for_ctx) if session_for_ctx else None
+            page_urls = None
+            if isinstance(bank, dict):
+                pu = bank.get("page_image_urls")
+                if isinstance(pu, list):
+                    page_urls = [str(u) for u in pu if str(u).strip()]
+            if not page_urls:
+                page_urls = [str(img.url) for img in req.images if getattr(img, "url", None)]
+            must_slice = False
+            try:
+                must_slice = _visual_risk_warning_text() in (response.warnings or [])
+            except Exception:
+                must_slice = False
+            if page_urls and isinstance(bank, dict) and (should_create_slices_for_bank(bank) or must_slice):
+                ok, reason = qindex_is_configured()
+                if not ok:
+                    save_qindex_placeholder(session_for_ctx, f"qindex skipped: {reason}")
                 else:
-                    save_question_index(session_for_ctx, {"questions": {}, "warnings": ["qindex queue unavailable; skipped"]})
+                    allow = pick_question_numbers_for_slices(bank)
+                    if not allow:
+                        # Safety: if we decided to slice but couldn't pick, fall back to all questions.
+                        try:
+                            qs = bank.get("questions")
+                            if isinstance(qs, dict):
+                                allow = [str(k) for k in qs.keys() if str(k).strip()]
+                        except Exception:
+                            allow = []
+                    enqueued = enqueue_qindex_job(
+                        session_for_ctx,
+                        [v for u in page_urls for v in [_normalize_public_url(str(u))] if v],
+                        question_numbers=allow,
+                    )
+                    if enqueued:
+                        save_question_index(session_for_ctx, {"questions": {}, "warnings": ["qindex queued"]})
+                    else:
+                        save_qindex_placeholder(session_for_ctx, "qindex skipped: redis_unavailable")
         if idempotency_key:
             cache_response(idempotency_key, response)
         return response

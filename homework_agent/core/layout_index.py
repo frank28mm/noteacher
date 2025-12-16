@@ -19,7 +19,9 @@ MVP constraints:
 from __future__ import annotations
 
 import io
+import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,6 +30,9 @@ from PIL import Image
 
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.supabase_client import get_storage_client
+from homework_agent.utils.observability import log_event, redact_url
+
+logger = logging.getLogger(__name__)
 
 
 QuestionNumber = str
@@ -190,7 +195,8 @@ def build_question_layouts_from_blocks(
             continue
         text = _extract_text(b)
         bbox = _extract_bbox_px(b)
-        qn = _detect_question_number(text)
+        qn_val = b.get("question_number")
+        qn = qn_val.strip() if isinstance(qn_val, str) and qn_val.strip() else _detect_question_number(text)
         y = bbox[1] if bbox else 0.0
         rows.append((y, b, text, bbox, qn))
     rows.sort(key=lambda x: x[0])
@@ -221,16 +227,26 @@ def download_image(url: str, timeout: float = 30.0) -> Image.Image:
     # Avoid local proxy interference for public object downloads (supabase/public URLs etc.).
     # If you rely on system proxies for other traffic, keep them for API calls, but downloads
     # used for bbox/slice should be direct.
+    t0 = time.monotonic()
     with httpx.Client(timeout=timeout, follow_redirects=True, trust_env=False) as client:
         resp = client.get(url)
         resp.raise_for_status()
-        return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+    log_event(
+        logger,
+        "slice_page_downloaded",
+        page_image_url=redact_url(url),
+        bytes=len(resp.content or b""),
+        elapsed_ms=int((time.monotonic() - t0) * 1000),
+    )
+    return img
 
 
 def crop_and_upload_slices(
     *,
     page_image_url: str,
     layouts: Dict[QuestionNumber, QuestionLayout],
+    only_question_numbers: Optional[set[str]] = None,
     prefix: str = "slices/",
 ) -> Dict[QuestionNumber, QuestionLayout]:
     """
@@ -240,23 +256,55 @@ def crop_and_upload_slices(
     storage = get_storage_client()
     img = download_image(page_image_url)
     width, height = img.size
+    total_uploaded = 0
     for qn, layout in layouts.items():
+        if only_question_numbers is not None and qn not in only_question_numbers:
+            # Skip cropping for non-visual questions; still keep bbox for future relook.
+            continue
         if not layout.bboxes_norm:
             continue
         slice_urls: List[str] = []
         for b_norm in layout.bboxes_norm:
-            bbox_px = _norm_to_px_bbox(b_norm, width, height)
-            crop = img.crop(bbox_px)
-            out = io.BytesIO()
-            crop.save(out, format="JPEG", quality=90)
-            url = storage.upload_bytes(
-                out.getvalue(),
-                mime_type="image/jpeg",
-                suffix=".jpg",
-                prefix=prefix,
-            )
-            slice_urls.append(url)
+            try:
+                bbox_px = _norm_to_px_bbox(b_norm, width, height)
+                crop = img.crop(bbox_px)
+                out = io.BytesIO()
+                crop.save(out, format="JPEG", quality=90)
+                url = storage.upload_bytes(
+                    out.getvalue(),
+                    mime_type="image/jpeg",
+                    suffix=".jpg",
+                    prefix=prefix,
+                )
+                slice_urls.append(url)
+                total_uploaded += 1
+            except Exception as e:
+                layout.warnings.append(f"切片上传失败：{e}")
+                log_event(
+                    logger,
+                    "slice_upload_failed",
+                    level="warning",
+                    question_number=qn,
+                    page_image_url=redact_url(page_image_url),
+                    error_type=e.__class__.__name__,
+                    error=str(e),
+                )
         layout.slice_image_urls = slice_urls
         if not slice_urls:
             layout.warnings.append("切片生成失败，改用整页")
+        else:
+            log_event(
+                logger,
+                "slice_uploaded",
+                question_number=qn,
+                slices=len(slice_urls),
+                prefix=prefix,
+            )
+    log_event(
+        logger,
+        "slice_page_done",
+        page_image_url=redact_url(page_image_url),
+        questions=len([1 for v in layouts.values() if v.bboxes_norm]),
+        slices=total_uploaded,
+    )
     return layouts

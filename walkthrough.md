@@ -33,3 +33,8 @@
 
 ## Next Steps
 - Proceed to **UI Demo** (`demo_ui.py`) to test Socratic Tutor interactively, which allows for manual retries and better visibility than a CLI script.
+
+## Current E2E (Recommended Path)
+- Upload：`POST /api/v1/uploads`（后端落 Supabase Storage，返回 `upload_id + page_image_urls`）
+- Grade：`POST /api/v1/grade` 使用 `upload_id`（后端反查 images），返回 `session_id + vision_raw_text + 批改结果`
+- Chat：`POST /api/v1/chat` 使用 `session_id`（SSE）；当用户提出“看图/图形判断”时，后端会确保 qindex 切片并 relook，失败则明确说明“看不到图”
