@@ -34,7 +34,11 @@ from homework_agent.api.session import (
 )
 from homework_agent.utils.observability import get_request_id_from_headers, log_event
 from homework_agent.utils.user_context import get_user_id
-from homework_agent.utils.submission_store import touch_submission, load_qindex_image_refs
+from homework_agent.utils.submission_store import (
+    touch_submission,
+    load_qindex_image_refs,
+    resolve_submission_for_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -474,13 +478,40 @@ def _should_relook_focus_question(user_msg: str, focus_question: Dict[str, Any])
             "原题",
             "题干不对",
             "你看一下图",
-            "看不到图",
             "看不到图片",
             "你看不到图",
             "你没看到图",
             "你没看图",
             "你有没有看图",
             "图在哪里",
+            "看图",
+            "如图",
+            "见图",
+            "你看不到图",
+            "看不到图",
+            "形状",
+            "位置关系",
+            "表格",
+            "统计图",
+            "折线图",
+            "柱状图",
+            "图形拼接",
+            "数列规律",
+            "图不对",
+            "和图对不上",
+            "图不正确",
+            "二次函数",
+            "二次函数图",
+            "函数图像",
+            "几何",
+            "正方形",
+            "长方形",
+            "三角形",
+            "平行四边形",
+            "矩形",
+            "正方体",
+            "长方体",
+            "圆锥", 
         )
     ):
         return True
@@ -946,18 +977,55 @@ async def chat_stream(
             focus_question_number=focus_q,
             requested_qn=requested_qn,
         )
+        # DEBUG: 记录bank_questions_str的键
+        logger.warning(f"WARNING DEBUG: bank_questions_str keys: {list(bank_questions_str.keys()) if isinstance(bank_questions_str, dict) else 'N/A'}")
+        logger.warning(f"WARNING DEBUG: focus_q = {focus_q}, type = {type(focus_q)}")
+        logger.warning(f"WARNING DEBUG: focus_q and focus_q in bank_questions_str = {bool(focus_q and focus_q in bank_questions_str)}")
+        logger.warning(f"WARNING DEBUG: bank_questions_str is dict = {isinstance(bank_questions_str, dict)}")
+
         if focus_q and focus_q in bank_questions_str:
+            logger.warning(f"WARNING DEBUG: ENTERED if block for focus_q '{focus_q}'")
+            logger.warning(f"WARNING DEBUG: focus_q '{focus_q}' found in bank_questions_str")
             focus_payload = dict(bank_questions_str.get(focus_q) or {})
             focus_payload["question_number"] = str(focus_q)
 
             # Add image refs if available (bbox/slice index) - optional enhancement only.
             qindex = get_question_index(session_id) if session_id else None
+            logger.warning(f"WARNING DEBUG: qindex = {qindex is not None}")
             if isinstance(qindex, dict):
                 qidx_questions = qindex.get("questions")
+                logger.warning(f"WARNING DEBUG: qidx_questions is dict = {isinstance(qidx_questions, dict)}")
                 if isinstance(qidx_questions, dict) and focus_q in qidx_questions:
-                    focus_payload["image_refs"] = qidx_questions.get(focus_q)
+                    image_refs = qidx_questions.get(focus_q)
+                    focus_payload["image_refs"] = image_refs
+                    # TEST: 直接写入日志文件
+                    logger.warning(f"WARNING TEST MESSAGE: chat_attaching_image_refs for {focus_q}, has_image_refs={bool(image_refs)}")
+                    logger.warning(f"WARNING LOG_EVENT: calling log_event for chat_attaching_image_refs")
+                    try:
+                        log_event(
+                            logger,
+                            "chat_attaching_image_refs",
+                            request_id=request_id,
+                            session_id=session_id,
+                            focus_question_number=focus_q,
+                            has_image_refs=bool(image_refs),
+                            has_pages=bool(image_refs.get("pages") if isinstance(image_refs, dict) else False),
+                        )
+                        logger.warning(f"WARNING LOG_EVENT: log_event called successfully")
+                    except Exception as e:
+                        logger.warning(f"WARNING LOG_EVENT: error calling log_event: {e}")
                 if qindex.get("warnings"):
                     wrong_item_context["index_warnings"] = qindex.get("warnings")
+            else:
+                # TEST: 直接写入日志文件
+                logger.warning(f"WARNING TEST MESSAGE: chat_no_qindex_found for {focus_q}")
+                log_event(
+                    logger,
+                    "chat_no_qindex_found",
+                    request_id=request_id,
+                    session_id=session_id,
+                    focus_question_number=focus_q,
+                )
 
             # Always keep page urls for potential "re-look the page" fallback (geometry etc.)
             page_urls = qbank.get("page_image_urls")
@@ -966,6 +1034,20 @@ async def chat_stream(
 
             wrong_item_context["focus_question_number"] = str(focus_q)
             wrong_item_context["focus_question"] = focus_payload
+
+            # Also persist image_refs to qbank for future use (best-effort)
+            try:
+                qbank_now = get_question_bank(session_id)
+                if isinstance(qbank_now, dict):
+                    qs = qbank_now.get("questions")
+                    if isinstance(qs, dict) and str(focus_q) in qs and isinstance(qs.get(str(focus_q)), dict):
+                        if "image_refs" in focus_payload:
+                            qs[str(focus_q)]["image_refs"] = focus_payload["image_refs"]
+                        qbank_now["questions"] = qs
+                        save_question_bank(session_id, qbank_now)
+            except Exception:
+                pass
+
             log_event(
                 logger,
                 "chat_context_ready",
@@ -1086,16 +1168,55 @@ async def chat_stream(
                     if not ready:
                         # DB fallback: if Redis lost/restarted, still try to load slices within TTL.
                         try:
+                            # First, resolve the real user_id and submission_id from session
+                            resolved = resolve_submission_for_session(session_id)
+                            real_user_id = user_id
+                            if isinstance(resolved, dict):
+                                real_user_id = resolved.get("user_id") or user_id
+                                log_event(
+                                    logger,
+                                    "chat_resolved_submission_for_session",
+                                    request_id=request_id,
+                                    session_id=session_id,
+                                    resolved_user_id=real_user_id,
+                                    submission_id=resolved.get("submission_id"),
+                                )
+
                             db_refs = load_qindex_image_refs(
-                                user_id=user_id,
+                                user_id=real_user_id,
                                 session_id=session_id,
                                 question_number=str(fqnum),
                             )
                             if isinstance(db_refs, dict) and db_refs:
                                 focus_obj["image_refs"] = db_refs
                                 ready = True
-                        except Exception:
-                            pass
+                                log_event(
+                                    logger,
+                                    "chat_loaded_db_slices",
+                                    request_id=request_id,
+                                    session_id=session_id,
+                                    question_number=str(fqnum),
+                                    has_slices=True,
+                                )
+                            else:
+                                log_event(
+                                    logger,
+                                    "chat_no_db_slices_found",
+                                    request_id=request_id,
+                                    session_id=session_id,
+                                    question_number=str(fqnum),
+                                    real_user_id=real_user_id,
+                                )
+                        except Exception as e:
+                            log_event(
+                                logger,
+                                "chat_db_load_error",
+                                request_id=request_id,
+                                session_id=session_id,
+                                question_number=str(fqnum),
+                                error=str(e),
+                                level="warning",
+                            )
 
                     if not ready:
                         ok, reason = qindex_is_configured()
@@ -1156,8 +1277,14 @@ async def chat_stream(
                             # Also check DB as a fallback (Redis may have been restarted).
                             if time.monotonic() - last_beat >= 5.0:
                                 try:
+                                    # First, resolve the real user_id and submission_id from session
+                                    resolved = resolve_submission_for_session(session_id)
+                                    real_user_id = user_id
+                                    if isinstance(resolved, dict):
+                                        real_user_id = resolved.get("user_id") or user_id
+
                                     db_refs = load_qindex_image_refs(
-                                        user_id=user_id,
+                                        user_id=real_user_id,
                                         session_id=session_id,
                                         question_number=str(fqnum),
                                     )
@@ -1375,6 +1502,7 @@ async def chat_stream(
 
         def _producer():
             try:
+                logger.warning(f"WARNING: Calling socratic_tutor_stream with question: {req.question[:50]}")
                 for chunk in llm_client.socratic_tutor_stream(
                     question=req.question,
                     wrong_item_context=wrong_item_context,
@@ -1384,9 +1512,12 @@ async def chat_stream(
                     model_override=model_override,
                     history=llm_history,
                 ):
+                    logger.warning(f"WARNING: Received chunk: {chunk[:50]}")
                     asyncio.run_coroutine_threadsafe(q.put(chunk), loop)
+                logger.warning(f"WARNING: Stream finished, putting DONE")
                 asyncio.run_coroutine_threadsafe(q.put(DONE), loop)
             except Exception as ex:
+                logger.warning(f"WARNING: Exception in _producer: {ex}")
                 asyncio.run_coroutine_threadsafe(q.put({"error": str(ex)}), loop)
 
         producer_task = asyncio.create_task(asyncio.to_thread(_producer))
@@ -1402,7 +1533,9 @@ async def chat_stream(
             retry_after_ms=None,
             cross_subject_flag=None,
         )
+        logger.warning(f"WARNING: Emitting initial payload with {len(session_data['history'])} messages")
         yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+        logger.warning(f"WARNING: Starting streaming loop")
 
         buffer = ""
         last_emit = time.monotonic()
