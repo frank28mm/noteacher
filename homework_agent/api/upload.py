@@ -8,7 +8,7 @@ from fastapi import APIRouter, File, Header, HTTPException, UploadFile, status
 
 from homework_agent.utils.supabase_client import get_storage_client
 from homework_agent.utils.observability import log_event
-from homework_agent.utils.user_context import get_user_id
+from homework_agent.utils.user_context import require_user_id
 from homework_agent.utils.submission_store import create_submission_on_upload
 
 import logging
@@ -23,15 +23,17 @@ async def upload_files(
     file: UploadFile = File(...),
     session_id: Optional[str] = None,
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
 ) -> Dict[str, Any]:
     """
     Upload a file to Supabase Storage under a user-isolated path.
 
-    Current dev contract:
-    - Caller may supply X-User-Id header; otherwise DEV_USER_ID is used.
+    Auth contract (Phase A):
+    - If Authorization: Bearer <jwt> is provided, backend verifies it via Supabase Auth and uses jwt.sub as user_id.
+    - Otherwise (AUTH_REQUIRED=0), dev fallback applies: X-User-Id or DEV_USER_ID.
     - Returns public URLs (bucket may be public during development).
     """
-    user_id = get_user_id(x_user_id)
+    user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
     upload_id = f"upl_{uuid.uuid4().hex[:16]}"
     filename = (file.filename or "").strip() or "upload"
 
@@ -69,8 +71,8 @@ async def upload_files(
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to clean up temp file: {e}")
 
     # Best-effort: persist metadata to Supabase Postgres (requires table created via supabase/schema.sql).
     try:
@@ -84,9 +86,9 @@ async def upload_files(
             "page_image_urls": urls,
         }
         storage.client.table("user_uploads").insert(record).execute()
-    except Exception:
+    except Exception as e:
         # Never fail upload response for optional DB insert during early dev.
-        pass
+        logger.debug(f"DB insert for upload failed (best-effort): {e}")
 
     # Best-effort: persist a durable Submission record (long-term "hard disk" source of truth).
     # We treat upload_id as submission_id (one upload == one submission).
@@ -100,8 +102,8 @@ async def upload_files(
             content_type=file.content_type,
             size_bytes=len(raw),
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"create_submission_on_upload failed (best-effort): {e}")
 
     try:
         log_event(
@@ -112,8 +114,8 @@ async def upload_files(
             session_id=session_id,
             pages=len(urls or []),
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"upload_done log_event failed: {e}")
 
     return {
         "upload_id": upload_id,

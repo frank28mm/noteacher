@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple
 import re
@@ -21,7 +21,7 @@ from homework_agent.services.vision import VisionClient
 from homework_agent.services.qindex_queue import enqueue_qindex_job
 from homework_agent.utils.settings import get_settings
 from homework_agent.core.qbank import _normalize_question_number, build_question_bank_from_vision_raw_text
-from homework_agent.core.slice_policy import analyze_visual_risk, should_create_slices_for_bank, pick_question_numbers_for_slices
+from homework_agent.core.slice_policy import analyze_visual_risk
 from homework_agent.core.qindex import qindex_is_configured
 from homework_agent.api.session import (
     SESSION_TTL_SECONDS,
@@ -33,12 +33,12 @@ from homework_agent.api.session import (
     _now_ts, _coerce_ts,
 )
 from homework_agent.utils.observability import get_request_id_from_headers, log_event
-from homework_agent.utils.user_context import get_user_id
+from homework_agent.utils.user_context import require_user_id
+from homework_agent.utils.errors import build_error_payload, ErrorCode
 from homework_agent.utils.submission_store import (
     touch_submission,
-    load_qindex_image_refs,
-    resolve_submission_for_session,
 )
+from homework_agent.utils.url_image_helpers import _download_as_data_uri
 
 logger = logging.getLogger(__name__)
 
@@ -65,28 +65,6 @@ async def _call_blocking_in_thread(
         )
 
 
-def _download_as_data_uri(url: str) -> Optional[str]:
-    """Best-effort: download image bytes locally and convert to data URI for Qwen3 base64 fallback."""
-    if not url:
-        return None
-    try:
-        import httpx
-
-        # Avoid local proxy interference when downloading public object URLs.
-        with httpx.Client(timeout=20.0, follow_redirects=True, trust_env=False) as client:
-            r = client.get(url)
-        if r.status_code != 200:
-            return None
-        content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip() or "image/jpeg"
-        data = r.content or b""
-        if not data:
-            return None
-        if len(data) > 20 * 1024 * 1024:
-            return None
-        b64 = base64.b64encode(data).decode("ascii")
-        return f"data:{content_type};base64,{b64}"
-    except Exception:
-        return None
 def _select_question_number_from_text(message: str, available: List[str]) -> Optional[str]:
     """
     Choose the best matching question_number from user message.
@@ -684,7 +662,8 @@ def _format_math_for_display(text: str) -> str:
 
         # Re-apply tilde ban in case the model emitted it inside math blocks.
         s = s.replace("~", "").replace("～", "")
-    except Exception:
+    except Exception as e:
+        logger.debug(f"_format_math_for_display failed: {e}")
         return str(text)
     return s
 
@@ -781,6 +760,447 @@ def assistant_tail(history: List[Dict[str, Any]], max_messages: int = 3) -> List
     return tail
 
 
+def _init_chat_request(
+    *,
+    req: ChatRequest,
+    headers: Any,
+    last_event_id: Optional[str],
+) -> tuple[str, str, str, float, float, Optional[Dict[str, Any]]]:
+    """
+    Initialize per-request identifiers and load session data (best-effort).
+    Returns: (session_id, request_id, user_id, started_m, now_ts, session_data)
+    """
+    # Session restore or create; last_event_id is only used to recover session_id.
+    session_id = req.session_id or last_event_id or f"session_{uuid.uuid4().hex[:8]}"
+    request_id = get_request_id_from_headers(headers) or f"req_{uuid.uuid4().hex[:12]}"
+    user_id = require_user_id(
+        authorization=(headers.get("Authorization") if hasattr(headers, "get") else None),
+        x_user_id=(headers.get("X-User-Id") if hasattr(headers, "get") else None),
+    )
+    started_m = time.monotonic()
+    now_ts = _now_ts()
+    session_data = get_session(session_id)
+    return session_id, request_id, user_id, started_m, now_ts, session_data
+
+
+def _format_session_history_for_display(session_data: Dict[str, Any]) -> None:
+    """Best-effort: normalize past assistant messages for UI display."""
+    hist = session_data.get("history") or []
+    if isinstance(hist, list):
+        for m in hist:
+            if isinstance(m, dict) and m.get("role") == "assistant" and isinstance(m.get("content"), str):
+                m["content"] = _format_math_for_display(m.get("content") or "")
+        session_data["history"] = hist
+
+
+@dataclass(frozen=True)
+class _ChatAbort(Exception):
+    """Internal control-flow: terminate chat_stream with pre-built SSE chunks."""
+
+    chunks: List[bytes]
+
+
+def _sse_event(event: str, data: str) -> bytes:
+    return f"event: {event}\ndata: {data}\n\n".encode("utf-8")
+
+
+def _abort_with_error_event(code: str, message: str) -> None:
+    """Abort with SSE error + done events (used for session lifecycle failures)."""
+    raise _ChatAbort(
+        chunks=[
+            _sse_event("error", json.dumps({"code": code, "message": message})),
+            _sse_event("done", json.dumps({"status": "error"})),
+        ]
+    )
+
+
+def _abort_with_assistant_message(
+    *,
+    session_id: str,
+    session_data: Dict[str, Any],
+    message: str,
+    done_status: str,
+    retry_after_ms: Optional[int] = None,
+) -> None:
+    session_data["history"].append({"role": "assistant", "content": message})
+    save_session(session_id, session_data)
+    payload = ChatResponse(
+        messages=[{"role": "assistant", "content": message}],
+        session_id=session_id,
+        retry_after_ms=retry_after_ms,
+        cross_subject_flag=None,
+    )
+    chunks = [
+        _sse_event("chat", payload.model_dump_json()),
+        _sse_event("done", json.dumps({"status": done_status, "session_id": session_id})),
+    ]
+    raise _ChatAbort(chunks=chunks)
+
+
+def _abort_with_user_and_assistant_message(
+    *,
+    session_id: str,
+    session_data: Dict[str, Any],
+    user_message: str,
+    assistant_message: str,
+    done_status: str,
+    retry_after_ms: Optional[int] = None,
+) -> None:
+    session_data["history"].append({"role": "user", "content": user_message})
+    session_data["history"].append({"role": "assistant", "content": assistant_message})
+    save_session(session_id, session_data)
+    payload = ChatResponse(
+        messages=[{"role": "assistant", "content": assistant_message}],
+        session_id=session_id,
+        retry_after_ms=retry_after_ms,
+        cross_subject_flag=None,
+    )
+    chunks = [
+        _sse_event("chat", payload.model_dump_json()),
+        _sse_event("done", json.dumps({"status": done_status, "session_id": session_id})),
+    ]
+    raise _ChatAbort(chunks=chunks)
+
+
+def _touch_submission_best_effort(*, user_id: str, session_id: str) -> None:
+    try:
+        touch_submission(user_id=user_id, session_id=session_id)
+    except Exception as e:
+        logger.debug(f"touch_submission failed (best-effort): {e}")
+
+
+def _ensure_chat_session_or_abort(
+    *,
+    req: ChatRequest,
+    session_id: str,
+    session_data: Optional[Dict[str, Any]],
+    now_ts: float,
+    last_event_id: Optional[str],
+) -> Dict[str, Any]:
+    """Ensure session exists and is within TTL; otherwise abort with deterministic SSE error."""
+    if session_data:
+        updated_ts = _coerce_ts(session_data.get("updated_at")) or now_ts
+        if now_ts - updated_ts > SESSION_TTL_SECONDS:
+            delete_session(session_id)
+            _abort_with_error_event("SESSION_EXPIRED", "session expired")
+
+    if not session_data:
+        if last_event_id and not req.session_id:
+            _abort_with_error_event("SESSION_NOT_FOUND", "session not found")
+
+        session_data = {
+            "history": req.history or [],
+            "interaction_count": 0,
+            "created_at": now_ts,
+            "updated_at": now_ts,
+            "context_item_ids": normalize_context_ids(req.context_item_ids or []),
+        }
+        save_session(session_id, session_data)
+
+    return session_data
+
+
+def _emit_initial_events(
+    *,
+    session_id: str,
+    session_data: Dict[str, Any],
+    last_event_id: Optional[str],
+    has_explicit_session_id: bool,
+) -> List[bytes]:
+    """Return initial SSE events: heartbeat + optional replay messages."""
+    try:
+        _format_session_history_for_display(session_data)
+    except Exception as e:
+        logger.debug(f"History formatting failed (best-effort): {e}")
+
+    chunks: List[bytes] = [_sse_event("heartbeat", "{}")]
+    if last_event_id and (not has_explicit_session_id) and (session_data.get("history") or []):
+        replay_msgs = assistant_tail(session_data.get("history") or [], max_messages=3)
+        for msg in replay_msgs:
+            payload = ChatResponse(
+                messages=[msg],
+                session_id=session_id,
+                retry_after_ms=None,
+                cross_subject_flag=None,
+            )
+            chunks.append(_sse_event("chat", payload.model_dump_json()))
+    return chunks
+
+
+def _select_chat_model_or_raise(req: ChatRequest) -> tuple[str, Optional[str]]:
+    """Validate optional model override and return (provider_str, model_override)."""
+    provider_str = "ark"
+    allowed_chat_models = {get_settings().ark_reasoning_model}
+    model_override = None
+    if req.llm_model:
+        if req.llm_model not in allowed_chat_models:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid llm_model for chat. Allowed: {sorted(allowed_chat_models)}",
+            )
+        model_override = req.llm_model
+    return provider_str, model_override
+
+
+async def _run_mandatory_visual_path(
+    *,
+    req: ChatRequest,
+    session_id: str,
+    request_id: str,
+    user_id: str,
+    session_data: Dict[str, Any],
+    wrong_item_context: Dict[str, Any],
+) -> AsyncIterator[bytes]:
+    from homework_agent.api._chat_stages import _run_mandatory_visual_path as _impl
+
+    async for chunk in _impl(
+        req=req,
+        session_id=session_id,
+        request_id=request_id,
+        user_id=user_id,
+        session_data=session_data,
+        wrong_item_context=wrong_item_context,
+    ):
+        yield chunk
+
+
+def _apply_user_corrections(
+    *,
+    session_data: Dict[str, Any],
+    wrong_item_context: Dict[str, Any],
+    user_message: str,
+) -> None:
+    focus_q_for_corr = (
+        wrong_item_context.get("focus_question_number")
+        or session_data.get("focus_question_number")
+    )
+    corr = _extract_user_correction(user_message)
+    if not (focus_q_for_corr and corr):
+        return
+    fq = str(focus_q_for_corr)
+    corr_map = session_data.setdefault("corrections", {})
+    corr_list = corr_map.setdefault(fq, [])
+    if not corr_list or corr_list[-1] != corr:
+        corr_list.append(corr)
+    corr_map[fq] = corr_list[-5:]
+    wrong_item_context["user_corrections"] = corr_map[fq]
+    if isinstance(wrong_item_context.get("focus_question"), dict):
+        wrong_item_context["focus_question"]["user_corrections"] = corr_map[fq]
+
+
+async def _best_effort_relook_if_needed(
+    *,
+    req: ChatRequest,
+    session_id: str,
+    request_id: str,
+    wrong_item_context: Dict[str, Any],
+) -> None:
+    """Best-effort: re-look focused question when user challenges recognition."""
+    try:
+        focus_obj = wrong_item_context.get("focus_question")
+        fqnum = wrong_item_context.get("focus_question_number")
+        if (
+            isinstance(focus_obj, dict)
+            and fqnum
+            and _should_relook_focus_question(req.question, focus_obj)
+        ):
+            patch = await _relook_focus_question_via_vision(
+                session_id=session_id,
+                subject=req.subject,
+                question_number=str(fqnum),
+                focus_question=focus_obj,
+            )
+            if isinstance(patch, dict) and patch:
+                log_event(
+                    logger,
+                    "chat_relook_applied",
+                    request_id=request_id,
+                    session_id=session_id,
+                    focus_qn=str(fqnum),
+                    patch_keys=list(patch.keys()),
+                )
+                focus_obj.update({k: v for k, v in patch.items() if v is not None})
+                if patch.get("vision_recheck_text"):
+                    try:
+                        focus_obj.pop("relook_error", None)
+                    except Exception as e:
+                        logger.debug(f"Clearing relook_error failed: {e}")
+                wrong_item_context["focus_question"] = focus_obj
+                # Persist patch back to qbank for subsequent turns (best-effort).
+                try:
+                    qbank_now = get_question_bank(session_id)
+                    if isinstance(qbank_now, dict):
+                        qs = qbank_now.get("questions")
+                        if isinstance(qs, dict) and str(fqnum) in qs and isinstance(qs.get(str(fqnum)), dict):
+                            qs[str(fqnum)].update({k: v for k, v in patch.items() if v is not None})
+                            if patch.get("vision_recheck_text"):
+                                qs[str(fqnum)].pop("relook_error", None)
+                            qbank_now["questions"] = qs
+                            qbank_now = _merge_bank_meta(qbank_now, {"updated_at": datetime.now().isoformat()})
+                            save_question_bank(session_id, qbank_now)
+                except Exception as e:
+                    logger.debug(f"Persisting relook patch to qbank failed: {e}")
+    except Exception as e:
+        # Never crash chat for a best-effort relook, but record a hint so the tutor won't "guess the picture".
+        try:
+            focus_obj = wrong_item_context.get("focus_question")
+            if isinstance(focus_obj, dict) and not focus_obj.get("vision_recheck_text"):
+                focus_obj["relook_error"] = f"重识别失败: {e}"
+                wrong_item_context["focus_question"] = focus_obj
+        except Exception as e2:
+            logger.debug(f"Recording relook_error failed: {e2}")
+
+
+def _diagram_guardrail_abort_if_needed(
+    *,
+    req: ChatRequest,
+    session_id: str,
+    session_data: Dict[str, Any],
+    wrong_item_context: Dict[str, Any],
+) -> None:
+    """Guardrail: prevent text-only hallucination for diagram disputes."""
+    focus_obj = wrong_item_context.get("focus_question")
+    msg = (req.question or "").strip()
+    asking_diagram = any(k in msg for k in ("看不到图", "没看到图", "同位角", "内错角", "位置关系", "像F", "像Z", "如图", "看图"))
+    if not (asking_diagram and isinstance(focus_obj, dict)):
+        return
+    qcontent = str(focus_obj.get("question_content") or "")
+    likely_needs_image = (focus_obj.get("visual_risk") is True) or ("如图" in qcontent) or ("图" in qcontent)
+    has_any_image = bool(_pick_relook_image_url(focus_obj))
+    if likely_needs_image and not focus_obj.get("vision_recheck_text") and (not has_any_image or focus_obj.get("relook_error")):
+        _abort_with_user_and_assistant_message(
+            session_id=session_id,
+            session_data=session_data,
+            user_message=req.question,
+            assistant_message=(
+                "这题需要看图才能判断角的位置关系，但我这边目前没有成功拿到该题的图像/切片信息，"
+                "所以不能直接断言它是同位角还是内错角。"
+                "你可以等一会儿让系统生成切片后再问，或直接把第9题（含图）的局部截图发我。"
+            ),
+            done_status="continue",
+            retry_after_ms=1500,
+        )
+
+
+def _prepare_chat_context_or_abort(
+    *,
+    req: ChatRequest,
+    session_id: str,
+    request_id: str,
+    user_id: str,
+    session_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    from homework_agent.api._chat_stages import _prepare_chat_context_or_abort as _impl
+
+    return _impl(
+        req=req,
+        session_id=session_id,
+        request_id=request_id,
+        user_id=user_id,
+        session_data=session_data,
+    )
+
+
+async def _stream_socratic_llm_to_sse(
+    *,
+    llm_client: LLMClient,
+    req: ChatRequest,
+    session_id: str,
+    session_data: Dict[str, Any],
+    wrong_item_context: Dict[str, Any],
+    current_turn: int,
+    provider_str: str,
+    model_override: Optional[str],
+    request_id: str,
+    started_m: float,
+) -> AsyncIterator[bytes]:
+    from homework_agent.api._chat_stages import _stream_socratic_llm_to_sse as _impl
+
+    async for chunk in _impl(
+        llm_client=llm_client,
+        req=req,
+        session_id=session_id,
+        session_data=session_data,
+        wrong_item_context=wrong_item_context,
+        current_turn=current_turn,
+        provider_str=provider_str,
+        model_override=model_override,
+        request_id=request_id,
+        started_m=started_m,
+    ):
+        yield chunk
+
+
+async def _run_chat_turn(
+    *,
+    llm_client: LLMClient,
+    req: ChatRequest,
+    session_id: str,
+    request_id: str,
+    user_id: str,
+    session_data: Dict[str, Any],
+    started_m: float,
+) -> AsyncIterator[bytes]:
+    provider_str, model_override = _select_chat_model_or_raise(req)
+    current_turn = session_data["interaction_count"]
+
+    wrong_item_context = _prepare_chat_context_or_abort(
+        req=req,
+        session_id=session_id,
+        request_id=request_id,
+        user_id=user_id,
+        session_data=session_data,
+    )
+
+    async for chunk in _run_mandatory_visual_path(
+        req=req,
+        session_id=session_id,
+        request_id=request_id,
+        user_id=user_id,
+        session_data=session_data,
+        wrong_item_context=wrong_item_context,
+    ):
+        yield chunk
+
+    _apply_user_corrections(session_data=session_data, wrong_item_context=wrong_item_context, user_message=req.question)
+
+    if "focus_question" not in wrong_item_context:
+        _abort_with_assistant_message(
+            session_id=session_id,
+            session_data=session_data,
+            message="系统未能绑定到具体题目，请在【智能批改】中重新批改后再试。",
+            done_status="error",
+        )
+
+    await _best_effort_relook_if_needed(
+        req=req,
+        session_id=session_id,
+        request_id=request_id,
+        wrong_item_context=wrong_item_context,
+    )
+
+    _diagram_guardrail_abort_if_needed(
+        req=req,
+        session_id=session_id,
+        session_data=session_data,
+        wrong_item_context=wrong_item_context,
+    )
+
+    async for chunk in _stream_socratic_llm_to_sse(
+        llm_client=llm_client,
+        req=req,
+        session_id=session_id,
+        session_data=session_data,
+        wrong_item_context=wrong_item_context,
+        current_turn=current_turn,
+        provider_str=provider_str,
+        model_override=model_override,
+        request_id=request_id,
+        started_m=started_m,
+    ):
+        yield chunk
+
+
 async def chat_stream(
     req: ChatRequest,
     request: Request,
@@ -795,13 +1215,11 @@ async def chat_stream(
     """
     llm_client = LLMClient()
 
-    # session恢复或创建；last_event_id 用于断线续接（仅恢复 session_id）
-    session_id = req.session_id or last_event_id or f"session_{uuid.uuid4().hex[:8]}"
-    request_id = get_request_id_from_headers(request.headers) or f"req_{uuid.uuid4().hex[:12]}"
-    user_id = get_user_id(request.headers.get("X-User-Id"))
-    started_m = time.monotonic()
-    now_ts = _now_ts()
-    session_data = get_session(session_id)
+    session_id, request_id, user_id, started_m, now_ts, session_data = _init_chat_request(
+        req=req,
+        headers=request.headers,
+        last_event_id=last_event_id,
+    )
     log_event(
         logger,
         "chat_request",
@@ -813,787 +1231,39 @@ async def chat_stream(
         has_last_event_id=bool(last_event_id),
     )
 
-    # Best-effort: touch Submission last_active_at (180-day inactivity cleanup uses this).
-    try:
-        touch_submission(user_id=user_id, session_id=session_id)
-    except Exception:
-        pass
+    _touch_submission_best_effort(user_id=user_id, session_id=session_id)
+    session_data = _ensure_chat_session_or_abort(
+        req=req,
+        session_id=session_id,
+        session_data=session_data,
+        now_ts=now_ts,
+        last_event_id=last_event_id,
+    )
 
-    # TTL检查，超期则报错
-    if session_data:
-        updated_ts = _coerce_ts(session_data.get("updated_at")) or now_ts
-        if now_ts - updated_ts > SESSION_TTL_SECONDS:
-            delete_session(session_id)
-            error_msg = json.dumps({"code": "SESSION_EXPIRED", "message": "session expired"})
-            yield f"event: error\ndata: {error_msg}\n\n".encode("utf-8")
-            yield b"event: done\ndata: {\"status\":\"error\"}\n\n"
-            return
-
-    if not session_data:
-        # last-event-id 提供但不存在的情况
-        if last_event_id and not req.session_id:
-            error_msg = json.dumps({"code": "SESSION_NOT_FOUND", "message": "session not found"})
-            yield f"event: error\ndata: {error_msg}\n\n".encode("utf-8")
-            yield b"event: done\ndata: {\"status\":\"error\"}\n\n"
-            return
-        session_data = {
-            "history": req.history or [],
-            "interaction_count": 0,
-            "created_at": now_ts,
-            "updated_at": now_ts,
-            "context_item_ids": normalize_context_ids(req.context_item_ids or []),
-        }
-        save_session(session_id, session_data)
-
-    # 不再做硬性 turn limit 检查
-
-    # Normalize past assistant messages for display (avoid raw LaTeX delimiters in UI).
-    try:
-        hist = session_data.get("history") or []
-        if isinstance(hist, list):
-            for m in hist:
-                if isinstance(m, dict) and m.get("role") == "assistant" and isinstance(m.get("content"), str):
-                    m["content"] = _format_math_for_display(m.get("content") or "")
-            session_data["history"] = hist
-    except Exception:
-        pass
-
-    # Heartbeat
-    yield b"event: heartbeat\ndata: {}\n\n"
-
-    # 如果提供 last_event_id 且无显式 session_id，尝试重放上一条 assistant 消息，便于客户端续接
-    if last_event_id and not req.session_id and session_data["history"]:
-        replay_msgs = assistant_tail(session_data["history"], max_messages=3)
-        for msg in replay_msgs:
-            payload = ChatResponse(
-                messages=[msg],
-                session_id=session_id,
-                retry_after_ms=None,
-                cross_subject_flag=None,
-            )
-            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+    for c in _emit_initial_events(
+        session_id=session_id,
+        session_data=session_data,
+        last_event_id=last_event_id,
+        has_explicit_session_id=bool(req.session_id),
+    ):
+        yield c
 
     try:
-        # Chat 默认使用 doubao (Ark) 推理模型（由环境变量 ARK_REASONING_MODEL 配置）
-        provider_str = "ark"
-        allowed_chat_models = {get_settings().ark_reasoning_model}
-        model_override = None
-        if req.llm_model:
-            if req.llm_model not in allowed_chat_models:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid llm_model for chat. Allowed: {sorted(allowed_chat_models)}",
-                )
-            model_override = req.llm_model
-        current_turn = session_data["interaction_count"]
-
-        # 构造上下文：强制依赖 qbank（全题快照）。
-        # 需求：chat 只能基于 /grade 交付的“识别/判定/题目信息”对话；缺失则直接提示先批改，禁止编造。
-        qbank = get_question_bank(session_id) if session_id else None
-        if not (isinstance(qbank, dict) and isinstance(qbank.get("questions"), dict) and qbank.get("questions")):
-            log_event(
-                logger,
-                "chat_qbank_missing",
-                level="warning",
-                request_id=request_id,
-                session_id=session_id,
-            )
-            msg = (
-                "我还没有拿到本次作业的“题库快照”（识别原文/判定结果/题目信息）。"
-                "请先在【智能批改】里上传照片并完成批改，然后用返回的 session_id 再来辅导。"
-            )
-            session_data["history"].append({"role": "assistant", "content": msg})
-            save_session(session_id, session_data)
-            payload = ChatResponse(
-                messages=[{"role": "assistant", "content": msg}],
-                session_id=session_id,
-                retry_after_ms=None,
-                cross_subject_flag=None,
-            )
-            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-            yield b"event: done\ndata: {\"status\":\"error\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
-            return
-
-        bank_questions = qbank.get("questions")
-        bank_questions_str: Dict[str, Any] = {str(k): v for k, v in (bank_questions or {}).items()}
-        available_qnums = sorted(bank_questions_str.keys(), key=len, reverse=True)
-
-        wrong_item_context: Dict[str, Any] = {
-            "available_question_numbers": available_qnums[:200],
-        }
-
-        # Determine requested question number (explicit) and bind focus deterministically.
-        requested_qn = _extract_requested_question_number(req.question)
-        requested_qn = _normalize_question_number(requested_qn) if requested_qn else None
-        if requested_qn:
-            # If user explicitly asked for a question that does not exist, do NOT keep old focus.
-            if requested_qn not in bank_questions_str:
-                # Allow prefix matching: "28" -> "28(1)②" etc.
-                candidates = [k for k in available_qnums if str(k).startswith(f"{requested_qn}(") or str(k).startswith(requested_qn)]
-                if candidates:
-                    requested_qn = sorted(candidates, key=len)[0]
-                else:
-                    log_event(
-                        logger,
-                        "chat_route_not_found",
-                        level="warning",
-                        request_id=request_id,
-                        session_id=session_id,
-                        requested_qn=requested_qn,
-                        available_count=len(available_qnums),
-                    )
-                    msg = (
-                        f"我没能在本次批改结果里定位到第{requested_qn}题的题干/选项信息。"
-                        + (f" 当前可聊题号：{', '.join(available_qnums[:30])}。" if available_qnums else "")
-                        + " 你可以换一个题号再问，或重新上传更清晰的照片后再批改一次。"
-                    )
-                    session_data["history"].append({"role": "assistant", "content": msg})
-                    save_session(session_id, session_data)
-                    payload = ChatResponse(
-                        messages=[{"role": "assistant", "content": msg}],
-                        session_id=session_id,
-                        retry_after_ms=None,
-                        cross_subject_flag=None,
-                    )
-                    yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-                    yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
-                    return
-            session_data["focus_question_number"] = str(requested_qn)
-        else:
-            # Only attempt to switch focus when user explicitly intends to talk about a question.
-            # This avoids false-positives from math expressions like "t(t-8)+16".
-            if _has_explicit_question_switch_intent(req.question):
-                mentioned = _select_question_number_from_text(req.question, available_qnums)
-                if mentioned:
-                    session_data["focus_question_number"] = str(mentioned)
-
-        focus_q = session_data.get("focus_question_number")
-        focus_q = str(focus_q) if focus_q is not None else None
-        log_event(
-            logger,
-            "chat_focus_bound",
+        async for chunk in _run_chat_turn(
+            llm_client=llm_client,
+            req=req,
+            session_id=session_id,
             request_id=request_id,
-            session_id=session_id,
-            focus_question_number=focus_q,
-            requested_qn=requested_qn,
-        )
-        # DEBUG: 记录bank_questions_str的键
-        logger.warning(f"WARNING DEBUG: bank_questions_str keys: {list(bank_questions_str.keys()) if isinstance(bank_questions_str, dict) else 'N/A'}")
-        logger.warning(f"WARNING DEBUG: focus_q = {focus_q}, type = {type(focus_q)}")
-        logger.warning(f"WARNING DEBUG: focus_q and focus_q in bank_questions_str = {bool(focus_q and focus_q in bank_questions_str)}")
-        logger.warning(f"WARNING DEBUG: bank_questions_str is dict = {isinstance(bank_questions_str, dict)}")
+            user_id=user_id,
+            session_data=session_data,
+            started_m=started_m,
+        ):
+            yield chunk
 
-        if focus_q and focus_q in bank_questions_str:
-            logger.warning(f"WARNING DEBUG: ENTERED if block for focus_q '{focus_q}'")
-            logger.warning(f"WARNING DEBUG: focus_q '{focus_q}' found in bank_questions_str")
-            focus_payload = dict(bank_questions_str.get(focus_q) or {})
-            focus_payload["question_number"] = str(focus_q)
-
-            # Add image refs if available (bbox/slice index) - optional enhancement only.
-            qindex = get_question_index(session_id) if session_id else None
-            logger.warning(f"WARNING DEBUG: qindex = {qindex is not None}")
-            if isinstance(qindex, dict):
-                qidx_questions = qindex.get("questions")
-                logger.warning(f"WARNING DEBUG: qidx_questions is dict = {isinstance(qidx_questions, dict)}")
-                if isinstance(qidx_questions, dict) and focus_q in qidx_questions:
-                    image_refs = qidx_questions.get(focus_q)
-                    focus_payload["image_refs"] = image_refs
-                    # TEST: 直接写入日志文件
-                    logger.warning(f"WARNING TEST MESSAGE: chat_attaching_image_refs for {focus_q}, has_image_refs={bool(image_refs)}")
-                    logger.warning(f"WARNING LOG_EVENT: calling log_event for chat_attaching_image_refs")
-                    try:
-                        log_event(
-                            logger,
-                            "chat_attaching_image_refs",
-                            request_id=request_id,
-                            session_id=session_id,
-                            focus_question_number=focus_q,
-                            has_image_refs=bool(image_refs),
-                            has_pages=bool(image_refs.get("pages") if isinstance(image_refs, dict) else False),
-                        )
-                        logger.warning(f"WARNING LOG_EVENT: log_event called successfully")
-                    except Exception as e:
-                        logger.warning(f"WARNING LOG_EVENT: error calling log_event: {e}")
-                if qindex.get("warnings"):
-                    wrong_item_context["index_warnings"] = qindex.get("warnings")
-            else:
-                # TEST: 直接写入日志文件
-                logger.warning(f"WARNING TEST MESSAGE: chat_no_qindex_found for {focus_q}")
-                log_event(
-                    logger,
-                    "chat_no_qindex_found",
-                    request_id=request_id,
-                    session_id=session_id,
-                    focus_question_number=focus_q,
-                )
-
-            # Always keep page urls for potential "re-look the page" fallback (geometry etc.)
-            page_urls = qbank.get("page_image_urls")
-            if isinstance(page_urls, list) and page_urls:
-                focus_payload["page_image_urls"] = page_urls
-
-            wrong_item_context["focus_question_number"] = str(focus_q)
-            wrong_item_context["focus_question"] = focus_payload
-
-            # Also persist image_refs to qbank for future use (best-effort)
-            try:
-                qbank_now = get_question_bank(session_id)
-                if isinstance(qbank_now, dict):
-                    qs = qbank_now.get("questions")
-                    if isinstance(qs, dict) and str(focus_q) in qs and isinstance(qs.get(str(focus_q)), dict):
-                        if "image_refs" in focus_payload:
-                            qs[str(focus_q)]["image_refs"] = focus_payload["image_refs"]
-                        qbank_now["questions"] = qs
-                        save_question_bank(session_id, qbank_now)
-            except Exception:
-                pass
-
-            log_event(
-                logger,
-                "chat_context_ready",
-                request_id=request_id,
-                session_id=session_id,
-                focus_qn=focus_q,
-                has_qindex=bool(get_question_index(session_id)),
-            )
-        else:
-            # No focus yet: ask user to specify a question number (avoid hallucination).
-            msg = (
-                "你想先聊哪一题？请直接说“讲第几题”。"
-                + (f" 当前可聊题号：{', '.join(available_qnums[:30])}。" if available_qnums else "")
-            )
-            session_data["history"].append({"role": "assistant", "content": msg})
-            save_session(session_id, session_data)
-            payload = ChatResponse(
-                messages=[{"role": "assistant", "content": msg}],
-                session_id=session_id,
-                retry_after_ms=None,
-                cross_subject_flag=None,
-            )
-            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-            yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
-            return
-
-        # If the user didn't explicitly switch focus this turn, emit a small log for debugging.
-        try:
-            if not requested_qn and not _has_explicit_question_switch_intent(req.question):
-                log_event(
-                    logger,
-                    "chat_focus_question_maintained",
-                    request_id=request_id,
-                    session_id=session_id,
-                    focus_question_number=session_data.get("focus_question_number"),
-                )
-        except Exception:
-            pass
-
-        # Optional optimization: if this session likely contains visual/diagram risks, enqueue qindex slices in background.
-        # This is best-effort and must never block chat (user should not be aware of it).
-        try:
-            qindex_now = get_question_index(session_id) if session_id else None
-            queued_already = False
-            if isinstance(qindex_now, dict):
-                ws = qindex_now.get("warnings") or []
-                if isinstance(ws, list) and any("queued" in str(w) for w in ws):
-                    queued_already = True
-                if qindex_now.get("questions"):
-                    queued_already = True
-
-            focus_obj_for_qindex = wrong_item_context.get("focus_question")
-            focus_qn_for_qindex = wrong_item_context.get("focus_question_number")
-            user_visual_hint = False
-            try:
-                user_visual_hint, _ = analyze_visual_risk(
-                    subject=req.subject,
-                    question_content=req.question,
-                    warnings=None,
-                )
-            except Exception:
-                user_visual_hint = False
-            if (
-                not queued_already
-                and isinstance(focus_obj_for_qindex, dict)
-                and (focus_obj_for_qindex.get("visual_risk") is True or user_visual_hint)
-            ):
-                qbank_now = get_question_bank(session_id) if session_id else None
-                if isinstance(qbank_now, dict) and (should_create_slices_for_bank(qbank_now) or user_visual_hint):
-                    page_urls = qbank_now.get("page_image_urls")
-                    if isinstance(page_urls, list) and page_urls:
-                        allow = pick_question_numbers_for_slices(qbank_now)
-                        # If user explicitly hints there is a diagram/table/etc, make sure we slice the focused question.
-                        if user_visual_hint and focus_qn_for_qindex:
-                            fq = str(focus_qn_for_qindex).strip()
-                            if fq and fq not in allow:
-                                allow = [*allow, fq]
-                        if not allow and focus_qn_for_qindex:
-                            allow = [str(focus_qn_for_qindex).strip()]
-
-                        ok, reason = qindex_is_configured()
-                        if not ok:
-                            save_qindex_placeholder(session_id, f"qindex skipped: {reason}")
-                        else:
-                            if enqueue_qindex_job(
-                                session_id,
-                                [str(u) for u in page_urls if u],
-                                question_numbers=allow,
-                            ):
-                                save_question_index(session_id, {"questions": {}, "warnings": ["qindex queued (chat)"]})
-                                log_event(logger, "chat_qindex_enqueued", request_id=request_id, session_id=session_id)
-                            else:
-                                save_qindex_placeholder(session_id, "qindex skipped: redis_unavailable")
-        except Exception:
-            pass
-
-        # ---- Mandatory visual path (product requirement) ----
-        # When the user requests "look at the picture"/diagram-related judgement:
-        # - Ensure qindex slices exist (enqueue + wait).
-        # - Run vision relook on the slice.
-        # - If still unavailable, explicitly say we cannot see the diagram (no guessing).
-        try:
-            focus_obj = wrong_item_context.get("focus_question")
-            fqnum = wrong_item_context.get("focus_question_number")
-            if isinstance(focus_obj, dict) and fqnum:
-                user_visual_hint, _ = analyze_visual_risk(
-                    subject=req.subject,
-                    question_content=req.question,
-                    warnings=None,
-                )
-                explicit_visual = bool(_user_requests_visual_check(req.question))
-                must_visual = bool(explicit_visual or user_visual_hint)
-
-                if must_visual:
-                    # 1) Ensure qindex slices (for focused question)
-                    qindex_now = get_question_index(session_id) if session_id else None
-                    ready = isinstance(qindex_now, dict) and _qindex_has_slices_for_question(qindex_now, str(fqnum))
-                    if not ready:
-                        # DB fallback: if Redis lost/restarted, still try to load slices within TTL.
-                        try:
-                            # First, resolve the real user_id and submission_id from session
-                            resolved = resolve_submission_for_session(session_id)
-                            real_user_id = user_id
-                            if isinstance(resolved, dict):
-                                real_user_id = resolved.get("user_id") or user_id
-                                log_event(
-                                    logger,
-                                    "chat_resolved_submission_for_session",
-                                    request_id=request_id,
-                                    session_id=session_id,
-                                    resolved_user_id=real_user_id,
-                                    submission_id=resolved.get("submission_id"),
-                                )
-
-                            db_refs = load_qindex_image_refs(
-                                user_id=real_user_id,
-                                session_id=session_id,
-                                question_number=str(fqnum),
-                            )
-                            if isinstance(db_refs, dict) and db_refs:
-                                focus_obj["image_refs"] = db_refs
-                                ready = True
-                                log_event(
-                                    logger,
-                                    "chat_loaded_db_slices",
-                                    request_id=request_id,
-                                    session_id=session_id,
-                                    question_number=str(fqnum),
-                                    has_slices=True,
-                                )
-                            else:
-                                log_event(
-                                    logger,
-                                    "chat_no_db_slices_found",
-                                    request_id=request_id,
-                                    session_id=session_id,
-                                    question_number=str(fqnum),
-                                    real_user_id=real_user_id,
-                                )
-                        except Exception as e:
-                            log_event(
-                                logger,
-                                "chat_db_load_error",
-                                request_id=request_id,
-                                session_id=session_id,
-                                question_number=str(fqnum),
-                                error=str(e),
-                                level="warning",
-                            )
-
-                    if not ready:
-                        ok, reason = qindex_is_configured()
-                        if not ok:
-                            save_qindex_placeholder(session_id, f"qindex skipped: {reason}")
-                            reply = (
-                                "这题需要看图/切片才能确认关键位置关系，但当前环境未配置可用的切片能力，"
-                                f"所以我看不到图（{reason}）。你可以补齐配置后重试，或把该题局部截图发我。"
-                            )
-                            session_data["history"].append({"role": "user", "content": req.question})
-                            session_data["history"].append({"role": "assistant", "content": reply})
-                            save_session(session_id, session_data)
-                            payload = ChatResponse(messages=[{"role": "assistant", "content": reply}], session_id=session_id, retry_after_ms=None)
-                            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-                            yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
-                            return
-
-                        # Enqueue if not already queued.
-                        queued_already = False
-                        if isinstance(qindex_now, dict):
-                            ws = qindex_now.get("warnings") or []
-                            if isinstance(ws, list) and any("queued" in str(w) for w in ws):
-                                queued_already = True
-                            if qindex_now.get("questions"):
-                                queued_already = True
-
-                        qbank_now = get_question_bank(session_id) if session_id else None
-                        page_urls = (qbank_now or {}).get("page_image_urls") if isinstance(qbank_now, dict) else None
-                        allow = pick_question_numbers_for_slices(qbank_now) if isinstance(qbank_now, dict) else []
-                        fq = str(fqnum).strip()
-                        if fq and fq not in allow:
-                            allow = [*allow, fq] if allow else [fq]
-
-                        if (not queued_already) and isinstance(page_urls, list) and page_urls:
-                            if enqueue_qindex_job(session_id, [str(u) for u in page_urls if u], question_numbers=allow):
-                                save_question_index(session_id, {"questions": {}, "warnings": ["qindex queued (chat)"]})
-                            else:
-                                save_qindex_placeholder(session_id, "qindex skipped: redis_unavailable")
-
-                        # Tell user we are reading the picture and wait for slices.
-                        wait_s = 120.0
-                        poll = 1.0
-                        info = f"我正在读取图片并生成切片（第{fq}题），请稍等…"
-                        session_data["history"].append({"role": "user", "content": req.question})
-                        session_data["history"].append({"role": "assistant", "content": info})
-                        save_session(session_id, session_data)
-                        payload = ChatResponse(messages=[{"role": "assistant", "content": info}], session_id=session_id, retry_after_ms=1500)
-                        yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-
-                        deadline = time.monotonic() + wait_s
-                        last_beat = time.monotonic()
-                        while time.monotonic() < deadline:
-                            await asyncio.sleep(poll)
-                            qindex_now = get_question_index(session_id) if session_id else None
-                            if isinstance(qindex_now, dict) and _qindex_has_slices_for_question(qindex_now, str(fqnum)):
-                                ready = True
-                                break
-                            # Also check DB as a fallback (Redis may have been restarted).
-                            if time.monotonic() - last_beat >= 5.0:
-                                try:
-                                    # First, resolve the real user_id and submission_id from session
-                                    resolved = resolve_submission_for_session(session_id)
-                                    real_user_id = user_id
-                                    if isinstance(resolved, dict):
-                                        real_user_id = resolved.get("user_id") or user_id
-
-                                    db_refs = load_qindex_image_refs(
-                                        user_id=real_user_id,
-                                        session_id=session_id,
-                                        question_number=str(fqnum),
-                                    )
-                                    if isinstance(db_refs, dict) and db_refs:
-                                        focus_obj["image_refs"] = db_refs
-                                        ready = True
-                                        break
-                                except Exception:
-                                    pass
-                            if time.monotonic() - last_beat >= 5.0:
-                                yield b"event: heartbeat\ndata: {}\n\n"
-                                last_beat = time.monotonic()
-
-                        if not ready:
-                            qindex_now = get_question_index(session_id) if session_id else None
-                            ws = (qindex_now or {}).get("warnings") if isinstance(qindex_now, dict) else None
-                            ws_txt = f"（{ws[0]}）" if isinstance(ws, list) and ws else ""
-                            reply = (
-                                "我这边还没成功拿到切片，所以目前看不到图，无法判断图形位置关系。"
-                                + ws_txt
-                                + "你可以再等一会儿再问，或直接把该题局部截图发我。"
-                            )
-                            session_data["history"].append({"role": "assistant", "content": reply})
-                            save_session(session_id, session_data)
-                            payload = ChatResponse(messages=[{"role": "assistant", "content": reply}], session_id=session_id, retry_after_ms=2000)
-                            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-                            yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
-                            return
-
-                    # 2) Refresh image refs into focus_obj for relook
-                    qindex_now = get_question_index(session_id) if session_id else None
-                    if isinstance(qindex_now, dict):
-                        qs = qindex_now.get("questions")
-                        if isinstance(qs, dict) and str(fqnum) in qs:
-                            focus_obj["image_refs"] = qs.get(str(fqnum))
-                        if qindex_now.get("warnings"):
-                            wrong_item_context["index_warnings"] = qindex_now.get("warnings")
-
-                    # 3) Force relook when user explicitly asks to "看图"
-                    if explicit_visual and (not focus_obj.get("vision_recheck_text") or focus_obj.get("relook_error")):
-                        patch = await _relook_focus_question_via_vision(
-                            session_id=session_id,
-                            subject=req.subject,
-                            question_number=str(fqnum),
-                            focus_question=focus_obj,
-                        )
-                        if isinstance(patch, dict) and patch:
-                            focus_obj.update({k: v for k, v in patch.items() if v is not None})
-                            wrong_item_context["focus_question"] = focus_obj
-                            try:
-                                qbank_now = get_question_bank(session_id)
-                                if isinstance(qbank_now, dict):
-                                    qs = qbank_now.get("questions")
-                                    if isinstance(qs, dict) and str(fqnum) in qs and isinstance(qs.get(str(fqnum)), dict):
-                                        qs[str(fqnum)].update({k: v for k, v in patch.items() if v is not None})
-                                        qbank_now["questions"] = qs
-                                        qbank_now = _merge_bank_meta(qbank_now, {"updated_at": datetime.now().isoformat()})
-                                        save_question_bank(session_id, qbank_now)
-                            except Exception:
-                                pass
-
-                    # 4) Fail closed if user requested visual check but we still have no relook text.
-                    if explicit_visual and not focus_obj.get("vision_recheck_text"):
-                        reply = "我目前看不到图/没有拿到足够的图像信息，所以不能判断图形位置关系；请把该题局部截图发我，或稍后再试。"
-                        session_data["history"].append({"role": "assistant", "content": reply})
-                        save_session(session_id, session_data)
-                        payload = ChatResponse(messages=[{"role": "assistant", "content": reply}], session_id=session_id, retry_after_ms=None)
-                        yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-                        yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
-                        return
-        except Exception:
-            pass
-
-        # Capture user corrections so the tutor can override OCR/vision misreads during the session.
-        focus_q_for_corr = (
-            wrong_item_context.get("focus_question_number")
-            or session_data.get("focus_question_number")
-        )
-        corr = _extract_user_correction(req.question)
-        if focus_q_for_corr and corr:
-            fq = str(focus_q_for_corr)
-            corr_map = session_data.setdefault("corrections", {})
-            corr_list = corr_map.setdefault(fq, [])
-            if not corr_list or corr_list[-1] != corr:
-                corr_list.append(corr)
-            corr_map[fq] = corr_list[-5:]
-            wrong_item_context["user_corrections"] = corr_map[fq]
-            # If we have a focused question payload, attach corrections there too for clarity.
-            if isinstance(wrong_item_context.get("focus_question"), dict):
-                wrong_item_context["focus_question"]["user_corrections"] = corr_map[fq]
-
-        # Deterministic routing already handled above; if we reached here without a focus_question,
-        # it's a bug, so fail safe.
-        if "focus_question" not in wrong_item_context:
-            msg = "系统未能绑定到具体题目，请在【智能批改】中重新批改后再试。"
-            session_data["history"].append({"role": "assistant", "content": msg})
-            save_session(session_id, session_data)
-            payload = ChatResponse(
-                messages=[{"role": "assistant", "content": msg}],
-                session_id=session_id,
-                retry_after_ms=None,
-                cross_subject_flag=None,
-            )
-            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-            yield b"event: done\ndata: {\"status\":\"error\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
-            return
-
-        # Best-effort: re-look the focused question when the prompt hints diagram/pattern info was missed.
-        try:
-            focus_obj = wrong_item_context.get("focus_question")
-            fqnum = wrong_item_context.get("focus_question_number")
-            if (
-                isinstance(focus_obj, dict)
-                and fqnum
-                and _should_relook_focus_question(req.question, focus_obj)
-            ):
-                patch = await _relook_focus_question_via_vision(
-                    session_id=session_id,
-                    subject=req.subject,
-                    question_number=str(fqnum),
-                    focus_question=focus_obj,
-                )
-                if isinstance(patch, dict) and patch:
-                    log_event(
-                        logger,
-                        "chat_relook_applied",
-                        request_id=request_id,
-                        session_id=session_id,
-                        focus_qn=str(fqnum),
-                        patch_keys=list(patch.keys()),
-                    )
-                    focus_obj.update({k: v for k, v in patch.items() if v is not None})
-                    # If we successfully relooked, clear stale error so we can proceed.
-                    if patch.get("vision_recheck_text"):
-                        try:
-                            focus_obj.pop("relook_error", None)
-                        except Exception:
-                            pass
-                    wrong_item_context["focus_question"] = focus_obj
-                    # Persist patch back to qbank for subsequent turns (best-effort).
-                    try:
-                        qbank_now = get_question_bank(session_id)
-                        if isinstance(qbank_now, dict):
-                            qs = qbank_now.get("questions")
-                            if isinstance(qs, dict) and str(fqnum) in qs and isinstance(qs.get(str(fqnum)), dict):
-                                qs[str(fqnum)].update({k: v for k, v in patch.items() if v is not None})
-                                if patch.get("vision_recheck_text"):
-                                    qs[str(fqnum)].pop("relook_error", None)
-                                qbank_now["questions"] = qs
-                                qbank_now = _merge_bank_meta(qbank_now, {"updated_at": datetime.now().isoformat()})
-                                save_question_bank(session_id, qbank_now)
-                    except Exception:
-                        pass
-        except Exception as e:
-            # Never crash chat for a best-effort relook, but record a hint so the tutor won't "guess the picture".
-            try:
-                focus_obj = wrong_item_context.get("focus_question")
-                if isinstance(focus_obj, dict) and not focus_obj.get("vision_recheck_text"):
-                    focus_obj["relook_error"] = f"重识别失败: {e}"
-                    wrong_item_context["focus_question"] = focus_obj
-            except Exception:
-                pass
-
-        # Guardrail: if the user is asking about diagram/position relations but vision re-look failed,
-        # do NOT let the text-only tutor "guess the picture".
-        try:
-            focus_obj = wrong_item_context.get("focus_question")
-            msg = (req.question or "").strip()
-            asking_diagram = any(k in msg for k in ("看不到图", "没看到图", "同位角", "内错角", "位置关系", "像F", "像Z", "如图", "看图"))
-            if asking_diagram and isinstance(focus_obj, dict):
-                qcontent = str(focus_obj.get("question_content") or "")
-                likely_needs_image = (focus_obj.get("visual_risk") is True) or ("如图" in qcontent) or ("图" in qcontent)
-                has_any_image = bool(_pick_relook_image_url(focus_obj))
-                if likely_needs_image and not focus_obj.get("vision_recheck_text") and (not has_any_image or focus_obj.get("relook_error")):
-                    # Persist user msg + assistant response for session continuity.
-                    session_data["history"].append({"role": "user", "content": req.question})
-                    reply = (
-                        "这题需要看图才能判断角的位置关系，但我这边目前没有成功拿到该题的图像/切片信息，"
-                        "所以不能直接断言它是同位角还是内错角。"
-                        "你可以等一会儿让系统生成切片后再问，或直接把第9题（含图）的局部截图发我。"
-                    )
-                    session_data["history"].append({"role": "assistant", "content": reply})
-                    save_session(session_id, session_data)
-                    payload = ChatResponse(
-                        messages=[{"role": "assistant", "content": reply}],
-                        session_id=session_id,
-                        retry_after_ms=1500,
-                        cross_subject_flag=None,
-                    )
-                    yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-                    yield b"event: done\ndata: {\"status\":\"continue\",\"session_id\":\"%b\"}\n\n" % session_id.encode("utf-8")
-                    return
-        except Exception:
-            pass
-
-        # ===== True streaming: LLM token stream -> SSE chat events =====
-        loop = asyncio.get_running_loop()
-        q: asyncio.Queue = asyncio.Queue()
-        DONE = object()
-
-        # Update session immediately with user's message so LLM can see the conversation history.
-        # Avoid duplicating the same user message when we already appended it earlier
-        # (e.g. during mandatory "读图/切片" prelude).
-        already_has_user = False
-        try:
-            for m in reversed(session_data.get("history") or []):
-                if isinstance(m, dict) and m.get("role") == "user":
-                    already_has_user = (str(m.get("content") or "") == str(req.question))
-                    break
-        except Exception:
-            already_has_user = False
-        if not already_has_user:
-            session_data["history"].append({"role": "user", "content": req.question})
-        llm_history = list(session_data["history"][-12:])
-
-        def _producer():
-            try:
-                logger.warning(f"WARNING: Calling socratic_tutor_stream with question: {req.question[:50]}")
-                for chunk in llm_client.socratic_tutor_stream(
-                    question=req.question,
-                    wrong_item_context=wrong_item_context,
-                    session_id=session_id,
-                    interaction_count=current_turn,
-                    provider=provider_str,
-                    model_override=model_override,
-                    history=llm_history,
-                ):
-                    logger.warning(f"WARNING: Received chunk: {chunk[:50]}")
-                    asyncio.run_coroutine_threadsafe(q.put(chunk), loop)
-                logger.warning(f"WARNING: Stream finished, putting DONE")
-                asyncio.run_coroutine_threadsafe(q.put(DONE), loop)
-            except Exception as ex:
-                logger.warning(f"WARNING: Exception in _producer: {ex}")
-                asyncio.run_coroutine_threadsafe(q.put({"error": str(ex)}), loop)
-
-        producer_task = asyncio.create_task(asyncio.to_thread(_producer))
-
-        # Add placeholder assistant message for streaming updates
-        assistant_msg = {"role": "assistant", "content": ""}
-        session_data["history"].append(assistant_msg)
-
-        # Emit initial state so clients can render immediately
-        payload = ChatResponse(
-            messages=session_data["history"],
-            session_id=session_id,
-            retry_after_ms=None,
-            cross_subject_flag=None,
-        )
-        logger.warning(f"WARNING: Emitting initial payload with {len(session_data['history'])} messages")
-        yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-        logger.warning(f"WARNING: Starting streaming loop")
-
-        buffer = ""
-        last_emit = time.monotonic()
-        while True:
-            try:
-                item = await asyncio.wait_for(q.get(), timeout=10.0)
-            except asyncio.TimeoutError:
-                # keep connection alive during long thinking
-                yield b"event: heartbeat\ndata: {}\n\n"
-                continue
-
-            if item is DONE:
-                break
-            if isinstance(item, dict) and item.get("error"):
-                raise RuntimeError(item.get("error"))
-
-            chunk = str(item)
-            buffer += chunk
-            assistant_msg["content"] = _format_math_for_display(buffer)
-
-            # throttle event frequency
-            now_m = time.monotonic()
-            if now_m - last_emit >= 0.25 or chunk.endswith(("。", "！", "？", "\n")):
-                payload = ChatResponse(
-                    messages=session_data["history"],
-                    session_id=session_id,
-                    retry_after_ms=None,
-                    cross_subject_flag=None,
-                )
-                yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-                last_emit = now_m
-
-        # Ensure final content is emitted
-        payload = ChatResponse(
-            messages=session_data["history"],
-            session_id=session_id,
-            retry_after_ms=None,
-            cross_subject_flag=None,
-        )
-        yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
-
-        # Persist session
-        session_data["interaction_count"] = current_turn + 1
-        session_data["updated_at"] = _now_ts()
-        save_session(session_id, session_data)
-
-        # Status: keep it simple for now
-        log_event(
-            logger,
-            "chat_done",
-            request_id=request_id,
-            session_id=session_id,
-            status="continue",
-            elapsed_ms=int((time.monotonic() - started_m) * 1000),
-        )
-        yield f"event: done\ndata: {{\"status\":\"continue\",\"session_id\":\"{session_id}\"}}\n\n".encode("utf-8")
-        await producer_task
-
+    except _ChatAbort as abort:
+        for c in abort.chunks:
+            yield c
+        return
     except Exception as e:
         logger.error(f"Chat stream failed: {e}", exc_info=True)
         log_event(
@@ -1606,7 +1276,14 @@ async def chat_stream(
             error=str(e),
             elapsed_ms=int((time.monotonic() - started_m) * 1000),
         )
-        error_msg = json.dumps({"error": str(e)})
+        error_msg = json.dumps(
+            build_error_payload(
+                code=ErrorCode.SERVICE_ERROR,
+                message=str(e),
+                request_id=request_id,
+                session_id=session_id,
+            )
+        )
         yield f"event: error\ndata: {error_msg}\n\n".encode("utf-8")
         yield b"event: done\ndata: {\"status\":\"error\"}\n\n"
 

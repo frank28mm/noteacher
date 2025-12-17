@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 import io
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple
@@ -46,13 +47,23 @@ from homework_agent.api.session import (
     IDP_TTL_HOURS,
 )
 from homework_agent.utils.observability import get_request_id_from_headers, log_event
-from homework_agent.utils.user_context import get_user_id
+from homework_agent.utils.user_context import require_user_id
 from homework_agent.utils.submission_store import (
     resolve_page_image_urls,
     touch_submission,
     update_submission_after_grade,
     link_session_to_submission,
 )
+from homework_agent.utils.url_image_helpers import (
+    _is_public_url,
+    _normalize_public_url,
+    _strip_base64_prefix,
+    _first_public_image_url,
+    _probe_url_head,
+    _download_as_data_uri,
+    _is_provider_image_fetch_issue,
+)
+from homework_agent.utils.supabase_image_proxy import _create_proxy_image_urls
 
 logger = logging.getLogger(__name__)
 
@@ -88,13 +99,47 @@ def _bank_has_visual_risk(bank: Any) -> bool:
         if not isinstance(qs, dict):
             return False
         return any(isinstance(q, dict) and q.get("visual_risk") is True for q in qs.values())
-    except Exception:
+    except Exception as e:
+        logger.debug(f"_bank_has_visual_risk check failed: {e}")
         return False
 
 
 def _visual_risk_warning_text() -> str:
     # Short, client-friendly.
     return "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+
+
+@dataclass(frozen=True)
+class _GradingAbort(Exception):
+    """Internal control-flow: return a deterministic GradeResponse early."""
+
+    response: GradeResponse
+
+
+def _remaining_seconds(deadline_m: float) -> float:
+    return max(0.0, float(deadline_m) - time.monotonic())
+
+
+def _needs_fallback(result: Any) -> bool:
+    """Detect Ark grading failure that should fall back to Qwen3."""
+    summary = (getattr(result, "summary", "") or "").strip()
+    if summary.startswith("批改失败") or summary.startswith("批改结果解析失败"):
+        return True
+    warnings = getattr(result, "warnings", None) or []
+    for w in warnings:
+        w_str = str(w)
+        if any(
+            key in w_str
+            # Note: don't treat "Parse error" as fatal here because we may have already fallen back to Qwen3,
+            # and we still want to return a successful grading result if the fallback succeeded.
+            for key in ("InvalidEndpointOrModel", "NotFound", "Error code")
+        ):
+            return True
+    return False
+
+
+# Stage implementations moved to `homework_agent/api/_grading_stages.py` (to keep this router module smaller).
+
 
 
 def validate_vision_provider(provider: VisionProvider) -> VisionProvider:
@@ -106,161 +151,6 @@ def validate_vision_provider(provider: VisionProvider) -> VisionProvider:
             detail=f"Invalid vision_provider. Allowed values: {[p.value for p in allowed_providers]}"
         )
     return provider
-
-
-def _is_public_url(url: str) -> bool:
-    url = str(url)
-    if not url:
-        return False
-    if re.match(r"^https?://", url) is None:
-        return False
-    if url.startswith("http://127.") or url.startswith("https://127."):
-        return False
-    if url.startswith("http://localhost") or url.startswith("https://localhost"):
-        return False
-    return True
-
-
-def _strip_base64_prefix(data: str) -> str:
-    return re.sub(r"^data:image/[^;]+;base64,", "", data, flags=re.IGNORECASE)
-
-
-def _first_public_image_url(images: List[Any]) -> Optional[str]:
-    for img in images or []:
-        url = getattr(img, "url", None) or (img.get("url") if isinstance(img, dict) else None)
-        if url:
-            return str(url)
-    return None
-
-
-def _normalize_public_url(url: Optional[str]) -> Optional[str]:
-    if not url:
-        return None
-    s = str(url).strip()
-    if not s:
-        return None
-    # Supabase SDK may return URLs with a trailing "?" which can confuse downstream fetchers.
-    return s.rstrip("?")
-
-
-def _probe_url_head(url: str) -> Optional[str]:
-    """Best-effort HEAD probe for debugging (status/content-type/content-length)."""
-    if not url:
-        return None
-    try:
-        import httpx
-
-        # Don't inherit local proxy env for public URL probes.
-        with httpx.Client(timeout=5.0, follow_redirects=True, trust_env=False) as client:
-            r = client.head(url)
-        ct = r.headers.get("content-type")
-        cl = r.headers.get("content-length")
-        return f"url_head status={r.status_code} content-type={ct} content-length={cl}"
-    except Exception as e:
-        return f"url_head probe_failed: {e}"
-
-
-def _download_as_data_uri(url: str) -> Optional[str]:
-    """Best-effort: download image bytes locally and convert to data URI for Qwen3 base64 fallback."""
-    if not url:
-        return None
-    try:
-        import httpx
-
-        # Avoid local proxy interference when downloading public object URLs.
-        with httpx.Client(timeout=20.0, follow_redirects=True, trust_env=False) as client:
-            r = client.get(url)
-        if r.status_code != 200:
-            return None
-        content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip() or "image/jpeg"
-        data = r.content or b""
-        if not data:
-            return None
-        if len(data) > 20 * 1024 * 1024:
-            return None
-        b64 = base64.b64encode(data).decode("ascii")
-        return f"data:{content_type};base64,{b64}"
-    except Exception:
-        return None
-
-
-def _is_provider_image_fetch_issue(err: Exception) -> bool:
-    msg = str(err or "").strip()
-    if not msg:
-        return False
-    return any(
-        s in msg
-        for s in (
-            "Timeout while fetching image_url",
-            "timeout while fetching image_url",
-            "InvalidParameter",
-            "image_url",
-            "20040",
-        )
-    )
-
-
-def _create_proxy_image_urls(
-    urls: List[str],
-    *,
-    session_id: str,
-    prefix: str = "proxy/",
-    max_side: int = 1600,
-    jpeg_quality: int = 85,
-) -> Optional[List[str]]:
-    """
-    Best-effort: create a smaller, stable public URL copy in Supabase to reduce provider-side fetch failures.
-    Only call this when URL fetch is unstable/failing (it downloads + uploads, not cheap).
-    """
-    cleaned = [str(u).strip() for u in (urls or []) if str(u).strip()]
-    if not cleaned:
-        return None
-
-    try:
-        import httpx
-        from PIL import Image
-        from homework_agent.utils.supabase_client import get_storage_client
-    except Exception:
-        return None
-
-    out: List[str] = []
-    storage = get_storage_client()
-    base_prefix = f"{prefix.rstrip('/')}/{session_id}/"
-
-    for u in cleaned:
-        try:
-            with httpx.Client(timeout=25.0, follow_redirects=True, trust_env=False) as client:
-                r = client.get(u)
-            r.raise_for_status()
-            data = r.content or b""
-            if not data:
-                continue
-
-            img = Image.open(io.BytesIO(data))
-            img.load()
-            w, h = img.size
-            if max(w, h) > int(max_side):
-                ratio = float(max_side) / float(max(w, h))
-                nw = max(1, int(round(w * ratio)))
-                nh = max(1, int(round(h * ratio)))
-                img = img.resize((nw, nh), Image.Resampling.LANCZOS)
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=int(jpeg_quality), optimize=True)
-            proxy_url = storage.upload_bytes(
-                buf.getvalue(),
-                mime_type="image/jpeg",
-                suffix=".jpg",
-                prefix=base_prefix,
-            )
-            out.append(_normalize_public_url(proxy_url) or proxy_url)
-        except Exception:
-            # Keep a stable list length so downstream can safely index by page.
-            out.append(_normalize_public_url(u) or u)
-
-    return out if out else None
 
 
 def validate_images_payload(images: List[Dict[str, Any]], vision_provider: VisionProvider) -> None:
@@ -311,7 +201,8 @@ def check_idempotency(idempotency_key: str) -> Optional[GradeResponse]:
         return None
     try:
         return GradeResponse(**cached["response"])
-    except Exception:
+    except Exception as e:
+        logger.debug(f"check_idempotency parse failed: {e}")
         return None
 
 
@@ -324,37 +215,46 @@ def cache_response(idempotency_key: str, response: GradeResponse) -> None:
     )
 
 
-async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse:
-    """执行批改（同步/后台共用）。"""
-    # 提前确定 session_id，用于所有返回路径（grade→chat 必须可续接）
-    session_for_ctx = _ensure_session_id(req.session_id or req.batch_id)
+GRADE_VISION_PROMPT = (
+    "请识别并提取作业内容，包括题目、答案和解题步骤。逐题输出“学生作答状态”：若看到答案/勾选则写明，若未看到答案/空白/未勾选，明确标注“未作答”或“可能未作答”。"
+    "选择题必须完整列出选项（A/B/C/D 每一项的原文），并明确学生选择了哪个选项；若未勾选，标注未作答。"
+    "对含幂/分式/下标的公式请双写：先按原式抄写（含上下标、分式），再给出纯文本展开形式（如 10^(n+1)、(a-b)^2/(c+d)）。"
+    "特别自检指数/分母的 +1、±、平方/立方等细节，如有疑似误读，直接在结果中标注“可能误读公式：…”。"
+    "对“规律/序列/图示题”（含箭头/示例/表格/图形），必须先原样抄写题目给出的示例（例如 A→B→C→D→C→B 或对应数字位置），不要凭空推断；若示例在图中，请描述图中出现的字母/顺序/位置关系。"
+    "注意：你只负责识别与抄录（OCR+结构化），不要进行解题/判定/推理，不要写出你推断的正确答案或规律（例如“应为6n+3”这类）。如果示例/图中信息没识别出来，请明确写“示例未识别到/看不清”，并在 warnings 中标注风险。"
+)
+
+
+@dataclass
+class _GradingCtx:
+    session_id: str
+    provider_str: str
+    settings: Any
+    started_m: float
+    deadline_m: float
+    timings_ms: Dict[str, int]
+    request_id: Optional[str]
+    meta_base: Dict[str, Any]
+    page_image_urls: List[str]
+    page_image_urls_original: List[str]
+
+
+def _init_grading_ctx(req: GradeRequest, provider_str: str) -> _GradingCtx:
+    """Initialize shared context for /grade execution (perform_grading + background_grade)."""
+    session_id = _ensure_session_id(req.session_id or req.batch_id)
     try:
         # Best-effort: keep request/session aligned for downstream job records.
-        req.session_id = session_for_ctx
-    except Exception:
-        pass
+        req.session_id = session_id
+    except Exception as e:
+        logger.debug(f"Setting session_id on request failed: {e}")
 
     settings = get_settings()
-    started = time.monotonic()
-    deadline = started + float(settings.grade_completion_sla_seconds)
+    started_m = time.monotonic()
+    deadline_m = started_m + float(settings.grade_completion_sla_seconds)
     timings_ms: Dict[str, int] = {}
-    req_id = getattr(req, "_request_id", None)
-    save_grade_progress(session_for_ctx, "grade_start", "已接收请求，准备识别…", {"request_id": req_id})
+    request_id = getattr(req, "_request_id", None)
+    save_grade_progress(session_id, "grade_start", "已接收请求，准备识别…", {"request_id": request_id})
 
-    def remaining_seconds() -> float:
-        return max(0.0, deadline - time.monotonic())
-
-    vision_prompt = (
-        "请识别并提取作业内容，包括题目、答案和解题步骤。逐题输出“学生作答状态”：若看到答案/勾选则写明，若未看到答案/空白/未勾选，明确标注“未作答”或“可能未作答”。"
-        "选择题必须完整列出选项（A/B/C/D 每一项的原文），并明确学生选择了哪个选项；若未勾选，标注未作答。"
-        "对含幂/分式/下标的公式请双写：先按原式抄写（含上下标、分式），再给出纯文本展开形式（如 10^(n+1)、(a-b)^2/(c+d)）。"
-        "特别自检指数/分母的 +1、±、平方/立方等细节，如有疑似误读，直接在结果中标注“可能误读公式：…”。"
-        "对“规律/序列/图示题”（含箭头/示例/表格/图形），必须先原样抄写题目给出的示例（例如 A→B→C→D→C→B 或对应数字位置），不要凭空推断；若示例在图中，请描述图中出现的字母/顺序/位置关系。"
-        "注意：你只负责识别与抄录（OCR+结构化），不要进行解题/判定/推理，不要写出你推断的正确答案或规律（例如“应为6n+3”这类）。如果示例/图中信息没识别出来，请明确写“示例未识别到/看不清”，并在 warnings 中标注风险。"
-    )
-
-    vision_client = VisionClient()
-    vision_fallback_warning: Optional[str] = None
     meta_base: Dict[str, Any] = {
         "vision_provider_requested": getattr(req.vision_provider, "value", str(req.vision_provider)),
         "vision_provider_used": None,
@@ -364,832 +264,352 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         "llm_provider_used": None,
         "llm_used_fallback": False,
     }
-    # Track canonical page image URLs for downstream (qbank->chat->qindex).
+
     page_image_urls: List[str] = [
-        v for img in (req.images or []) for v in [_normalize_public_url(getattr(img, "url", None))] if v
+        v
+        for img in (req.images or [])
+        for v in [_normalize_public_url(getattr(img, "url", None))]
+        if v
     ]
-    page_image_urls_original = list(page_image_urls)
-
-    # Vision stage (offload to thread + sub-timeout)
-    v_budget = min(float(settings.grade_vision_timeout_seconds), remaining_seconds())
-    log_event(
-        logger,
-        "grade_vision_budget",
-        request_id=req_id,
-        session_id=session_for_ctx,
-        provider_requested=getattr(req.vision_provider, "value", str(req.vision_provider)),
-        budget_s=v_budget,
+    return _GradingCtx(
+        session_id=session_id,
+        provider_str=provider_str,
+        settings=settings,
+        started_m=started_m,
+        deadline_m=deadline_m,
+        timings_ms=timings_ms,
+        request_id=request_id,
+        meta_base=meta_base,
+        page_image_urls=page_image_urls,
+        page_image_urls_original=list(page_image_urls),
     )
-    if v_budget <= 0:
-        # Persist minimal snapshot so chat can deterministically explain the failure.
+
+
+def _abort_llm_stage_with_vision_only_bank(
+    *,
+    ctx: _GradingCtx,
+    req: GradeRequest,
+    vision_raw_text: str,
+    page_image_urls: List[str],
+    reason_summary: str,
+    warn_text: str,
+) -> None:
+    """Persist vision-only qbank and abort with a deterministic failure GradeResponse."""
+    if ctx.session_id:
+        bank_fallback = build_question_bank_from_vision_raw_text(
+            session_id=ctx.session_id,
+            subject=req.subject,
+            vision_raw_text=vision_raw_text,
+            page_image_urls=page_image_urls,
+        )
+        extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
         persist_question_bank(
-            session_id=session_for_ctx,
-            bank=_merge_bank_meta(
-                {
-                "session_id": session_for_ctx,
-                "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
-                "vision_raw_text": None,
-                "page_image_urls": [v for img in (req.images or []) for v in [_normalize_public_url(getattr(img, "url", None))] if v],
-                "questions": {},
-                },
-                meta_base,
-            ),
+            session_id=ctx.session_id,
+            bank=_merge_bank_meta(bank_fallback, ctx.meta_base),
             grade_status="failed",
-            grade_summary="Vision analysis not available",
-            grade_warnings=["grade SLA exceeded before vision started"],
-            timings_ms=timings_ms,
+            grade_summary=reason_summary,
+            grade_warnings=[w for w in [warn_text, extra_warn] if w],
+            timings_ms=ctx.timings_ms,
         )
-        return GradeResponse(
+        warnings = [w for w in [warn_text, extra_warn] if w]
+    else:
+        warnings = [warn_text]
+
+    raise _GradingAbort(
+        GradeResponse(
             wrong_items=[],
-            summary="Vision analysis not available",
+            summary=reason_summary,
             subject=req.subject,
             job_id=None,
-            session_id=session_for_ctx,
+            session_id=ctx.session_id,
             status="failed",
             total_items=None,
             wrong_count=None,
             cross_subject_flag=None,
-            warnings=["grade SLA exceeded before vision started"],
-            vision_raw_text=None,
+            warnings=warnings,
+            vision_raw_text=vision_raw_text,
         )
+    )
 
-    async def _run_vision(provider: VisionProvider, budget: float):
-        return await _call_blocking_in_thread(
-            vision_client.analyze,
-            images=req.images,
-            prompt=vision_prompt,
-            provider=provider,
-            timeout_seconds=budget,
-            semaphore=VISION_SEMAPHORE,
-        )
 
-    def _vision_err_str(err: Exception, budget: float) -> str:
-        if isinstance(err, asyncio.TimeoutError):
-            return f"timeout after {int(budget)}s"
-        s = str(err).strip()
-        return s or err.__class__.__name__
-
-    try:
-        log_event(
-            logger,
-            "vision_start",
-            request_id=req_id,
-            session_id=session_for_ctx,
-            provider=getattr(req.vision_provider, "value", str(req.vision_provider)),
-            budget_s=v_budget,
-        )
-        save_grade_progress(
-            session_for_ctx,
-            "vision_start",
-            f"Vision 识别中（{getattr(req.vision_provider, 'value', str(req.vision_provider))}）…",
-            {"budget_s": v_budget},
-        )
-        v0 = time.monotonic()
-        vision_result = await _run_vision(req.vision_provider, v_budget)
-        timings_ms["vision_ms"] = int((time.monotonic() - v0) * 1000)
-        meta_base["vision_provider_used"] = getattr(req.vision_provider, "value", str(req.vision_provider))
-        log_event(
-            logger,
-            "vision_done",
-            request_id=req_id,
-            session_id=session_for_ctx,
-            provider=meta_base.get("vision_provider_used"),
-            vision_ms=timings_ms.get("vision_ms"),
-            vision_text_len=len(getattr(vision_result, "text", "") or ""),
-        )
-        save_grade_progress(
-            session_for_ctx,
-            "vision_done",
-            f"Vision 识别完成（{meta_base.get('vision_provider_used')}）",
-            {"vision_ms": timings_ms.get("vision_ms"), "vision_text_len": len(getattr(vision_result, "text", "") or "")},
-        )
-    except Exception as e:
-        log_event(
-            logger,
-            "vision_failed",
-            level="warning",
-            request_id=req_id,
-            session_id=session_for_ctx,
-            provider=getattr(req.vision_provider, "value", str(req.vision_provider)),
-            error_type=e.__class__.__name__,
-            error=str(e),
-            budget_s=v_budget,
-        )
-        save_grade_progress(
-            session_for_ctx,
-            "vision_failed",
-            f"Vision 识别失败（{getattr(req.vision_provider, 'value', str(req.vision_provider))}）：{_vision_err_str(e, v_budget)}",
-        )
-        if req.vision_provider == VisionProvider.DOUBAO:
-            probe = _probe_url_head(_first_public_image_url(req.images))
-            # Retry doubao with local download + data-url to avoid provider-side URL fetch flakiness,
-            # then fallback to qwen3 if needed (within remaining budget).
-            v_budget2 = min(float(settings.grade_vision_timeout_seconds), remaining_seconds())
-            if v_budget2 <= 0:
-                persist_question_bank(
-                    session_id=session_for_ctx,
-                    bank=_merge_bank_meta(
-                        {
-                        "session_id": session_for_ctx,
-                        "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
-                        "vision_raw_text": None,
-                        "page_image_urls": [v for img in (req.images or []) for v in [_normalize_public_url(getattr(img, "url", None))] if v],
-                        "questions": {},
-                        },
-                        meta_base,
-                    ),
-                    grade_status="failed",
-                    grade_summary="Vision analysis not available",
-                    grade_warnings=[w for w in [
-                        f"Vision(doubao) failed: {_vision_err_str(e, v_budget)}",
-                        probe,
-                        "grade SLA exceeded before vision fallback",
-                    ] if w],
-                    timings_ms=timings_ms,
-                )
-                return GradeResponse(
-                    wrong_items=[],
-                    summary="Vision analysis not available",
-                    subject=req.subject,
-                    job_id=None,
-                    session_id=session_for_ctx,
-                    status="failed",
-                    total_items=None,
-                    wrong_count=None,
-                    cross_subject_flag=None,
-                    warnings=[w for w in [
-                        f"Vision(doubao) failed: {_vision_err_str(e, v_budget)}",
-                        probe,
-                        "grade SLA exceeded before vision fallback",
-                    ] if w],
-                    vision_raw_text=None,
-                )
-            try:
-                # 0) If provider-side image_url fetch is flaky, create a lightweight proxy URL and retry.
-                proxy_urls: Optional[List[str]] = None
-                proxy_retry_succeeded = False
-                if _is_provider_image_fetch_issue(e) and page_image_urls:
-                    save_grade_progress(
-                        session_for_ctx,
-                        "vision_proxy_start",
-                        "生成轻量图片副本（降低拉取失败）…",
-                        None,
-                    )
-                    proxy_urls = _create_proxy_image_urls(page_image_urls, session_id=session_for_ctx, prefix="proxy/")
-                    if proxy_urls:
-                        page_image_urls = proxy_urls
-                        meta_base["page_image_urls_original"] = page_image_urls_original
-                        meta_base["page_image_urls_proxy"] = proxy_urls
-
-                        save_grade_progress(
-                            session_for_ctx,
-                            "vision_retry_start",
-                            "Vision 识别重试（doubao：使用轻量副本 URL）…",
-                            {"budget_s": v_budget2},
-                        )
-                        v_retry0 = time.monotonic()
-                        vision_result = await _call_blocking_in_thread(
-                            vision_client.analyze,
-                            images=[ImageRef(url=u) for u in proxy_urls],
-                            prompt=vision_prompt,
-                            provider=VisionProvider.DOUBAO,
-                            timeout_seconds=v_budget2,
-                            semaphore=VISION_SEMAPHORE,
-                        )
-                        timings_ms["vision_ms"] = int((time.monotonic() - v_retry0) * 1000)
-                        meta_base["vision_provider_used"] = VisionProvider.DOUBAO.value
-                        meta_base["vision_used_proxy_url"] = True
-                        proxy_retry_succeeded = True
-                        log_event(
-                            logger,
-                            "vision_retry_done",
-                            request_id=req_id,
-                            session_id=session_for_ctx,
-                            provider=meta_base.get("vision_provider_used"),
-                            used_proxy_url=True,
-                            vision_text_len=len(getattr(vision_result, "text", "") or ""),
-                        )
-                        save_grade_progress(
-                            session_for_ctx,
-                            "vision_done",
-                            "Vision 识别完成（doubao：轻量副本 URL 兜底）",
-                            {"used_proxy_url": True, "vision_text_len": len(getattr(vision_result, "text", "") or "")},
-                        )
-                        vision_fallback_warning = (
-                            f"Vision(doubao) URL 拉取失败，已生成轻量副本 URL 兜底：{_vision_err_str(e, v_budget)}"
-                            + (f"；{probe}" if probe else "")
-                        )
-                if proxy_retry_succeeded:
-                    # proxy retry succeeded; continue without base64 retry.
-                    pass
-                else:
-
-                    # 1) doubao retry with local base64 (data-url) if we can convert at least one url
-                    save_grade_progress(
-                        session_for_ctx,
-                        "vision_retry_start",
-                        "Vision 识别重试（doubao：本地下载+base64）…",
-                        {"budget_s": v_budget2},
-                    )
-                    converted_images: List[Any] = []
-                    converted_any = False
-                    for u in page_image_urls or page_image_urls_original:
-                        data_uri = _download_as_data_uri(str(u))
-                        if data_uri:
-                            converted_any = True
-                            converted_images.append(ImageRef(base64=data_uri))
-                        else:
-                            converted_images.append(ImageRef(url=str(u)))
-
-                    if converted_any:
-                        v_retry0 = time.monotonic()
-                        vision_result = await _call_blocking_in_thread(
-                            vision_client.analyze,
-                            images=converted_images,
-                            prompt=vision_prompt,
-                            provider=VisionProvider.DOUBAO,
-                            timeout_seconds=v_budget2,
-                            semaphore=VISION_SEMAPHORE,
-                        )
-                        timings_ms["vision_ms"] = int((time.monotonic() - v_retry0) * 1000)
-                        meta_base["vision_provider_used"] = VisionProvider.DOUBAO.value
-                        meta_base["vision_used_base64_fallback"] = True
-                        log_event(
-                            logger,
-                            "vision_retry_done",
-                            request_id=req_id,
-                            session_id=session_for_ctx,
-                            provider=meta_base.get("vision_provider_used"),
-                            used_base64=True,
-                            vision_text_len=len(getattr(vision_result, "text", "") or ""),
-                        )
-                        save_grade_progress(
-                            session_for_ctx,
-                            "vision_done",
-                            "Vision 识别完成（doubao：base64 兜底）",
-                            {"used_base64_fallback": True, "vision_text_len": len(getattr(vision_result, "text", "") or "")},
-                        )
-                        vision_fallback_warning = (
-                            f"Vision(doubao) URL 拉取失败，已使用本地下载+base64 兜底：{_vision_err_str(e, v_budget)}"
-                            + (f"；{probe}" if probe else "")
-                        )
-                    else:
-                        raise RuntimeError("no_convertible_image_url_for_base64_retry")
-
-            except Exception as e_retry:
-                save_grade_progress(
-                    session_for_ctx,
-                    "vision_fallback_start",
-                    "Vision 识别回退到 qwen3（本地下载+base64）…",
-                    {"budget_s": v_budget2},
-                )
-                # Strong fallback: if URL fetch is flaky for cloud providers, convert URLs to base64 locally for Qwen3.
-                converted_images: List[Any] = []
-                converted_any = False
-                for u in page_image_urls or page_image_urls_original:
-                    data_uri = _download_as_data_uri(str(u))
-                    if data_uri:
-                        converted_any = True
-                        converted_images.append(ImageRef(base64=data_uri))
-                    else:
-                        converted_images.append(ImageRef(url=str(u)))
-
-                if converted_any:
-                    vision_result = await _call_blocking_in_thread(
-                        vision_client.analyze,
-                        images=converted_images,
-                        prompt=vision_prompt,
-                        provider=VisionProvider.QWEN3,
-                        timeout_seconds=v_budget2,
-                        semaphore=VISION_SEMAPHORE,
-                    )
-                else:
-                    vision_result = await _run_vision(VisionProvider.QWEN3, v_budget2)
-                meta_base["vision_provider_used"] = VisionProvider.QWEN3.value
-                meta_base["vision_used_base64_fallback"] = bool(converted_any)
-                log_event(
-                    logger,
-                    "vision_fallback_done",
-                    request_id=req_id,
-                    session_id=session_for_ctx,
-                    provider=meta_base.get("vision_provider_used"),
-                    used_base64=meta_base.get("vision_used_base64_fallback"),
-                    vision_text_len=len(getattr(vision_result, "text", "") or ""),
-                )
-                save_grade_progress(
-                    session_for_ctx,
-                    "vision_done",
-                    "Vision 识别完成（qwen3 兜底）",
-                    {"used_base64_fallback": bool(converted_any), "vision_text_len": len(getattr(vision_result, "text", "") or "")},
-                )
-                vision_fallback_warning = (
-                    f"Vision(doubao) 失败（含 base64 重试），已回退到 qwen3: {_vision_err_str(e, v_budget)}"
-                    + (f"；{probe}" if probe else "")
-                    + ("；qwen3 使用本地下载+base64 兜底" if converted_any else "")
-                )
-            except Exception as e2:
-                log_event(
-                    logger,
-                    "vision_fallback_failed",
-                    level="error",
-                    request_id=req_id,
-                    session_id=session_for_ctx,
-                    provider="qwen3",
-                    error_type=e2.__class__.__name__,
-                    error=str(e2),
-                    budget_s=v_budget2,
-                )
-                save_grade_progress(
-                    session_for_ctx,
-                    "vision_failed",
-                    f"Vision 回退也失败：{_vision_err_str(e2, v_budget2)}",
-                )
-                persist_question_bank(
-                    session_id=session_for_ctx,
-                    bank=_merge_bank_meta(
-                        {
-                        "session_id": session_for_ctx,
-                        "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
-                        "vision_raw_text": None,
-                        "page_image_urls": [v for img in (req.images or []) for v in [_normalize_public_url(getattr(img, "url", None))] if v],
-                        "questions": {},
-                        },
-                        meta_base,
-                    ),
-                    grade_status="failed",
-                    grade_summary="Vision analysis not available",
-                    grade_warnings=[w for w in [
-                        f"Vision(doubao) failed: {_vision_err_str(e, v_budget)}",
-                        probe,
-                        f"Vision fallback (qwen3) also failed: {_vision_err_str(e2, v_budget2)}",
-                    ] if w],
-                    timings_ms=timings_ms,
-                )
-                return GradeResponse(
-                    wrong_items=[],
-                    summary="Vision analysis not available",
-                    subject=req.subject,
-                    job_id=None,
-                    session_id=session_for_ctx,
-                    status="failed",
-                    total_items=None,
-                    wrong_count=None,
-                    cross_subject_flag=None,
-                    warnings=[w for w in [
-                        f"Vision(doubao) failed: {_vision_err_str(e, v_budget)}",
-                        probe,
-                        f"Vision fallback (qwen3) also failed: {_vision_err_str(e2, v_budget2)}",
-                    ] if w],
-                    vision_raw_text=None,
-                )
-        else:
-            persist_question_bank(
-                session_id=session_for_ctx,
-                bank=_merge_bank_meta(
-                    {
-                    "session_id": session_for_ctx,
-                    "subject": req.subject.value if hasattr(req.subject, "value") else str(req.subject),
-                    "vision_raw_text": None,
-                    "page_image_urls": [v for img in (req.images or []) for v in [_normalize_public_url(getattr(img, "url", None))] if v],
-                    "questions": {},
-                    },
-                    meta_base,
-                ),
-                grade_status="failed",
-                grade_summary="Vision analysis not available",
-                grade_warnings=[f"Vision analysis failed: {_vision_err_str(e, v_budget)}"],
-                timings_ms=timings_ms,
-            )
-            return GradeResponse(
-                wrong_items=[],
-                summary="Vision analysis not available",
-                subject=req.subject,
-                job_id=None,
-                session_id=session_for_ctx,
-                status="failed",
-                total_items=None,
-                wrong_count=None,
-                cross_subject_flag=None,
-                warnings=[f"Vision analysis failed: {_vision_err_str(e, v_budget)}"],
-                vision_raw_text=None,
-            )
-
-    llm_client = LLMClient()
-
-    def _needs_fallback(result: Any) -> bool:
-        """Detect Ark grading failure that should fall back to Qwen3."""
-        summary = (getattr(result, "summary", "") or "").strip()
-        if summary.startswith("批改失败") or summary.startswith("批改结果解析失败"):
-            return True
-        warnings = getattr(result, "warnings", None) or []
-        for w in warnings:
-            w_str = str(w)
-            if any(
-                key in w_str
-                # Note: don't treat "Parse error" as fatal here because we may have already fallen back to Qwen3,
-                # and we still want to return a successful grading result if the fallback succeeded.
-                for key in ("InvalidEndpointOrModel", "NotFound", "Error code")
-            ):
-                return True
-        return False
-
-    try:
-        if req.subject == Subject.MATH:
-            async def _grade_math(provider: str):
-                b = min(float(settings.grade_llm_timeout_seconds), remaining_seconds())
-                if b <= 0:
-                    raise asyncio.TimeoutError(
-                        f"grade SLA exceeded before LLM started (elapsed={int(time.monotonic()-started)}s)"
-                    )
-                return await _call_blocking_in_thread(
-                    llm_client.grade_math,
-                    text_content=vision_result.text,
-                    provider=provider,
-                    timeout_seconds=b,
-                    semaphore=LLM_SEMAPHORE,
-                )
-
-            try:
-                g0 = time.monotonic()
-                log_event(
-                    logger,
-                    "grade_llm_start",
-                    request_id=req_id,
-                    session_id=session_for_ctx,
-                    provider=provider_str,
-                )
-                save_grade_progress(
-                    session_for_ctx,
-                    "llm_start",
-                    "批改中（LLM 推理中）…",
-                    {"provider": provider_str},
-                )
-                grading_result = await _grade_math(provider_str)
-                timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
-                meta_base["llm_provider_used"] = provider_str
-                log_event(
-                    logger,
-                    "grade_llm_done",
-                    request_id=req_id,
-                    session_id=session_for_ctx,
-                    provider=meta_base.get("llm_provider_used"),
-                    llm_ms=timings_ms.get("llm_ms"),
-                    wrong_items=len(getattr(grading_result, "wrong_items", []) or []),
-                    questions=len(getattr(grading_result, "questions", []) or []),
-                )
-                save_grade_progress(
-                    session_for_ctx,
-                    "llm_done",
-                    "批改完成（LLM 推理结束）",
-                    {
-                        "provider": meta_base.get("llm_provider_used"),
-                        "llm_ms": timings_ms.get("llm_ms"),
-                        "questions": len(getattr(grading_result, "questions", []) or []),
-                    },
-                )
-            except Exception as e:
-                log_event(
-                    logger,
-                    "grade_llm_failed",
-                    level="warning",
-                    request_id=req_id,
-                    session_id=session_for_ctx,
-                    provider=provider_str,
-                    error_type=e.__class__.__name__,
-                    error=str(e),
-                )
-                save_grade_progress(
-                    session_for_ctx,
-                    "llm_failed",
-                    f"批改失败：{e.__class__.__name__}: {str(e)}",
-                    {"provider": provider_str},
-                )
-                if provider_str == "ark":
-                    g0 = time.monotonic()
-                    log_event(
-                        logger,
-                        "grade_llm_fallback_start",
-                        level="warning",
-                        request_id=req_id,
-                        session_id=session_for_ctx,
-                        provider="silicon",
-                    )
-                    save_grade_progress(session_for_ctx, "llm_fallback_start", "批改回退到 qwen3（silicon）…")
-                    grading_result = await _grade_math("silicon")
-                    timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
-                    meta_base["llm_provider_used"] = "silicon"
-                    meta_base["llm_used_fallback"] = True
-                    log_event(
-                        logger,
-                        "grade_llm_fallback_done",
-                        request_id=req_id,
-                        session_id=session_for_ctx,
-                        provider="silicon",
-                        llm_ms=timings_ms.get("llm_ms"),
-                    )
-                    save_grade_progress(
-                        session_for_ctx,
-                        "llm_done",
-                        "批改完成（qwen3 兜底）",
-                        {"provider": "silicon", "llm_ms": timings_ms.get("llm_ms")},
-                    )
-                    grading_result.warnings = (grading_result.warnings or []) + [
-                        f"Ark grading error, fell back to qwen3: {str(e)}"
-                    ]
-                else:
-                    raise
-
-            if provider_str == "ark" and _needs_fallback(grading_result):
-                ark_summary = grading_result.summary
-                ark_warnings = grading_result.warnings or []
-                log_event(
-                    logger,
-                    "grade_llm_fallback_forced",
-                    level="warning",
-                    request_id=req_id,
-                    session_id=session_for_ctx,
-                    reason="needs_fallback",
-                    ark_summary=ark_summary,
-                )
-                g0 = time.monotonic()
-                grading_result = await _grade_math("silicon")
-                timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
-                meta_base["llm_provider_used"] = "silicon"
-                meta_base["llm_used_fallback"] = True
-                grading_result.warnings = (grading_result.warnings or []) + [
-                    f"Ark grading unavailable, fell back to qwen3. Ark summary: {ark_summary}"
-                ] + ark_warnings
-
-            grading_result.wrong_items = sanitize_wrong_items(grading_result.wrong_items)
-
-            # Canonicalize wrong_items from the full question list whenever available.
-            # This guarantees stable question_number routing for chat/UI (even if the model forgot to fill it in wrong_items).
-            questions_list = getattr(grading_result, "questions", None) or []
-            if isinstance(questions_list, list) and questions_list:
-                grading_result.wrong_items = derive_wrong_items_from_questions(questions_list)
-            else:
-                # If wrong_items miss schema-required fields, derive from questions (best-effort fallback).
-                wrong_items_invalid = (
-                    not grading_result.wrong_items
-                    or any(
-                        (not isinstance(it, dict))
-                        or (not isinstance(it.get("reason"), str))
-                        or (not it.get("reason"))
-                        for it in grading_result.wrong_items
-                    )
-                )
-                if wrong_items_invalid:
-                    grading_result.wrong_items = derive_wrong_items_from_questions(
-                        getattr(grading_result, "questions", None) or []
-                    )
-            grading_result.wrong_items = dedupe_wrong_items(grading_result.wrong_items)
-            grading_result.wrong_items = assign_stable_item_ids(grading_result.wrong_items)
-            grading_result.wrong_items = sanitize_wrong_items(grading_result.wrong_items)
-
-        elif req.subject == Subject.ENGLISH:
-            async def _grade_english(provider: str):
-                b = min(float(settings.grade_llm_timeout_seconds), remaining_seconds())
-                if b <= 0:
-                    raise asyncio.TimeoutError(
-                        f"grade SLA exceeded before LLM started (elapsed={int(time.monotonic()-started)}s)"
-                    )
-                return await _call_blocking_in_thread(
-                    llm_client.grade_english,
-                    text_content=vision_result.text,
-                    mode=req.mode or SimilarityMode.NORMAL,
-                    provider=provider,
-                    timeout_seconds=b,
-                    semaphore=LLM_SEMAPHORE,
-                )
-
-            try:
-                g0 = time.monotonic()
-                grading_result = await _grade_english(provider_str)
-                timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
-                meta_base["llm_provider_used"] = provider_str
-            except Exception as e:
-                if provider_str == "ark":
-                    g0 = time.monotonic()
-                    grading_result = await _grade_english("silicon")
-                    timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
-                    meta_base["llm_provider_used"] = "silicon"
-                    meta_base["llm_used_fallback"] = True
-                    grading_result.warnings = (grading_result.warnings or []) + [
-                        f"Ark grading error, fell back to qwen3: {str(e)}"
-                    ]
-                else:
-                    raise
-
-            if provider_str == "ark" and _needs_fallback(grading_result):
-                ark_summary = grading_result.summary
-                ark_warnings = grading_result.warnings or []
-                g0 = time.monotonic()
-                grading_result = await _grade_english("silicon")
-                timings_ms["llm_ms"] = int((time.monotonic() - g0) * 1000)
-                meta_base["llm_provider_used"] = "silicon"
-                meta_base["llm_used_fallback"] = True
-                grading_result.warnings = (grading_result.warnings or []) + [
-                    f"Ark grading unavailable, fell back to qwen3. Ark summary: {ark_summary}"
-                ] + ark_warnings
-            grading_result.wrong_items = sanitize_wrong_items(grading_result.wrong_items)
-            questions_list = getattr(grading_result, "questions", None) or []
-            if isinstance(questions_list, list) and questions_list:
-                grading_result.wrong_items = derive_wrong_items_from_questions(questions_list)
-            else:
-                wrong_items_invalid = (
-                    not grading_result.wrong_items
-                    or any(
-                        (not isinstance(it, dict))
-                        or (not isinstance(it.get("reason"), str))
-                        or (not it.get("reason"))
-                        for it in grading_result.wrong_items
-                    )
-                )
-                if wrong_items_invalid:
-                    grading_result.wrong_items = derive_wrong_items_from_questions(
-                        getattr(grading_result, "questions", None) or []
-                    )
-            grading_result.wrong_items = dedupe_wrong_items(grading_result.wrong_items)
-            grading_result.wrong_items = assign_stable_item_ids(grading_result.wrong_items)
-            grading_result.wrong_items = sanitize_wrong_items(grading_result.wrong_items)
-
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unsupported subject: {req.subject}",
-            )
-
-    except asyncio.TimeoutError as e:
-        # Save vision-only qbank so /chat can still route by question number.
-        if session_for_ctx:
-            page_urls = [img.url for img in req.images if getattr(img, "url", None)]
-            bank_fallback = build_question_bank_from_vision_raw_text(
-                session_id=session_for_ctx,
-                subject=req.subject,
-                vision_raw_text=vision_result.text,
-                page_image_urls=[v for u in page_urls for v in [_normalize_public_url(str(u))] if v],
-            )
-            extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
-            persist_question_bank(
-                session_id=session_for_ctx,
-                bank=_merge_bank_meta(
-                    bank_fallback,
-                    meta_base,
-                ),
-                grade_status="failed",
-                grade_summary="LLM grading timeout",
-                grade_warnings=[w for w in [f"LLM timeout: {str(e)}", extra_warn] if w],
-                timings_ms=timings_ms,
-            )
-        return GradeResponse(
-            wrong_items=[],
-            summary="LLM grading timeout",
+def _abort_parse_failed_after_fallbacks(
+    *,
+    ctx: _GradingCtx,
+    req: GradeRequest,
+    grading_result: Any,
+    vision_raw_text: str,
+    page_image_urls: List[str],
+    vision_fallback_warning: Optional[str],
+) -> None:
+    """If parsing still failed after fallbacks, treat grading as failed (avoid 'done but empty')."""
+    if ctx.session_id:
+        bank_fallback = build_question_bank_from_vision_raw_text(
+            session_id=ctx.session_id,
             subject=req.subject,
-            job_id=None,
-            session_id=session_for_ctx,
-            status="failed",
-            total_items=None,
-            wrong_count=None,
-            cross_subject_flag=None,
-            warnings=[w for w in [f"LLM timeout: {str(e)}", extra_warn] if w] if session_for_ctx else [f"LLM timeout: {str(e)}"],
-            vision_raw_text=vision_result.text,
+            vision_raw_text=vision_raw_text,
+            page_image_urls=page_image_urls,
         )
-    except Exception as e:
-        if session_for_ctx:
-            bank_fallback = build_question_bank_from_vision_raw_text(
-                session_id=session_for_ctx,
-                subject=req.subject,
-                vision_raw_text=vision_result.text,
-                page_image_urls=page_image_urls,
-            )
-            extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
-            persist_question_bank(
-                session_id=session_for_ctx,
-                bank=_merge_bank_meta(
-                    bank_fallback,
-                    meta_base,
-                ),
-                grade_status="failed",
-                grade_summary=f"LLM grading failed: {str(e)}",
-                grade_warnings=[w for w in [f"LLM error: {str(e)}", extra_warn] if w],
-                timings_ms=timings_ms,
-            )
-        return GradeResponse(
-            wrong_items=[],
-            summary=f"LLM grading failed: {str(e)}",
-            subject=req.subject,
-            job_id=None,
-            session_id=session_for_ctx,
-            status="failed",
-            total_items=None,
-            wrong_count=None,
-            cross_subject_flag=None,
-            warnings=[w for w in [f"LLM error: {str(e)}", extra_warn] if w] if session_for_ctx else [f"LLM error: {str(e)}"],
-            vision_raw_text=vision_result.text,
+        extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
+        persist_question_bank(
+            session_id=ctx.session_id,
+            bank=_merge_bank_meta(bank_fallback, ctx.meta_base),
+            grade_status="failed",
+            grade_summary=(getattr(grading_result, "summary", "") or "批改失败").strip(),
+            grade_warnings=(getattr(grading_result, "warnings", None) or [])
+            + ([vision_fallback_warning] if vision_fallback_warning else [])
+            + ([extra_warn] if extra_warn else []),
+            timings_ms=ctx.timings_ms,
         )
+    else:
+        extra_warn = None
 
-    # If parsing still failed after fallbacks, treat grading as failed (avoid "done but empty").
-    if _needs_fallback(grading_result):
-        if session_for_ctx:
-            bank_fallback = build_question_bank_from_vision_raw_text(
-                session_id=session_for_ctx,
-                subject=req.subject,
-                vision_raw_text=vision_result.text,
-                page_image_urls=page_image_urls,
-            )
-            extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
-            persist_question_bank(
-                session_id=session_for_ctx,
-                bank=_merge_bank_meta(
-                    bank_fallback,
-                    meta_base,
-                ),
-                grade_status="failed",
-                grade_summary=(getattr(grading_result, "summary", "") or "批改失败").strip(),
-                grade_warnings=(getattr(grading_result, "warnings", None) or [])
-                + ([vision_fallback_warning] if vision_fallback_warning else [])
-                + ([extra_warn] if extra_warn else []),
-                timings_ms=timings_ms,
-            )
-        return GradeResponse(
+    raise _GradingAbort(
+        GradeResponse(
             wrong_items=sanitize_wrong_items(getattr(grading_result, "wrong_items", []) or []),
             summary=(getattr(grading_result, "summary", "") or "批改失败").strip(),
             subject=req.subject,
             job_id=None,
-            session_id=session_for_ctx,
+            session_id=ctx.session_id,
             status="failed",
             total_items=getattr(grading_result, "total_items", None),
             wrong_count=getattr(grading_result, "wrong_count", None),
             cross_subject_flag=getattr(grading_result, "cross_subject_flag", None),
             warnings=(getattr(grading_result, "warnings", None) or [])
             + ([vision_fallback_warning] if vision_fallback_warning else [])
-            + ([extra_warn] if session_for_ctx and extra_warn else []),
-            vision_raw_text=vision_result.text,
+            + ([extra_warn] if ctx.session_id and extra_warn else []),
+            vision_raw_text=vision_raw_text,
         )
+    )
 
-    # Persist question bank snapshot (full question list) for chat routing.
-    if session_for_ctx:
-        questions_raw = getattr(grading_result, "questions", None)
-        questions_list: List[Dict[str, Any]] = questions_raw if isinstance(questions_raw, list) else []
-        bank = build_question_bank(
-            session_id=session_for_ctx,
-            subject=req.subject,
-            questions=questions_list,
-            vision_raw_text=vision_result.text,
-            page_image_urls=page_image_urls,
-        )
-        extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank) else None
-        persist_question_bank(
-            session_id=session_for_ctx,
-            bank=_merge_bank_meta(bank, meta_base),
-            grade_status="done",
-            grade_summary=(getattr(grading_result, "summary", "") or "").strip(),
-            grade_warnings=(getattr(grading_result, "warnings", None) or [])
-            + ([vision_fallback_warning] if vision_fallback_warning else [])
-            + ([extra_warn] if extra_warn else []),
-            timings_ms=timings_ms,
-        )
 
-    # Defensive: if LLM didn't output counts, compute from normalized results.
+def _persist_done_qbank_snapshot(
+    *,
+    ctx: _GradingCtx,
+    req: GradeRequest,
+    grading_result: Any,
+    vision_raw_text: str,
+    page_image_urls: List[str],
+    vision_fallback_warning: Optional[str],
+) -> Optional[str]:
+    """Persist question bank snapshot for chat routing; return optional extra warning."""
+    if not ctx.session_id:
+        return None
+
+    questions_raw = getattr(grading_result, "questions", None)
+    questions_list: List[Dict[str, Any]] = questions_raw if isinstance(questions_raw, list) else []
+    bank = build_question_bank(
+        session_id=ctx.session_id,
+        subject=req.subject,
+        questions=questions_list,
+        vision_raw_text=vision_raw_text,
+        page_image_urls=page_image_urls,
+    )
+    extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank) else None
+    persist_question_bank(
+        session_id=ctx.session_id,
+        bank=_merge_bank_meta(bank, ctx.meta_base),
+        grade_status="done",
+        grade_summary=(getattr(grading_result, "summary", "") or "").strip(),
+        grade_warnings=(getattr(grading_result, "warnings", None) or [])
+        + ([vision_fallback_warning] if vision_fallback_warning else [])
+        + ([extra_warn] if extra_warn else []),
+        timings_ms=ctx.timings_ms,
+    )
+    return extra_warn
+
+
+def _ensure_grading_counts(grading_result: Any) -> None:
+    """Defensive: if LLM didn't output counts, compute from normalized results."""
     if getattr(grading_result, "wrong_count", None) is None:
         try:
             grading_result.wrong_count = len(getattr(grading_result, "wrong_items", []) or [])
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Setting wrong_count failed: {e}")
             grading_result.wrong_count = None
     if getattr(grading_result, "total_items", None) is None:
         try:
             qs = getattr(grading_result, "questions", None) or []
             grading_result.total_items = len(qs) if isinstance(qs, list) and qs else None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Setting total_items failed: {e}")
             grading_result.total_items = None
 
+
+async def _run_grade_vision(
+    *,
+    ctx: _GradingCtx,
+    req: GradeRequest,
+    vision_client: VisionClient,
+) -> tuple[Any, Optional[str]]:
+    """Wrapper to run vision stage with ctx-bound parameters (reduces perform_grading noise)."""
+    # Lazy import to avoid circular deps with `_GradingAbort` staying in this module.
+    from homework_agent.api._grading_stages import _run_grading_vision_stage
+
+    vision_result, ctx.page_image_urls, vision_fallback_warning = await _run_grading_vision_stage(
+        req=req,
+        session_id=ctx.session_id,
+        request_id=ctx.request_id,
+        settings=ctx.settings,
+        started_m=ctx.started_m,
+        deadline_m=ctx.deadline_m,
+        vision_prompt=GRADE_VISION_PROMPT,
+        vision_client=vision_client,
+        page_image_urls=ctx.page_image_urls,
+        page_image_urls_original=ctx.page_image_urls_original,
+        meta_base=ctx.meta_base,
+        timings_ms=ctx.timings_ms,
+        call_blocking_in_thread=_call_blocking_in_thread,
+        vision_semaphore=VISION_SEMAPHORE,
+        persist_question_bank=persist_question_bank,
+        merge_bank_meta=_merge_bank_meta,
+        save_grade_progress=save_grade_progress,
+        log_event=log_event,
+    )
+    return vision_result, vision_fallback_warning
+
+
+async def _run_grade_llm(
+    *,
+    ctx: _GradingCtx,
+    req: GradeRequest,
+    llm_client: LLMClient,
+    vision_text: str,
+) -> Any:
+    """Wrapper to run LLM stage with ctx-bound parameters (reduces perform_grading noise)."""
+    from homework_agent.api._grading_stages import _run_grading_llm_stage
+
+    return await _run_grading_llm_stage(
+        req=req,
+        provider_str=ctx.provider_str,
+        llm_client=llm_client,
+        vision_text=vision_text,
+        settings=ctx.settings,
+        started_m=ctx.started_m,
+        deadline_m=ctx.deadline_m,
+        session_id=ctx.session_id,
+        request_id=ctx.request_id,
+        meta_base=ctx.meta_base,
+        timings_ms=ctx.timings_ms,
+        call_blocking_in_thread=_call_blocking_in_thread,
+        llm_semaphore=LLM_SEMAPHORE,
+        save_grade_progress=save_grade_progress,
+        log_event=log_event,
+    )
+
+
+def _log_grade_done(*, ctx: _GradingCtx, grading_result: Any) -> None:
     log_event(
         logger,
         "grade_done",
-        request_id=req_id,
-        session_id=session_for_ctx,
+        request_id=ctx.request_id,
+        session_id=ctx.session_id,
         status="done",
-        vision_provider=meta_base.get("vision_provider_used"),
-        llm_provider=meta_base.get("llm_provider_used"),
-        llm_used_fallback=meta_base.get("llm_used_fallback"),
-        timings_ms=timings_ms,
+        vision_provider=ctx.meta_base.get("vision_provider_used"),
+        llm_provider=ctx.meta_base.get("llm_provider_used"),
+        llm_used_fallback=ctx.meta_base.get("llm_used_fallback"),
+        timings_ms=ctx.timings_ms,
         wrong_count=getattr(grading_result, "wrong_count", None),
         total_items=getattr(grading_result, "total_items", None),
     )
-    save_grade_progress(session_for_ctx, "done", "批改结果已生成", {"timings_ms": timings_ms})
+
+
+def _build_done_grade_response(
+    *,
+    ctx: _GradingCtx,
+    req: GradeRequest,
+    grading_result: Any,
+    vision_raw_text: str,
+    vision_fallback_warning: Optional[str],
+    extra_warn: Optional[str],
+) -> GradeResponse:
     return GradeResponse(
         wrong_items=grading_result.wrong_items,
         summary=grading_result.summary,
         subject=req.subject,
         job_id=None,
-        session_id=session_for_ctx,
+        session_id=ctx.session_id,
         status="done",
         total_items=grading_result.total_items,
         wrong_count=grading_result.wrong_count,
         cross_subject_flag=grading_result.cross_subject_flag,
         warnings=((grading_result.warnings or []) + ([vision_fallback_warning] if vision_fallback_warning else []))
-        + ([extra_warn] if session_for_ctx and extra_warn else []),
+        + ([extra_warn] if ctx.session_id and extra_warn else []),
+        vision_raw_text=vision_raw_text,
+    )
+
+
+async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse:
+    """执行批改（同步/后台共用）。"""
+    ctx = _init_grading_ctx(req, provider_str)
+    vision_client = VisionClient()
+    vision_fallback_warning: Optional[str] = None
+
+    try:
+        vision_result, vision_fallback_warning = await _run_grade_vision(ctx=ctx, req=req, vision_client=vision_client)
+    except _GradingAbort as abort:
+        return abort.response
+
+    llm_client = LLMClient()
+
+    try:
+        grading_result = await _run_grade_llm(
+            ctx=ctx,
+            req=req,
+            llm_client=llm_client,
+            vision_text=str(getattr(vision_result, "text", "") or ""),
+        )
+
+    except asyncio.TimeoutError as e:
+        _abort_llm_stage_with_vision_only_bank(
+            ctx=ctx,
+            req=req,
+            vision_raw_text=vision_result.text,
+            page_image_urls=ctx.page_image_urls,
+            reason_summary="LLM grading timeout",
+            warn_text=f"LLM timeout: {str(e)}",
+        )
+    except Exception as e:
+        _abort_llm_stage_with_vision_only_bank(
+            ctx=ctx,
+            req=req,
+            vision_raw_text=vision_result.text,
+            page_image_urls=ctx.page_image_urls,
+            reason_summary=f"LLM grading failed: {str(e)}",
+            warn_text=f"LLM error: {str(e)}",
+        )
+
+    # If parsing still failed after fallbacks, treat grading as failed (avoid "done but empty").
+    if _needs_fallback(grading_result):
+        _abort_parse_failed_after_fallbacks(
+            ctx=ctx,
+            req=req,
+            grading_result=grading_result,
+            vision_raw_text=vision_result.text,
+            page_image_urls=ctx.page_image_urls,
+            vision_fallback_warning=vision_fallback_warning,
+        )
+
+    # Persist question bank snapshot (full question list) for chat routing.
+    extra_warn = _persist_done_qbank_snapshot(
+        ctx=ctx,
+        req=req,
+        grading_result=grading_result,
         vision_raw_text=vision_result.text,
+        page_image_urls=ctx.page_image_urls,
+        vision_fallback_warning=vision_fallback_warning,
+    )
+
+    _ensure_grading_counts(grading_result)
+
+    _log_grade_done(ctx=ctx, grading_result=grading_result)
+    save_grade_progress(ctx.session_id, "done", "批改结果已生成", {"timings_ms": ctx.timings_ms})
+    return _build_done_grade_response(
+        ctx=ctx,
+        req=req,
+        grading_result=grading_result,
+        vision_raw_text=vision_result.text,
+        vision_fallback_warning=vision_fallback_warning,
+        extra_warn=extra_warn,
     )
 
 
@@ -1281,7 +701,7 @@ async def grade_homework(
     批改作业 API (Stub)
     """
     # 1. Resolve images (optional upload_id) + Early Validation
-    user_id = get_user_id(x_user_id)
+    user_id = require_user_id(authorization=request.headers.get("Authorization"), x_user_id=x_user_id)
     upload_id = (getattr(req, "upload_id", None) or "").strip()
     if upload_id and not (req.images or []):
         urls = _resolve_images_from_upload_id(upload_id, user_id=user_id)
@@ -1297,8 +717,8 @@ async def grade_homework(
     request_id = get_request_id_from_headers(request.headers) or f"req_{uuid.uuid4().hex[:12]}"
     try:
         setattr(req, "_request_id", request_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Setting request_id on request failed: {e}")
     log_event(
         logger,
         "grade_request",
@@ -1316,8 +736,8 @@ async def grade_homework(
     if upload_id:
         try:
             touch_submission(user_id=user_id, submission_id=upload_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"touch_submission failed (best-effort): {e}")
 
     # 2. 幂等性校验
     idempotency_key = get_idempotency_key(None, x_idempotency_key)
@@ -1337,8 +757,8 @@ async def grade_homework(
         try:
             subj = req.subject.value if hasattr(req.subject, "value") else str(req.subject)
             link_session_to_submission(user_id=user_id, submission_id=upload_id, session_id=session_for_ctx, subject=subj)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"link_session_to_submission failed (best-effort): {e}")
 
     # 3. 决定同步/异步
     is_large_batch = len(req.images) > 5
@@ -1407,8 +827,8 @@ async def grade_homework(
                     warnings=list(getattr(response, "warnings", None) or []),
                     meta={k: v for k, v in meta_now.items() if v is not None} if isinstance(meta_now, dict) else None,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"update_submission_grade_result failed (best-effort): {e}")
 
         if session_for_ctx:
             wrong_items_payload: List[Dict[str, Any]] = []
@@ -1421,7 +841,8 @@ async def grade_homework(
                     # last resort: attempt dict() conversion
                     try:
                         wrong_items_payload.append(dict(item))
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"dict conversion for wrong_item failed: {e}")
                         continue
             save_mistakes(session_for_ctx, wrong_items_payload)
             # QIndex: optional background optimization (bbox/slice). Default: skip for speed.
@@ -1436,7 +857,8 @@ async def grade_homework(
             must_slice = False
             try:
                 must_slice = _visual_risk_warning_text() in (response.warnings or [])
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Checking visual risk warning failed: {e}")
                 must_slice = False
             if page_urls and isinstance(bank, dict) and (should_create_slices_for_bank(bank) or must_slice):
                 ok, reason = qindex_is_configured()
@@ -1450,7 +872,8 @@ async def grade_homework(
                             qs = bank.get("questions")
                             if isinstance(qs, dict):
                                 allow = [str(k) for k in qs.keys() if str(k).strip()]
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Fallback question number extraction failed: {e}")
                             allow = []
                     enqueued = enqueue_qindex_job(
                         session_for_ctx,

@@ -77,15 +77,14 @@ python -m homework_agent.workers.qindex_worker
 
 | 脚本 | 描述 | 关键点 |
 |------|------|--------|
-| `scripts/verify_stability.py` | **核心稳定性测试** | API 防呆、重试逻辑、RateLimit 截断、E2E 冒烟 |
-| `scripts/verify_grade_llm.py` | 评分逻辑验证 | 验证 JSON 结构和 Prompt 有效性 |
-| `scripts/verify_socratic_tutor.py` | 辅导流程验证 | 模拟多轮对话，检查启发式递进策略（无硬上限） |
-| `scripts/verify_vision_qwen.py` | 视觉服务验证 | 测试 SiliconFlow Qwen3 调用 |
-| `scripts/e2e_grade_chat.py` | **最小回归冒烟** | /grade→session→/chat（按题号对话） |
+| `scripts/e2e_grade_chat.py` | 端到端冒烟 | `/uploads` → `/grade(upload_id)` → `/chat`（SSE） |
+| `scripts/verify_qindex_status.py` | qindex/TTL 验证 | `/session/{sid}/qbank` + Redis key/TTL +（可选）自动跑 `/uploads`+`/grade` |
+| `scripts/verify_vision_qwen.py` | Vision 直连验证 | 直调 SiliconFlow Qwen3（需配置 key/model） |
+| `scripts/verify_vision_ark.py` | Vision 直连验证 | 直调 Ark/Doubao Vision（需配置 key/model） |
 
 运行示例：
 ```bash
-python scripts/verify_stability.py
+./.venv/bin/pytest -q
 ```
 
 ---

@@ -69,9 +69,81 @@ DEMO_GRADE_TIMEOUT_SECONDS = float(
     os.getenv("DEMO_GRADE_TIMEOUT_SECONDS", str(_settings.grade_completion_sla_seconds + 60))
 )
 DEMO_USER_ID = (os.getenv("DEMO_USER_ID") or os.getenv("DEV_USER_ID") or "dev_user").strip() or "dev_user"
+DEMO_AUTH_TOKEN = (os.getenv("DEMO_AUTH_TOKEN") or "").strip()
 DEMO_HEADERS = {"X-User-Id": DEMO_USER_ID}
+if DEMO_AUTH_TOKEN:
+    DEMO_HEADERS["Authorization"] = f"Bearer {DEMO_AUTH_TOKEN}"
 
 _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+
+def _build_demo_headers(*, auth_token: Optional[str]) -> Dict[str, str]:
+    """
+    Build request headers for backend calls.
+    - If auth_token is present, use Authorization Bearer (Phase B demo login).
+    - Otherwise fall back to X-User-Id (dev mode).
+    """
+    headers: Dict[str, str] = {"X-User-Id": DEMO_USER_ID}
+    token = (auth_token or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _supabase_auth_endpoint(path: str) -> str:
+    url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+    return f"{url}{path}"
+
+
+def _supabase_anon_key() -> str:
+    return (os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY") or "").strip()
+
+
+def supabase_sign_in_with_password(email: str, password: str) -> Tuple[str, str]:
+    """Return (access_token, user_id)."""
+    key = _supabase_anon_key()
+    if not key:
+        raise ValueError("SUPABASE_KEY 未配置（需要 anon key）")
+    url = _supabase_auth_endpoint("/auth/v1/token?grant_type=password")
+    with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+        r = client.post(
+            url,
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            json={"email": email, "password": password},
+        )
+    if r.status_code != 200:
+        raise Exception(f"登录失败: {r.status_code} - {r.text}")
+    data = r.json() if r.content else {}
+    token = (data.get("access_token") or "").strip() if isinstance(data, dict) else ""
+    user = data.get("user") if isinstance(data, dict) else None
+    uid = (user.get("id") or "").strip() if isinstance(user, dict) else ""
+    if not token or not uid:
+        raise Exception("登录响应缺少 access_token/user.id")
+    return token, uid
+
+
+def supabase_sign_up(email: str, password: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Return (access_token?, user_id?).
+    Some projects require email confirmation and won't return a token immediately.
+    """
+    key = _supabase_anon_key()
+    if not key:
+        raise ValueError("SUPABASE_KEY 未配置（需要 anon key）")
+    url = _supabase_auth_endpoint("/auth/v1/signup")
+    with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+        r = client.post(
+            url,
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            json={"email": email, "password": password},
+        )
+    if r.status_code not in (200, 201):
+        raise Exception(f"注册失败: {r.status_code} - {r.text}")
+    data = r.json() if r.content else {}
+    token = (data.get("access_token") or "").strip() if isinstance(data, dict) else ""
+    user = data.get("user") if isinstance(data, dict) else None
+    uid = (user.get("id") or "").strip() if isinstance(user, dict) else ""
+    return (token or None), (uid or None)
 
 
 def _render_stage_lines(stage: str, elapsed_s: int) -> str:
@@ -131,7 +203,7 @@ def _render_stage_lines(stage: str, elapsed_s: int) -> str:
     )
 
 
-def upload_to_backend(file_path: str, *, session_id: Optional[str]) -> Dict[str, Any]:
+def upload_to_backend(file_path: str, *, session_id: Optional[str], auth_token: Optional[str]) -> Dict[str, Any]:
     """上传文件到后端 /uploads，并返回 {upload_id, page_image_urls, ...}。"""
     if not file_path or not os.path.exists(file_path):
         raise ValueError("文件不存在")
@@ -150,7 +222,12 @@ def upload_to_backend(file_path: str, *, session_id: Optional[str]) -> Dict[str,
     with open(file_path, "rb") as f:
         files = {"file": (filename, f, content_type)}
         with httpx.Client(timeout=120.0) as client:
-            r = client.post(f"{API_BASE_URL}/uploads", files=files, params=params, headers=DEMO_HEADERS)
+            r = client.post(
+                f"{API_BASE_URL}/uploads",
+                files=files,
+                params=params,
+                headers=_build_demo_headers(auth_token=auth_token),
+            )
     if r.status_code != 200:
         raise Exception(f"上传失败: {r.status_code} - {r.text}")
     data = r.json()
@@ -236,7 +313,14 @@ def format_grading_result(result: Dict[str, Any]) -> str:
     return md
 
 
-async def call_grade_api(*, upload_id: str, subject: str, provider: str, session_id: str) -> Dict[str, Any]:
+async def call_grade_api(
+    *,
+    upload_id: str,
+    subject: str,
+    provider: str,
+    session_id: str,
+    auth_token: Optional[str],
+) -> Dict[str, Any]:
     """调用后端 /api/v1/grade（推荐：upload_id -> 后端反查 images）。"""
     payload = {
         "images": [],
@@ -251,7 +335,7 @@ async def call_grade_api(*, upload_id: str, subject: str, provider: str, session
         response = await client.post(
             f"{API_BASE_URL}/grade",
             json=payload,
-            headers=DEMO_HEADERS,
+            headers=_build_demo_headers(auth_token=auth_token),
         )
 
     if response.status_code != 200:
@@ -259,13 +343,17 @@ async def call_grade_api(*, upload_id: str, subject: str, provider: str, session
 
     return response.json()
 
-async def call_grade_progress(session_id: str) -> Optional[Dict[str, Any]]:
+
+async def call_grade_progress(session_id: str, *, auth_token: Optional[str]) -> Optional[Dict[str, Any]]:
     """轮询后端 /session/{session_id}/progress，获取实时阶段信息（best-effort）。"""
     if not session_id:
         return None
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{API_BASE_URL}/session/{session_id}/progress")
+            r = await client.get(
+                f"{API_BASE_URL}/session/{session_id}/progress",
+                headers=_build_demo_headers(auth_token=auth_token),
+            )
         if r.status_code != 200:
             return None
         data = r.json()
@@ -274,13 +362,16 @@ async def call_grade_progress(session_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-async def call_qbank_meta(session_id: str) -> Optional[Dict[str, Any]]:
+async def call_qbank_meta(session_id: str, *, auth_token: Optional[str]) -> Optional[Dict[str, Any]]:
     """读取后端 qbank 元信息，用于解释本次批改链路（vision/llm 走了哪条路、耗时等）。"""
     if not session_id:
         return None
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{API_BASE_URL}/session/{session_id}/qbank")
+            r = await client.get(
+                f"{API_BASE_URL}/session/{session_id}/qbank",
+                headers=_build_demo_headers(auth_token=auth_token),
+            )
         if r.status_code != 200:
             return None
         return r.json()
@@ -294,6 +385,7 @@ async def call_chat_api(
     subject: str,
     context_item_ids: Optional[List[str]] = None,
     llm_model: Optional[str] = None,
+    auth_token: Optional[str] = None,
 ) -> str:
     """调用后端 /api/v1/chat API
 
@@ -319,7 +411,7 @@ async def call_chat_api(
         response = await client.post(
             f"{API_BASE_URL}/chat",
             json=payload,
-            headers=DEMO_HEADERS,
+            headers=_build_demo_headers(auth_token=auth_token),
         )
 
     if response.status_code != 200:
@@ -352,7 +444,7 @@ async def call_chat_api(
     return content or "无响应"
 
 
-async def grade_homework_logic(img_path, subject, provider):
+async def grade_homework_logic(img_path, subject, provider, auth_token):
     """批改作业主逻辑（流式状态更新）：上传 → Vision → 批改 → 展示结果"""
     # gr.File returns path string or object with .name
     if hasattr(img_path, "name"):
@@ -364,12 +456,15 @@ async def grade_homework_logic(img_path, subject, provider):
 
     session_id = f"demo_{uuid.uuid4().hex[:8]}"
     started = time.monotonic()
+    auth_token = (auth_token or "").strip() or None
 
     try:
         # Step 1: 上传到后端 /uploads（后端落 Supabase Storage，返回 upload_id）
         yield "📝 正在开始批改…", session_id, None, _render_stage_lines("uploading", int(time.monotonic() - started))
 
-        upload_task = asyncio.create_task(asyncio.to_thread(upload_to_backend, img_path, session_id=session_id))
+        upload_task = asyncio.create_task(
+            asyncio.to_thread(upload_to_backend, img_path, session_id=session_id, auth_token=auth_token)
+        )
         while not upload_task.done():
             await asyncio.sleep(0.15)
             yield "📝 正在开始批改…", session_id, None, _render_stage_lines(
@@ -393,13 +488,19 @@ async def grade_homework_logic(img_path, subject, provider):
 
         # Step 2: 调用后端 /grade（upload_id -> 后端反查 images）
         grade_task = asyncio.create_task(
-            call_grade_api(upload_id=upload_id, subject=subject, provider=provider, session_id=session_id)
+            call_grade_api(
+                upload_id=upload_id,
+                subject=subject,
+                provider=provider,
+                session_id=session_id,
+                auth_token=auth_token,
+            )
         )
 
         last_progress_stage = "accepted"
         while not grade_task.done():
             await asyncio.sleep(0.4)
-            p = await call_grade_progress(session_id)
+            p = await call_grade_progress(session_id, auth_token=auth_token)
             if isinstance(p, dict):
                 stage = str(p.get("stage") or "").strip() or last_progress_stage
                 last_progress_stage = stage
@@ -412,7 +513,7 @@ async def grade_homework_logic(img_path, subject, provider):
         result = await grade_task
         # Pull qbank meta for explainability (best-effort; doesn't block grading completion)
         if session_id:
-            qb = await call_qbank_meta(str(session_id))
+            qb = await call_qbank_meta(str(session_id), auth_token=auth_token)
             if qb:
                 result["_qbank_meta"] = qb
 
@@ -432,7 +533,7 @@ async def grade_homework_logic(img_path, subject, provider):
         return
 
 
-async def vision_debug_logic(img_path, provider):
+async def vision_debug_logic(img_path, provider, auth_token):
     """直接调用 Vision 模型，返回原始识别文本（debug_vision 的 UI 化版本）"""
     # gr.File returns path string or object with .name
     if hasattr(img_path, "name"):
@@ -441,9 +542,11 @@ async def vision_debug_logic(img_path, provider):
     if not img_path:
         return "**错误**：请上传图片文件。", ""
 
+    auth_token = (auth_token or "").strip() or None
     try:
         gr.Info("📤 上传到后端 /uploads ...")
-        upload_resp = await asyncio.to_thread(upload_to_backend, img_path, session_id=None)
+        # Vision 调试也走后端 /uploads（统一存储路径、便于后续复用 URL/base64 兜底逻辑）
+        upload_resp = await asyncio.to_thread(upload_to_backend, img_path, session_id=None, auth_token=auth_token)
         urls = upload_resp.get("page_image_urls") or []
         if not (isinstance(urls, list) and urls):
             return "**错误**：上传失败，未获取到 URL。", ""
@@ -455,7 +558,6 @@ async def vision_debug_logic(img_path, provider):
         prompt = "请详细识别并提取这张图片中的所有题目、学生的解答过程和最终答案。请按题目顺序列出。"
         gr.Info("👁️ 正在调用 Vision 模型...")
         # VisionClient.analyze 是同步方法，放线程池避免阻塞
-        import asyncio
         result = await asyncio.to_thread(
             client.analyze,
             images=[ImageRef(url=img_url)],
@@ -476,9 +578,11 @@ async def tutor_chat_logic(
     history: List[Dict[str, str]],
     session_id: str,
     subject: str,
+    auth_token: Optional[str],
 ) -> AsyncGenerator[Tuple[str, List[Dict[str, str]]], None]:
     """苏格拉底辅导逻辑（真实流式：后端 SSE 透传）"""
     history = history or []
+    auth_token = (auth_token or "").strip() or None
 
     # 只允许批改后对话
     if not session_id:
@@ -510,7 +614,12 @@ async def tutor_chat_logic(
 
     try:
         async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("POST", f"{API_BASE_URL}/chat", json=payload, headers=DEMO_HEADERS) as resp:
+            async with client.stream(
+                "POST",
+                f"{API_BASE_URL}/chat",
+                json=payload,
+                headers=_build_demo_headers(auth_token=auth_token),
+            ) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread()).decode("utf-8", errors="ignore")
                     raise Exception(f"API 调用失败: {resp.status_code} - {body}")
@@ -575,6 +684,44 @@ def create_demo():
         if not supports_head:
             gr.HTML(MATHJAX_HEAD)
 
+        auth_token_state = gr.State(value=DEMO_AUTH_TOKEN or "")
+        auth_user_id_state = gr.State(value="")
+
+        def _mask_token(token: str) -> str:
+            t = (token or "").strip()
+            if not t:
+                return ""
+            if len(t) <= 18:
+                return t[:6] + "…" + t[-3:]
+            return f"{t[:10]}…{t[-6:]}"
+
+        def _auth_status_md(token: str, user_id: str) -> str:
+            t = (token or "").strip()
+            uid = (user_id or "").strip()
+            if t:
+                return f"- Auth: ✅ 已登录（Bearer `{_mask_token(t)}`）\n- user_id: `{uid or 'unknown'}`\n"
+            return f"- Auth: ⚠️ 未登录（使用开发模式 header: `X-User-Id={DEMO_USER_ID}`）\n"
+
+        def _auth_login(email: str, password: str, cur_token: str, cur_uid: str):
+            try:
+                token, uid = supabase_sign_in_with_password((email or "").strip(), (password or "").strip())
+                return token, uid, _auth_status_md(token, uid)
+            except Exception as e:
+                return cur_token, cur_uid, f"❌ 登录失败：{str(e)}\n\n{_auth_status_md(cur_token, cur_uid)}"
+
+        def _auth_signup(email: str, password: str, cur_token: str, cur_uid: str):
+            try:
+                token, uid = supabase_sign_up((email or "").strip(), (password or "").strip())
+                if token:
+                    return token, (uid or ""), f"✅ 注册成功并已登录\n\n{_auth_status_md(token, uid or '')}"
+                # Email confirmation required / no session returned.
+                return cur_token, cur_uid, f"✅ 注册成功（可能需要邮箱确认，暂未获得 access_token）\n\n{_auth_status_md(cur_token, cur_uid)}"
+            except Exception as e:
+                return cur_token, cur_uid, f"❌ 注册失败：{str(e)}\n\n{_auth_status_md(cur_token, cur_uid)}"
+
+        def _auth_logout():
+            return "", "", _auth_status_md("", "")
+
         gr.Markdown("""
         # 🎓 作业检查大师 (Homework Agent)
 
@@ -592,6 +739,40 @@ def create_demo():
         - 🌍 URL 要求：必须是公网可访问 (禁止 localhost/内网)
         - 🤖 模型选择：Doubao（默认，仅 URL） / Qwen3（备用，支持 URL+base64）
         """)
+
+        with gr.Accordion("🔐 登录/注册（Supabase Auth，P0-阶段B）", open=False):
+            gr.Markdown(
+                "说明：\n"
+                "- 登录后，demo 会用 `Authorization: Bearer <access_token>` 调用后端；后端会验证 JWT 并以 token 内的 `user.id` 作为可信 `user_id`。\n"
+                "- 未登录时，demo 会用开发模式 `X-User-Id`（仅用于本地调试；上线前会移除）。\n"
+            )
+            with gr.Row():
+                auth_email = gr.Textbox(label="Email", placeholder="you@example.com")
+                auth_password = gr.Textbox(label="Password", type="password", placeholder="••••••••")
+            with gr.Row():
+                btn_login = gr.Button("登录", variant="primary")
+                btn_signup = gr.Button("注册", variant="secondary")
+                btn_logout = gr.Button("退出登录", variant="secondary")
+            auth_status = gr.Markdown(value=_auth_status_md(DEMO_AUTH_TOKEN, ""))
+
+            btn_login.click(
+                fn=_auth_login,
+                inputs=[auth_email, auth_password, auth_token_state, auth_user_id_state],
+                outputs=[auth_token_state, auth_user_id_state, auth_status],
+                show_progress=True,
+            )
+            btn_signup.click(
+                fn=_auth_signup,
+                inputs=[auth_email, auth_password, auth_token_state, auth_user_id_state],
+                outputs=[auth_token_state, auth_user_id_state, auth_status],
+                show_progress=True,
+            )
+            btn_logout.click(
+                fn=_auth_logout,
+                inputs=None,
+                outputs=[auth_token_state, auth_user_id_state, auth_status],
+                show_progress=False,
+            )
 
         with gr.Tabs():
             # ========== Tab 1: 智能批改 ==========
@@ -623,7 +804,7 @@ def create_demo():
 
                 grade_btn.click(
                     fn=grade_homework_logic,
-                    inputs=[input_img, subject_dropdown, provider_dropdown],
+                    inputs=[input_img, subject_dropdown, provider_dropdown, auth_token_state],
                     outputs=[output_md, session_id_state, image_url_state, status_md],
                 )
 
@@ -653,7 +834,7 @@ def create_demo():
                 # 发送消息
                 msg.submit(
                     fn=tutor_chat_logic,
-                    inputs=[msg, chatbot, session_id_state, subject_dropdown],
+                    inputs=[msg, chatbot, session_id_state, subject_dropdown, auth_token_state],
                     outputs=[msg, chatbot],
                 )
 
@@ -686,7 +867,7 @@ def create_demo():
 
                 vision_btn.click(
                     fn=vision_debug_logic,
-                    inputs=[vision_input, vision_provider],
+                    inputs=[vision_input, vision_provider, auth_token_state],
                     outputs=[vision_output, vision_img_url],
                     show_progress=True,
                 )

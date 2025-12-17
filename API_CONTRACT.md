@@ -62,8 +62,17 @@
 - Response：`text/event-stream`
   - `event: heartbeat`：心跳
   - `event: chat`：增量消息（JSON，见 `ChatResponse`）
-  - `event: error`：错误（JSON）
+  - `event: error`：错误（JSON，见 `ErrorPayload`）
   - `event: done`：结束（JSON）
+
+#### ErrorPayload（HTTP JSON / SSE 通用）
+- `code`: string（例如 `E4220` / `E5000`）
+- `error`: string（主要错误信息，旧客户端只需读这个）
+- `message`: string（与 `error` 同义）
+- `details`: object|null（可选，结构化附加信息）
+- `retry_after_ms`: number|null（可选）
+- `request_id`: string|null（可选）
+- `session_id`: string|null（可选）
 
 #### 行为约束（产品要求）
 - chat 必须基于 `/grade` 交付的 qbank/错题上下文对话；缺失则明确提示用户先批改，禁止编造。
@@ -83,4 +92,3 @@
 - Submission（原始图片 + 识别原文 + 批改结果）：长期保留（未来支持用户删除；系统静默 180 天清理）
 - chat_history：7 天
 - qindex slices：7 天
-

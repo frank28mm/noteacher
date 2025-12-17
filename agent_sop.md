@@ -717,7 +717,7 @@ python -m pytest -q
 python -m homework_agent.workers.qindex_worker
 
 # 验证脚本（按需）
-python scripts/verify_stability.py
+./.venv/bin/pytest -q
 ```
 
 ### A.2 配置参数

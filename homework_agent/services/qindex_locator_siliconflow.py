@@ -86,13 +86,26 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
                         start_idx = None
                 continue
 
+    candidates = 0
+    last_err: Optional[str] = None
     for candidate in _balanced_objects(s):
+        candidates += 1
         try:
             obj = json.loads(candidate)
             if isinstance(obj, dict):
                 return obj
-        except Exception:
+        except Exception as e:
+            last_err = f"{e.__class__.__name__}: {e}"
             continue
+    if last_err:
+        log_event(
+            logger,
+            "qindex_locator_parse_failed",
+            level="warning",
+            text_len=len(s),
+            candidates=candidates,
+            error=last_err,
+        )
     return None
 
 
@@ -129,7 +142,15 @@ def _image_url_to_data_url(image_url: str, *, max_side: int = 1600, jpeg_quality
 
     try:
         import httpx
-    except Exception:
+    except Exception as e:
+        log_event(
+            logger,
+            "qindex_data_url_httpx_import_failed",
+            level="warning",
+            image_url=redact_url(u),
+            error_type=e.__class__.__name__,
+            error=str(e),
+        )
         return None
 
     try:
@@ -138,13 +159,29 @@ def _image_url_to_data_url(image_url: str, *, max_side: int = 1600, jpeg_quality
         data = r.content
         if not data:
             return None
-    except Exception:
+    except Exception as e:
+        log_event(
+            logger,
+            "qindex_data_url_download_failed",
+            level="warning",
+            image_url=redact_url(u),
+            error_type=e.__class__.__name__,
+            error=str(e),
+        )
         return None
 
     try:
         img = Image.open(io.BytesIO(data))
         img.load()
-    except Exception:
+    except Exception as e:
+        log_event(
+            logger,
+            "qindex_data_url_decode_failed",
+            level="warning",
+            image_url=redact_url(u),
+            error_type=e.__class__.__name__,
+            error=str(e),
+        )
         return None
 
     try:
@@ -161,7 +198,15 @@ def _image_url_to_data_url(image_url: str, *, max_side: int = 1600, jpeg_quality
         img.save(out, format="JPEG", quality=int(jpeg_quality), optimize=True)
         b64 = base64.b64encode(out.getvalue()).decode("ascii")
         return f"data:image/jpeg;base64,{b64}"
-    except Exception:
+    except Exception as e:
+        log_event(
+            logger,
+            "qindex_data_url_encode_failed",
+            level="warning",
+            image_url=redact_url(u),
+            error_type=e.__class__.__name__,
+            error=str(e),
+        )
         return None
 
 
@@ -291,7 +336,16 @@ class SiliconFlowQIndexLocator:
                     temperature=0,
                     response_format={"type": "json_object"},
                 )
-            except Exception:
+            except Exception as e:
+                log_event(
+                    logger,
+                    "qindex_locate_response_format_unsupported",
+                    level="warning",
+                    provider="siliconflow",
+                    model=self.model,
+                    error_type=e.__class__.__name__,
+                    error=str(e),
+                )
                 resp = client.chat.completions.create(
                     model=self.model,
                     messages=messages,

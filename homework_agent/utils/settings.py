@@ -142,6 +142,10 @@ class Settings(BaseSettings):
         validation_alias="LOG_FILE_PATH",
     )
 
+    # Auth (Phase A): when enabled, endpoints require Authorization: Bearer <jwt>
+    # and will derive user_id from Supabase Auth token; otherwise dev fallback applies.
+    auth_required: bool = Field(default=False, validation_alias="AUTH_REQUIRED")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

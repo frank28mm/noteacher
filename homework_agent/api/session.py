@@ -77,8 +77,8 @@ def persist_question_bank(
         meta["vision_raw_len"] = int(len(bank.get("vision_raw_text") or ""))
         meta["questions_count"] = int(len(bank.get("questions") or {})) if isinstance(bank.get("questions"), dict) else 0
         meta["questions_with_options"] = int(_count_questions_with_options(bank))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Meta stats calculation failed: {e}")
     bank["meta"] = meta
     save_question_bank(session_id, bank)
     try:
@@ -92,8 +92,8 @@ def persist_question_bank(
             vision_raw_len=meta.get("vision_raw_len"),
             timings_ms=meta.get("timings_ms"),
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"qbank_saved log_event failed: {e}")
 
 
 def _merge_bank_meta(bank: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -122,8 +122,8 @@ def _coerce_ts(v: Any) -> Optional[float]:
             return None
         try:
             return float(s)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Parsing float timestamp failed: {e}")
         try:
             return float(datetime.fromisoformat(s).timestamp())
         except Exception:

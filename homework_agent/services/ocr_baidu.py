@@ -104,8 +104,15 @@ class BaiduPaddleOCRVLClient:
                     name = path.rsplit("/", 1)[-1].strip()
                     if name and "." in name:
                         return name[:128]
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_event(
+                        logger,
+                        "baidu_ocr_infer_filename_failed",
+                        level="warning",
+                        image_url=redact_url(image_url),
+                        error_type=e.__class__.__name__,
+                        error=str(e),
+                    )
             # Fallback: Baidu requires a suffix; use jpg by default.
             return "document.jpg"
 
@@ -312,12 +319,14 @@ class BaiduPaddleOCRVLClient:
                 pages=len(data.get("pages") or []) if isinstance(data, dict) else None,
             )
             return data if isinstance(data, dict) else None
-        except Exception:
+        except Exception as e:
             log_event(
                 logger,
                 "baidu_ocr_parse_result_fetch_failed",
                 level="warning",
                 parse_result_url=redact_url(parse_result_url),
+                error_type=e.__class__.__name__,
+                error=str(e),
             )
             return None
 
@@ -372,9 +381,14 @@ class BaiduPaddleOCRVLClient:
                         blocks=len(blocks),
                     )
                     return blocks
-        except Exception:
-            # Fall back to legacy extraction below.
-            pass
+        except Exception as e:
+            log_event(
+                logger,
+                "baidu_ocr_blocks_extract_failed",
+                level="warning",
+                error_type=e.__class__.__name__,
+                error=str(e),
+            )
 
         # Common nesting patterns
         candidates: List[Any] = []

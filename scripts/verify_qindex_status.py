@@ -55,6 +55,31 @@ def _json_loads_bytes(data: Any) -> Optional[Dict[str, Any]]:
     return obj if isinstance(obj, dict) else None
 
 
+def _build_headers(*, user_id: Optional[str], auth_token: Optional[str]) -> Dict[str, str]:
+    uid = (user_id or os.getenv("DEV_USER_ID") or "dev_user").strip() or "dev_user"
+    token = (auth_token or os.getenv("DEMO_AUTH_TOKEN") or "").strip()
+    headers: Dict[str, str] = {"X-User-Id": uid}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _upload_file_to_backend(*, api_base: str, file_path: str, session_id: str, headers: Dict[str, str]) -> Dict[str, Any]:
+    if not file_path or not os.path.exists(file_path):
+        raise ValueError(f"file not found: {file_path}")
+    filename = os.path.basename(file_path)
+    with open(file_path, "rb") as f:
+        files = {"file": (filename, f, "application/octet-stream")}
+        with httpx.Client(timeout=120.0) as http:
+            r = http.post(f"{api_base}/uploads", files=files, params={"session_id": session_id}, headers=headers)
+    if r.status_code != 200:
+        raise RuntimeError(f"/uploads failed {r.status_code}: {r.text[:400]}")
+    data = r.json()
+    if not isinstance(data, dict) or not data.get("upload_id"):
+        raise RuntimeError(f"/uploads returned unexpected body: {data}")
+    return data
+
+
 def _redis_client():
     try:
         import redis  # type: ignore
@@ -169,34 +194,39 @@ def _run_grade_and_get_session_id(
     image_url: Optional[str],
     image_file: Optional[str],
     session_id: Optional[str],
+    headers: Dict[str, str],
 ) -> str:
     import uuid
 
     if not image_url and not image_file:
         raise ValueError("Must provide --image-url or --image-file when session_id is not provided")
 
-    resolved_url = image_url
-    if image_file:
-        from homework_agent.utils.supabase_client import get_storage_client
-
-        client = get_storage_client()
-        urls = client.upload_files(image_file, prefix="verify/", min_side=14)
-        resolved_url = urls[0]
-
-    if not resolved_url:
-        raise RuntimeError("Failed to resolve image_url")
-
     sid = (session_id or "").strip() or f"verify_{uuid.uuid4().hex[:8]}"
-    payload = {
-        "images": [{"url": resolved_url}],
+    resolved_url = image_url
+    upload_id: Optional[str] = None
+    if image_file:
+        up = _upload_file_to_backend(api_base=api_base, file_path=image_file, session_id=sid, headers=headers)
+        upload_id = str(up.get("upload_id"))
+        urls = up.get("page_image_urls") or []
+        if isinstance(urls, list) and urls and not resolved_url:
+            resolved_url = str(urls[0])
+
+    if not (upload_id or resolved_url):
+        raise RuntimeError("Failed to resolve image input")
+
+    payload: Dict[str, Any] = {
+        "images": [],
+        "upload_id": upload_id,
         "subject": subject,
         "session_id": sid,
         "vision_provider": vision_provider,
     }
+    if not upload_id:
+        payload["images"] = [{"url": resolved_url}]
 
     print(f"[AUTO] /grade session_id={sid} vision_provider={vision_provider} subject={subject}")
     with httpx.Client(timeout=900.0) as http:
-        r = http.post(f"{api_base}/grade", json=payload)
+        r = http.post(f"{api_base}/grade", json=payload, headers=headers)
         if r.status_code != 200:
             raise RuntimeError(f"/grade failed {r.status_code}: {r.text[:400]}")
         resp = r.json()
@@ -207,7 +237,7 @@ def _run_grade_and_get_session_id(
             print(f"[AUTO] /grade offloaded to job_id={job_id}, polling /jobs/{job_id} ...")
             deadline = time.monotonic() + 300.0
             while time.monotonic() < deadline:
-                jr = http.get(f"{api_base}/jobs/{job_id}")
+                jr = http.get(f"{api_base}/jobs/{job_id}", headers=headers)
                 if jr.status_code != 200:
                     time.sleep(2.0)
                     continue
@@ -226,7 +256,9 @@ def main() -> int:
     parser.add_argument("--vision-provider", default="doubao", choices=["doubao", "qwen3"])
     parser.add_argument("--session-id", default=None, help="If omitted, will run /grade when image is provided")
     parser.add_argument("--image-url", default=None, help="Run /grade first and use returned session_id")
-    parser.add_argument("--image-file", default=None, help="Run /grade first after uploading to Supabase")
+    parser.add_argument("--image-file", default=None, help="Run /uploads then /grade with returned upload_id")
+    parser.add_argument("--user-id", default=None, help="Dev fallback (X-User-Id). Defaults to DEV_USER_ID.")
+    parser.add_argument("--auth-token", default=None, help="Bearer token (Supabase JWT). Defaults to DEMO_AUTH_TOKEN.")
     parser.add_argument("--start-worker", action="store_true", help="Start qindex worker locally for this run")
     parser.add_argument("--worker-log", default="logs/qindex_worker_verify.log", help="Worker log file path")
     parser.add_argument("--wait-seconds", type=int, default=0)
@@ -235,6 +267,7 @@ def main() -> int:
     args = parser.parse_args()
 
     load_dotenv(".env")
+    headers = _build_headers(user_id=args.user_id, auth_token=args.auth_token)
 
     worker_proc: Optional[subprocess.Popen] = None
     try:
@@ -251,6 +284,7 @@ def main() -> int:
                     image_url=args.image_url,
                     image_file=args.image_file,
                     session_id=None,
+                    headers=headers,
                 )
             except Exception as e:
                 print(f"[AUTO] FAIL: {e}", file=sys.stderr)
@@ -260,7 +294,7 @@ def main() -> int:
         api_meta: Dict[str, Any] = {}
         try:
             with httpx.Client(timeout=15.0) as http:
-                r = http.get(f"{args.api_base}/session/{session_id}/qbank")
+                r = http.get(f"{args.api_base}/session/{session_id}/qbank", headers=headers)
             if r.status_code == 200:
                 api_meta = r.json()
             else:

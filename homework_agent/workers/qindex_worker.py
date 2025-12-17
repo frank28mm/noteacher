@@ -110,8 +110,15 @@ def main() -> int:
                 uid = str(sub.get("user_id") or "").strip()
                 if sid and uid:
                     persist_qindex_slices(user_id=uid, submission_id=sid, session_id=job.session_id, qindex=index)
-            except Exception:
-                pass
+            except Exception as e:
+                log_event(
+                    logger,
+                    "qindex_slices_persist_failed",
+                    level="warning",
+                    session_id=job.session_id,
+                    error_type=e.__class__.__name__,
+                    error=str(e),
+                )
             log_event(
                 logger,
                 "qindex_job_done",

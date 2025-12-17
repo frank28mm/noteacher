@@ -79,7 +79,15 @@ def _as_data_uri(url: str, *, timeout_seconds: float) -> Optional[str]:
             return None
         b64 = base64.b64encode(data).decode("ascii")
         return f"data:{ct};base64,{b64}"
-    except Exception:
+    except Exception as e:
+        log_event(
+            logger,
+            "silicon_ocr_data_uri_download_failed",
+            level="warning",
+            image_url=redact_url(url),
+            error_type=e.__class__.__name__,
+            error=str(e),
+        )
         return None
 
 
@@ -159,8 +167,17 @@ class SiliconFlowDeepSeekOCRClient:
                     temperature=0,
                     response_format={"type": "json_object"},
                 )
-            except Exception:
+            except Exception as e:
                 # Some OpenAI-compatible servers may not support response_format yet.
+                log_event(
+                    logger,
+                    "silicon_ocr_response_format_unsupported",
+                    level="warning",
+                    provider="siliconflow",
+                    model=self.model,
+                    error_type=e.__class__.__name__,
+                    error=str(e),
+                )
                 resp = client.chat.completions.create(
                     model=self.model,
                     messages=messages,
