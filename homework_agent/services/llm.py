@@ -537,6 +537,52 @@ class LLMClient:
                 interaction_count=interaction_count,
             )
 
+    def _extract_slice_url_from_context(self, wrong_item_context: Optional[Dict[str, Any]]) -> Optional[str]:
+        """从辅导上下文中提取切片 URL"""
+        if not wrong_item_context:
+            return None
+
+        focus_question = wrong_item_context.get("focus_question")
+        if not isinstance(focus_question, dict):
+            return None
+
+        # 优先从 image_refs 中提取切片
+        image_refs = focus_question.get("image_refs")
+        if isinstance(image_refs, dict):
+            pages = image_refs.get("pages")
+            if isinstance(pages, list):
+                for p in pages:
+                    if not isinstance(p, dict):
+                        continue
+                    # 优先选择 slice_image_urls（列表）
+                    slice_urls = p.get("slice_image_urls")
+                    if isinstance(slice_urls, list) and slice_urls:
+                        return str(slice_urls[0])
+                    # 备选：slice_image_url（单个）
+                    slice_url = p.get("slice_image_url")
+                    if slice_url:
+                        return str(slice_url)
+                    # 再备选：regions 中的切片
+                    regions = p.get("regions")
+                    if isinstance(regions, list):
+                        for r in regions:
+                            if isinstance(r, dict):
+                                r_slice = r.get("slice_image_url")
+                                if r_slice:
+                                    return str(r_slice)
+
+        # 回退到 page_image_urls
+        page_urls = focus_question.get("page_image_urls")
+        if isinstance(page_urls, list) and page_urls:
+            return str(page_urls[0])
+
+        # 最后一个回退：单个 page_image_url
+        page_url = focus_question.get("page_image_url")
+        if page_url:
+            return str(page_url)
+
+        return None
+
     def socratic_tutor_stream(
         self,
         *,
@@ -593,8 +639,40 @@ class LLMClient:
                     continue
                 messages.append({"role": role, "content": str(content)})
 
-        if not messages or messages[-1]["role"] != "user" or messages[-1]["content"] != str(question):
-            messages.append({"role": "user", "content": str(question)})
+        # 尝试提取切片 URL 并构建多模态消息
+        slice_url = self._extract_slice_url_from_context(wrong_item_context)
+        if slice_url:
+            # 导入下载函数
+            from homework_agent.utils.url_image_helpers import _download_as_data_uri
+
+            # 下载图片并转换为 base64
+            data_uri = _download_as_data_uri(slice_url)
+            if data_uri:
+                # 构建多模态消息：图片 + 文本
+                focus_q = wrong_item_context.get("focus_question") if wrong_item_context else {}
+                qnum = focus_q.get("question_number") if isinstance(focus_q, dict) else "未知题号"
+
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_uri}
+                        },
+                        {
+                            "type": "text",
+                            "text": f"这是第{qnum}题的题目图片切片。请结合图片内容进行辅导。"
+                        }
+                    ]
+                })
+            else:
+                # 下载失败，回退到纯文本
+                if not messages or messages[-1]["role"] != "user" or messages[-1]["content"] != str(question):
+                    messages.append({"role": "user", "content": str(question)})
+        else:
+            # 没有切片 URL，使用纯文本
+            if not messages or messages[-1]["role"] != "user" or messages[-1]["content"] != str(question):
+                messages.append({"role": "user", "content": str(question)})
 
         model = model_override or (self.silicon_model if provider == "silicon" else self.ark_model)
         stream = client.chat.completions.create(
