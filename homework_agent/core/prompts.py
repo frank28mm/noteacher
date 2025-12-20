@@ -23,6 +23,7 @@ Output strict JSON with these top-level fields only:
 - wrong_count: int (包含缺答)
 - cross_subject_flag: bool
 - warnings: array
+Do NOT add extra keys or trailing text. Ensure the JSON is complete and closed.
 </output_schema>
 
 <question_fields>
@@ -31,11 +32,32 @@ Each question must include:
 - verdict: "correct" | "incorrect" | "uncertain"
 - question_content: string (题干概要)
 - student_answer: string (学生作答；未作答写 "未作答")
-- reason: string (判定依据)
+- reason: string (判定结论，一句话)
+- judgment_basis: array (必填，判定所依据的事实/推理，中文短句)
 - warnings: array (如 "可能误读公式：…")
 - knowledge_tags: array
 - math_steps: array (仅 incorrect/uncertain，最多 1 条首错步骤)
 </question_fields>
+
+<judgment_basis_rules>
+judgment_basis 必须填写，用于向用户解释"你是如何判断的"：
+- 遵循推理链结构：观察 → 定义/规则 → 结论
+- 每条可包含因果推理，如"因为...所以..."、"根据...得出..."
+- 不限制条数，根据题目复杂度自行决定（简单题 2-3 条，复杂题可 5-10 条）
+- 对于几何题，必须明确：截线是什么、两线位置关系、两角位置关系
+- 最后一条应是判定结论（如"符合XX定义"或"学生误用XX"）
+- 若学生答案错误，需指出学生的具体错误（如"学生用同位角判定，但同位角需在截线同侧"）
+- 若无法确定判定，应说明原因（如"图像模糊，无法确认位置关系"）
+- 数学公式用 $...$ 包裹，如 $\angle 1$、$AB \parallel CD$、$x^{2}$
+- 适用于所有题型：几何、函数、代数、统计等
+示例（几何-内错角）：
+  1. "$DC$ 为截线，$AD$、$BC$ 为被截线"
+  2. "$\angle 2$ 在 D 点截线左侧，$\angle BCD$ 在 C 点截线右侧"
+  3. "因为两角都在被截线之间、截线两侧，所以符合内错角定义"
+  4. "学生用同位角判定，但同位角需在截线同侧，不符合"
+</judgment_basis_rules>
+
+
 
 <grading_rules>
 1. 全覆盖：每题必须有 verdict，即使全对也输出 questions。
@@ -44,30 +66,36 @@ Each question must include:
 4. 误读公式处理：
    - 若识别文本含"可能误读公式/指数可能误读"，优先选择与学生作答一致的版本判定
    - 若两版本都可能 → verdict=uncertain，不要判 incorrect
-5. 终检：判定前独立重算，核对符号/常数/幂次；发现不一致在 warnings 说明。
+5. 终检：判定前独立重算（仅限代数/数值），核对符号/常数/幂次；发现不一致在 warnings 说明。
+   图形位置关系不得凭空推理：必须以识别文本与 [visual_facts] 为准。
+   若 visual_facts 缺失/unknowns 过多，可继续判定，但需在 warnings 写明"视觉事实缺失，结果可能不稳"。
 6. 控制输出：不输出 standard_answer；geometry_check 本阶段不输出。
 </grading_rules>
 
 <process>
 1) 列出每题：题号 + 题干 + 学生作答
 2) 判定 verdict（可内部推导，不输出过程）
-3) 仅对 incorrect/uncertain：填 1 条 math_steps (index/verdict/expected/observed/hint/severity)
-4) 幂/分式敏感：指数不确定时标 uncertain，warnings 写"指数可能误读"
-5) 生成 knowledge_tags 和 cross_subject_flag
-6) 汇总 summary："发现X处错误，其中Y题未作答"
+3) 填写 judgment_basis：列出判定依据（必填）
+4) 仅对 incorrect/uncertain：填 1 条 math_steps (index/verdict/expected/observed/hint/severity)
+5) 幂/分式敏感：指数不确定时标 uncertain，warnings 写"指数可能误读"
+6) 生成 knowledge_tags 和 cross_subject_flag
+7) 汇总 summary："发现X处错误，其中Y题未作答"
 </process>
 
 <output_example>
 {
-  "summary": "发现1处错误：题3误选D",
+  "summary": "发现1处错误：题9推理依据错误",
   "questions": [
-    {"question_number": "3", "verdict": "incorrect", "question_content": "...", "student_answer": "D", "reason": "...", "warnings": [], "knowledge_tags": ["Math","Algebra"], "math_steps": [{"index":2,"verdict":"incorrect","expected":"k=±6","observed":"k=±3","hint":"回顾完全平方展开","severity":"concept"}]}
+    {"question_number": "9", "verdict": "incorrect", "question_content": "说明AD∥BC", "student_answer": "同位角相等，两直线平行", "reason": "应使用内错角相等，而非同位角", "judgment_basis": ["DC 为截线，AD、BC 为被截线", "∠2 在 D 点截线左侧，∠BCD 在 C 点截线右侧", "因为两角在截线两侧且都在被截线之间，所以符合内错角定义", "学生用同位角判定，但同位角需在截线同侧，不符合"], "warnings": [], "knowledge_tags": ["Math","Geometry"], "math_steps": [{"index":3,"verdict":"incorrect","expected":"内错角相等","observed":"同位角相等","hint":"区分内错角和同位角的位置关系","severity":"concept"}]},
+    {"question_number": "10", "verdict": "correct", "question_content": "DF与AE平行吗", "student_answer": "内错角相等，两直线平行", "reason": "推理正确", "judgment_basis": ["CD⊥AD 得∠CDA=90°，DA⊥AB 得∠DAB=90°", "∠1=∠2，等式两边各减相等的角", "∠FDA=∠DAE为内错角相等", "DF∥AE判定正确"], "warnings": [], "knowledge_tags": ["Math","Geometry"], "math_steps": []}
   ],
-  "wrong_items": [{"reason": "题3选项错误", "knowledge_tags": ["Math","Algebra"], "math_steps": [...]}],
-  "total_items": 5, "wrong_count": 1, "cross_subject_flag": false, "warnings": []
+  "wrong_items": [{"question_number": "9", "reason": "推理依据错误", "judgment_basis": ["DC 为截线，AD、BC 为被截线", "∠2 和 ∠BCD 符合内错角定义", "学生用同位角判定，但同位角需在截线同侧"], "knowledge_tags": ["Math","Geometry"], "math_steps": []}],
+  "total_items": 4, "wrong_count": 1, "cross_subject_flag": false, "warnings": []
 }
 </output_example>
+
 """
+
 
 # --- English Grader Prompt (Optimized) ---
 ENGLISH_GRADER_SYSTEM_PROMPT = """
@@ -97,7 +125,8 @@ Each question must include:
 - verdict: "correct" | "incorrect" | "uncertain"
 - question_content: string
 - student_answer: string
-- reason: string
+- reason: string (判定结论，一句话)
+- judgment_basis: array (必填，判定所依据的事实/推理，中文短句)
 - warnings: array
 - knowledge_tags: array
 - semantic_score: float (0-1, if applicable)
@@ -105,22 +134,35 @@ Each question must include:
 - keywords_used: array
 </question_fields>
 
+<judgment_basis_rules>
+judgment_basis 必须填写，用于解释"你是如何判断的"：
+- 列出与判定直接相关的事实或推理
+- 用简洁中文短句，条数由你自行决定
+- 适用于所有英语题型：翻译、语法、阅读理解、写作等
+- 示例：
+  - 翻译: "原句动词 play 表示'踢(球)'", "学生译为'玩耍'偏离语义"
+  - 语法: "句型应为 used to do", "学生误用 used to doing"
+  - 阅读: "原文第二段明确提到 the author disagrees", "学生选项与原文矛盾"
+</judgment_basis_rules>
+
 <grading_rules>
 1. 全覆盖：每题必须有 verdict。
 2. 未作答 → verdict=incorrect。
 3. 不确定 → verdict=uncertain，reason 说明原因。
 4. 使用指定的 similarity_mode。
+5. 每题必须填写 judgment_basis，不能为空。
 </grading_rules>
 
 <output_example>
 {
   "summary": "翻译偏差：动词使用错误",
-  "questions": [...],
-  "wrong_items": [{"reason": "动词含义偏离原句", "knowledge_tags": ["English","Translation"], "semantic_score": 0.62, "similarity_mode": "strict", "keywords_used": ["play","football"]}],
+  "questions": [{"question_number": "1", "verdict": "incorrect", "question_content": "翻译：He plays football every day", "student_answer": "他每天玩足球", "reason": "动词 play 在此语境应译为'踢'", "judgment_basis": ["play football 固定搭配应译为'踢足球'", "学生译为'玩足球'不符合中文习惯"], "warnings": [], "knowledge_tags": ["English","Translation"], "semantic_score": 0.62, "similarity_mode": "strict", "keywords_used": ["play","football"]}],
+  "wrong_items": [{"question_number": "1", "reason": "动词含义偏离原句", "judgment_basis": ["play football 应译为'踢足球'", "'玩足球'不符合中文表达"], "knowledge_tags": ["English","Translation"], "semantic_score": 0.62, "similarity_mode": "strict", "keywords_used": ["play","football"]}],
   "total_items": 3, "wrong_count": 1, "cross_subject_flag": false, "warnings": []
 }
 </output_example>
 """
+
 
 # --- Socratic Tutor Prompt (Optimized) ---
 SOCRATIC_TUTOR_SYSTEM_PROMPT = """
@@ -134,7 +176,8 @@ SOCRATIC_TUTOR_SYSTEM_PROMPT = """
 - focus_question_number: 当前题号
 - user_corrections: 学生对题干的更正
 - options: 选择题选项（可引用选项原文引导）
-- vision_recheck_text: 图形描述（若有）
+- visual_facts: 视觉事实（结构化 JSON；包含 facts + hypotheses，若有则为“唯一可引用的图上事实来源”）
+- vision_recheck_text: 兼容字段（由 visual_facts 摘要生成；仅作展示/回放）
 
 若提供了 focus_question，直接使用其中信息开始辅导，不要让学生重复粘贴题目。
 </context_usage>
@@ -157,7 +200,8 @@ SOCRATIC_TUTOR_SYSTEM_PROMPT = """
 
 <special_cases>
 1. 题干误读：若 warnings 含"可能误读公式"，先确认关键符号（"题干里是 $b^2$ 还是 $b^3$？"）
-2. 图形题无图：若题干含"如图/看图"但无 vision_recheck_text，明确说"我目前看不到图，无法判断位置关系"，建议学生描述或等待切片
-3. 题目缺失：若无 focus_question 或题干缺失，明确说"未定位到该题内容"，提示换题号或重新上传
+2. 图形题说明：若 visual_facts 缺失或 UNKNOWN 较多，先说明“视觉事实不足”，再基于识别原文给出解释，并提示可能不确定。
+3. 事实优先：若 visual_facts.hypotheses 存在，需检查其 evidence 与 facts 一致；不一致则明确提示不确定
+4. 题目缺失：若无 focus_question 或题干缺失，明确说"未定位到该题内容"，提示换题号或重新上传
 </special_cases>
 """

@@ -7,6 +7,7 @@ import json
 import mimetypes
 import asyncio
 import time
+import re
 import httpx
 import gradio as gr
 from dotenv import load_dotenv
@@ -302,14 +303,345 @@ def format_grading_result(result: Dict[str, Any]) -> str:
             if isinstance(t, dict) and t:
                 md += f"- 耗时(ms): vision={t.get('vision_ms','?')} llm={t.get('llm_ms','?')}\n"
 
-    # Vision 原文（完整展开）
-    vision_raw = result.get("vision_raw_text")
-    if vision_raw:
-        md += "\n### 👁️ Vision 识别原文（完整）\n"
-        md += f"<details open><summary>点击可折叠</summary>\n\n```\n{vision_raw}\n```\n</details>\n"
-    else:
-        md += "\n> 没有返回 vision_raw_text（可能是下载 URL 或模型连接失败）。\n"
+    return md
 
+
+def format_vision_raw_text(result: Dict[str, Any]) -> str:
+    vision_raw = result.get("vision_raw_text")
+    if not vision_raw:
+        return "> 未返回识别原文（可能识别失败或超时）。"
+    # Strip various format markers
+    if "【图形视觉事实】" in vision_raw:
+        vision_raw = vision_raw.split("【图形视觉事实】", 1)[0].strip()
+    vision_raw = re.sub(r"^【OCR识别原文】\s*", "", vision_raw).strip()
+    # Strip ---OCR_TEXT--- markers and VISUAL_FACTS markers
+    vision_raw = re.sub(r"---OCR[识识]?别?原文---\s*", "", vision_raw, flags=re.IGNORECASE).strip()
+    vision_raw = re.sub(r"---END_OCR_TEXT---\s*", "", vision_raw, flags=re.IGNORECASE).strip()
+    vision_raw = re.sub(r"---VISUAL_FACTS_JSON---.*", "", vision_raw, flags=re.DOTALL).strip()
+    vision_raw = re.sub(r"<<<[A-Z_]+>>>\s*", "", vision_raw).strip()
+    vision_raw = re.sub(r"<<<END_[A-Z_]+>>>\s*", "", vision_raw).strip()
+    return (
+        "<details>\n"
+        "<summary>📷 识别原文（点击查看）</summary>\n\n"
+        f"```\n{vision_raw}\n```\n"
+        "</details>"
+    )
+
+
+def _normalize_bool_str(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    s = str(value or "").strip().lower()
+    return s if s in {"true", "false", "unknown"} else "unknown"
+
+
+def _translate_relative(text: str) -> str:
+    if not text:
+        return ""
+    s = str(text).strip()
+    # Remove common prefixes like "line ", "point "
+    s = re.sub(r"\bline\s+", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bpoint\s+", "", s, flags=re.IGNORECASE)
+    parts = re.split(r"[;，,]", s)
+    out: List[str] = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        m = re.match(r"left_of\s*(.+)", p, flags=re.IGNORECASE)
+        if m:
+            out.append(f"在 {m.group(1).strip()} 左侧")
+            continue
+        m = re.match(r"right_of\s*(.+)", p, flags=re.IGNORECASE)
+        if m:
+            out.append(f"在 {m.group(1).strip()} 右侧")
+            continue
+        m = re.match(r"above\s*(.+)", p, flags=re.IGNORECASE)
+        if m:
+            out.append(f"在 {m.group(1).strip()} 上方")
+            continue
+        m = re.match(r"below\s*(.+)", p, flags=re.IGNORECASE)
+        if m:
+            out.append(f"在 {m.group(1).strip()} 下方")
+            continue
+        m = re.match(r"connects\s*(.+)", p, flags=re.IGNORECASE)
+        if m:
+            out.append(f"连接 {m.group(1).strip()}")
+            continue
+        m = re.match(r"on\s+(.+)", p, flags=re.IGNORECASE)
+        if m:
+            out.append(f"在 {m.group(1).strip()} 上")
+            continue
+        # Pattern: "X is above Y" -> "X 在 Y 上方"
+        m = re.match(r"(.+?)\s+is\s+above\s+(.+)", p, flags=re.IGNORECASE)
+        if m:
+            out.append(f"{m.group(1).strip()} 在 {m.group(2).strip()} 上方")
+            continue
+        m = re.match(r"(.+?)\s+is\s+below\s+(.+)", p, flags=re.IGNORECASE)
+        if m:
+            out.append(f"{m.group(1).strip()} 在 {m.group(2).strip()} 下方")
+            continue
+        m = re.match(r"(.+?)\s+is\s+left\s+of\s+(.+)", p, flags=re.IGNORECASE)
+        if m:
+            out.append(f"{m.group(1).strip()} 在 {m.group(2).strip()} 左侧")
+            continue
+        m = re.match(r"(.+?)\s+is\s+right\s+of\s+(.+)", p, flags=re.IGNORECASE)
+        if m:
+            out.append(f"{m.group(1).strip()} 在 {m.group(2).strip()} 右侧")
+            continue
+        m = re.match(r"(.+?)\s+is\s+(?:vertical|horizontal)", p, flags=re.IGNORECASE)
+        if m:
+            # Keep as-is but translate keywords
+            translated = p.replace("is vertical", "是竖直的").replace("is horizontal", "是水平的")
+            out.append(translated)
+            continue
+        out.append(p)
+    return "；".join(out)
+
+
+
+def _direction_zh(direction: str) -> str:
+    d = (direction or "").strip().lower()
+    return {
+        "horizontal": "水平",
+        "vertical": "竖直",
+        "slanted": "倾斜",
+    }.get(d, "方向未知")
+
+
+def _format_visual_facts_nl(vf: Dict[str, Any]) -> List[str]:
+    if not isinstance(vf, dict):
+        return []
+    facts = vf.get("facts") if isinstance(vf.get("facts"), dict) else {}
+    lines: List[str] = []
+    for it in facts.get("lines") or []:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()
+        if not name:
+            continue
+        direction = _direction_zh(str(it.get("direction") or ""))
+        rel = _translate_relative(str(it.get("relative") or ""))
+        if rel:
+            lines.append(f"{name} 为{direction}线段，{rel}")
+        else:
+            lines.append(f"{name} 为{direction}线段")
+    for it in facts.get("points") or []:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()
+        rel = _translate_relative(str(it.get("relative") or ""))
+        if name and rel:
+            lines.append(f"{name} {rel}")
+    for it in facts.get("angles") or []:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()
+        if not name:
+            continue
+        segs = [name]
+        at = str(it.get("at") or "").strip()
+        if at:
+            segs.append(f"在 {at} 点")
+        between = it.get("between") or []
+        if isinstance(between, list) and between:
+            segs.append("夹在 " + " 与 ".join([str(x) for x in between if str(x).strip()]))
+        side = str(it.get("transversal_side") or "").strip().lower()
+        if side in {"left", "right"}:
+            segs.append(f"在截线{('左' if side == 'left' else '右')}侧")
+        between_lines = str(it.get("between_lines") or "").strip().lower()
+        if between_lines == "true":
+            segs.append("在被截线之间")
+        elif between_lines == "false":
+            segs.append("在被截线外侧")
+        lines.append("，".join(segs))
+    for it in facts.get("labels") or []:
+        s = str(it).strip()
+        if s:
+            # Translate common patterns like "30° at point C" -> "30° 在 C 点"
+            s = re.sub(r"\bat\s+(point\s+)?", "在 ", s, flags=re.IGNORECASE)
+            s = s.replace("point ", "")
+            lines.append(s)
+    for it in facts.get("spatial") or []:
+        s = str(it).strip()
+        if s:
+            # Translate spatial relations
+            s = _translate_relative(s) or s
+            lines.append(s)
+    # Unknowns: show what AI couldn't determine
+    unknowns = vf.get("unknowns") or []
+    if unknowns and isinstance(unknowns, list):
+        unknown_strs = [str(u).strip() for u in unknowns if str(u).strip()]
+        if unknown_strs:
+            lines.append(f"不确定：{'、'.join(unknown_strs)}")
+    # Hypotheses: show AI inferences with confidence
+    hypotheses = vf.get("hypotheses") or []
+    for h in hypotheses:
+        if not isinstance(h, dict):
+            continue
+        stmt = str(h.get("statement") or "").strip()
+        conf = h.get("confidence")
+        if stmt:
+            if conf is not None:
+                lines.append(f"AI 推断：{stmt}（置信度 {conf}）")
+            else:
+                lines.append(f"AI 推断：{stmt}")
+    return lines
+
+
+
+def format_grade_report(result: Dict[str, Any]) -> str:
+    """Render grading output with visual_facts evidence merged into wrong items."""
+    md = "✅ 批改完成，以下是识别与批改结果：\n\n"
+    md += (
+        "⚠️ 批改依据说明：以下结果基于 AI 对图片的识别与图形分析，可能存在误读或漏判。\n"
+        "建议核对「识别原文」和「AI 识别依据」后再参考结论。\n\n"
+    )
+
+    status = result.get("status")
+    wrong_items = result.get("wrong_items") or []
+    wrong_count = result.get("wrong_count")
+    if wrong_count is None and isinstance(wrong_items, list):
+        wrong_count = len(wrong_items)
+
+    if status and status != "done":
+        md += "### ❌ 批改失败\n"
+        if result.get("warnings"):
+            md += "原因（warnings）：\n"
+            for w in result.get("warnings") or []:
+                md += f"- {w}\n"
+        return md
+
+    vf_map = result.get("visual_facts")
+    vf_map = vf_map if isinstance(vf_map, dict) else {}
+
+    # Build questions_map to get judgment_basis for all questions
+    questions_list = result.get("questions") or []
+    questions_map: Dict[str, Dict[str, Any]] = {}
+    for q in questions_list:
+        if isinstance(q, dict):
+            qn = q.get("question_number") or q.get("question_index")
+            if qn:
+                questions_map[str(qn)] = q
+
+    def _order_qnums(keys: List[str]) -> List[str]:
+        """Sort question numbers: 1, 2, 3, 5, 5(1), 5(2), 6, 6(1), 6(2), ..., 思维与拓展"""
+        import re
+        def sort_key(k: str):
+            # Extract base number and sub-part: "5(1)" -> (5, 1), "5" -> (5, 0)
+            m = re.match(r'^(\d+)(?:\((\d+)\))?', str(k))
+            if m:
+                base = int(m.group(1))
+                sub = int(m.group(2)) if m.group(2) else 0
+                return (0, base, sub, k)  # numeric first
+            # Non-numeric (e.g., 思维与拓展) go last
+            return (1, 0, 0, k)
+        try:
+            return sorted(keys, key=sort_key)
+        except Exception:
+            return keys
+
+
+    wrong_qns: List[str] = []
+    for item in wrong_items:
+        qnum = item.get("question_number") or item.get("question_index") or item.get("id")
+        if qnum is not None:
+            wrong_qns.append(str(qnum))
+    wrong_qn_set = {str(q) for q in wrong_qns}
+
+    # Get all question numbers from questions list (preferred) or visual_facts (fallback)
+    all_qns_set = set(questions_map.keys()) | set(vf_map.keys())
+    all_qns = _order_qnums(list(all_qns_set))
+    # Filter out internal/English-only question numbers (likely duplicates of Chinese names)
+    # e.g., "thinking_and_expansion" is same as "思维与拓展"
+    internal_qn_patterns = ["thinking_and_expansion", "extra", "bonus"]
+    
+    # Also filter out parent question numbers when sub-questions exist
+    # e.g., if "5(1)", "5(2)" exist, filter out bare "5"
+    import re
+    has_subquestions = set()
+    for q in all_qns:
+        m = re.match(r'^(\d+)\(\d+\)', str(q))
+        if m:
+            has_subquestions.add(m.group(1))
+    
+    correct_qns = [
+        q for q in all_qns 
+        if q not in wrong_qn_set 
+        and q.lower() not in internal_qn_patterns
+        and not (q.replace("_", "").isalpha() and len(q) > 10)  # pure long English likely internal
+        and not (str(q).isdigit() and str(q) in has_subquestions)  # skip bare "5" if "5(1)" exists
+    ]
+
+
+
+
+    md += "📊 批改结果\n"
+    if correct_qns:
+        correct_count = len(correct_qns)
+    elif result.get("total_items") is not None and wrong_count is not None:
+        correct_count = max(0, int(result.get("total_items") or 0) - int(wrong_count or 0))
+    else:
+        correct_count = None
+
+    wrong_total = wrong_count if wrong_count is not None else len(wrong_items)
+    if correct_count is None:
+        md += f"✅ 正确：待确认 | ❌ 错误：{wrong_total} 道\n\n"
+    else:
+        md += f"✅ 正确：{correct_count} 道 | ❌ 错误：{wrong_total} 道\n\n"
+
+    if wrong_items:
+        md += "---\n"
+        for item in wrong_items:
+            qnum = item.get("question_number") or item.get("question_index") or "N/A"
+            qtext = item.get("question_content") or item.get("question") or "N/A"
+            md += f"❌ **题 {qnum}** {qtext}\n"
+            md += f"- 错误原因：{item.get('reason', 'N/A')}\n"
+
+            # Use judgment_basis from wrong_item (preferred), fallback to questions_map
+            basis = item.get("judgment_basis") or []
+            if not basis:
+                q_data = questions_map.get(str(qnum)) or {}
+                basis = q_data.get("judgment_basis") or []
+            if basis and isinstance(basis, list):
+                md += "- AI 判断依据：\n"
+                for b in basis:
+                    if isinstance(b, str) and b.strip():
+                        md += f"  - {b.strip()}\n"
+            md += "\n"
+
+
+
+    if correct_qns:
+        md += "---\n"
+        for qn in correct_qns:
+            q_data = questions_map.get(str(qn)) or {}
+            basis = q_data.get("judgment_basis") or []
+            if basis and isinstance(basis, list):
+                md += f"<details><summary>✅ 题 {qn} ▶ 点击查看 AI 判断依据</summary>\n\n"
+                for b in basis:
+                    if isinstance(b, str) and b.strip():
+                        md += f"- {b.strip()}\n"
+                md += "</details>\n\n"
+            else:
+                md += f"✅ 题 {qn}\n\n"
+
+
+    if result.get("warnings"):
+        md += "⚠️ 警告\n"
+        seen = set()
+        for warning in result.get("warnings") or []:
+            if warning not in seen:
+                # Filter out internal/technical warnings not meant for users
+                if "URL 拉取失败" in warning or "url_head status" in warning:
+                    continue
+                md += f"- {warning}\n"
+                seen.add(warning)
+        md += "\n"
+
+
+    md += "---\n"
+    md += format_vision_raw_text(result)
     return md
 
 
@@ -444,30 +776,32 @@ async def call_chat_api(
     return content or "无响应"
 
 
-async def grade_homework_logic(img_path, subject, provider, auth_token):
-    """批改作业主逻辑（流式状态更新）：上传 → Vision → 批改 → 展示结果"""
+async def grade_homework_logic(img_path, subject, provider, auth_token, history):
+    """批改作业主逻辑（流式状态更新）：上传 → Vision → 批改 → 渲染到 Chat"""
     # gr.File returns path string or object with .name
     if hasattr(img_path, "name"):
         img_path = img_path.name
 
     if not img_path:
-        yield "**错误**：请上传图片文件。", None, None, "❌ 未选择文件"
+        yield [{"role": "assistant", "content": "❌ 请先上传图片文件。"}], None, None, "❌ 未选择文件"
         return
 
     session_id = f"demo_{uuid.uuid4().hex[:8]}"
     started = time.monotonic()
     auth_token = (auth_token or "").strip() or None
+    history = []
+    image_added = False
 
     try:
         # Step 1: 上传到后端 /uploads（后端落 Supabase Storage，返回 upload_id）
-        yield "📝 正在开始批改…", session_id, None, _render_stage_lines("uploading", int(time.monotonic() - started))
+        yield history, session_id, None, _render_stage_lines("uploading", int(time.monotonic() - started))
 
         upload_task = asyncio.create_task(
             asyncio.to_thread(upload_to_backend, img_path, session_id=session_id, auth_token=auth_token)
         )
         while not upload_task.done():
             await asyncio.sleep(0.15)
-            yield "📝 正在开始批改…", session_id, None, _render_stage_lines(
+            yield history, session_id, None, _render_stage_lines(
                 "uploading", int(time.monotonic() - started)
             )
 
@@ -475,14 +809,24 @@ async def grade_homework_logic(img_path, subject, provider, auth_token):
         upload_id = str(upload_resp.get("upload_id") or "").strip()
         page_urls = upload_resp.get("page_image_urls") or []
         if not upload_id:
-            yield "**错误**：上传失败，未获取到 upload_id。", session_id, None, "❌ 上传失败"
+            history[-1]["content"] = "❌ 上传失败，未获取到 upload_id。"
+            yield history, session_id, None, "❌ 上传失败"
             return
         if not (isinstance(page_urls, list) and page_urls):
-            yield "**错误**：上传失败，未获取到 page_image_urls。", session_id, None, "❌ 上传失败"
+            history[-1]["content"] = "❌ 上传失败，未获取到 page_image_urls。"
+            yield history, session_id, None, "❌ 上传失败"
             return
 
         page_url = str(page_urls[0])
-        yield "📝 已上传，等待 Vision 识别与批改…", session_id, page_url, _render_stage_lines(
+        if page_url and not image_added:
+            history.append(
+                {
+                    "role": "user",
+                    "content": f"![原图]({page_url})\n\n请帮我批改这份作业",
+                }
+            )
+            image_added = True
+        yield history, session_id, page_url, _render_stage_lines(
             "accepted", int(time.monotonic() - started)
         )
 
@@ -506,30 +850,33 @@ async def grade_homework_logic(img_path, subject, provider, auth_token):
                 last_progress_stage = stage
             else:
                 stage = last_progress_stage
-            yield "📝 后端处理中，请耐心等待…", session_id, page_url, _render_stage_lines(
+            yield history, session_id, page_url, _render_stage_lines(
                 stage, int(time.monotonic() - started)
             )
 
         result = await grade_task
-        # Pull qbank meta for explainability (best-effort; doesn't block grading completion)
-        if session_id:
-            qb = await call_qbank_meta(str(session_id), auth_token=auth_token)
-            if qb:
-                result["_qbank_meta"] = qb
-
-        # Step 3: 格式化结果
-        formatted_md = format_grading_result(result)
-        yield formatted_md, session_id, page_url, _render_stage_lines("done", int(time.monotonic() - started))
+        if page_url and not image_added:
+            history.append(
+                {
+                    "role": "user",
+                    "content": f"![原图]({page_url})\n\n请帮我批改这份作业",
+                }
+            )
+            image_added = True
+        history.append({"role": "assistant", "content": format_grade_report(result)})
+        yield history, session_id, page_url, _render_stage_lines("done", int(time.monotonic() - started))
         return
 
     except ValueError as e:
-        yield f"**错误**：{str(e)}", session_id, None, f"❌ 失败：{e}"
+        history[-1]["content"] = f"❌ {str(e)}"
+        yield history, session_id, None, f"❌ 失败：{e}"
         return
     except Exception as e:
         err_msg = str(e)
         if "20040" in err_msg:
             err_msg += "\n\n提示：模型无法下载该 URL，建议检查图片是否可公开访问"
-        yield f"**系统错误**：{err_msg}", session_id, None, f"❌ 失败：{err_msg}"
+        history[-1]["content"] = f"❌ 系统错误：{err_msg}"
+        yield history, session_id, None, f"❌ 失败：{err_msg}"
         return
 
 
@@ -573,31 +920,46 @@ async def vision_debug_logic(img_path, provider, auth_token):
         return f"**系统错误**：{e}", ""
 
 
+MAX_CANDIDATE_BUTTONS = 6
+
+
+def _candidate_button_updates(candidates: List[str]) -> List[Any]:
+    updates: List[Any] = []
+    for idx in range(MAX_CANDIDATE_BUTTONS):
+        if idx < len(candidates):
+            updates.append(gr.update(value=str(candidates[idx]), visible=True))
+        else:
+            updates.append(gr.update(value="", visible=False))
+    return updates
+
+
 async def tutor_chat_logic(
     message: str,
     history: List[Dict[str, str]],
     session_id: str,
     subject: str,
     auth_token: Optional[str],
-) -> AsyncGenerator[Tuple[str, List[Dict[str, str]]], None]:
+) -> AsyncGenerator[Tuple[Any, ...], None]:
     """苏格拉底辅导逻辑（真实流式：后端 SSE 透传）"""
     history = history or []
     auth_token = (auth_token or "").strip() or None
+    candidate_labels: List[str] = []
+    candidate_button_updates = _candidate_button_updates(candidate_labels)
 
     # 只允许批改后对话
     if not session_id:
-        history.append({"role": "assistant", "content": "请先在【智能批改】标签页完成批改，我需要基于错题来辅导。"})
-        yield "", history
+        history.append({"role": "assistant", "content": "请先上传图片并完成识别/批改，我需要基于这次作业来辅导。"})
+        yield "", history, candidate_labels, *candidate_button_updates
         return
 
     # 先把用户消息显示出来
     history.append({"role": "user", "content": message})
-    yield "", history
+    yield "", history, candidate_labels, *candidate_button_updates
 
     # 插入“思考中...”占位，并在收到首条 chat 更新后替换为真实输出
     assistant_msg = {"role": "assistant", "content": "思考中... (0s)"}
     history.append(assistant_msg)
-    yield "", history
+    yield "", history, candidate_labels, *candidate_button_updates
 
     payload = {
         "history": [],
@@ -611,6 +973,7 @@ async def tutor_chat_logic(
     start = time.monotonic()
     current_event = ""
     last_rendered = ""
+    last_focus_image_urls: List[str] = []
 
     try:
         async with httpx.AsyncClient(timeout=None) as client:
@@ -639,7 +1002,7 @@ async def tutor_chat_logic(
                         elapsed = int(time.monotonic() - start)
                         if assistant_msg["content"].startswith("思考中"):
                             assistant_msg["content"] = f"思考中... ({elapsed}s)"
-                            yield "", history
+                            yield "", history, candidate_labels, *candidate_button_updates
                         continue
 
                     if current_event == "error":
@@ -651,6 +1014,36 @@ async def tutor_chat_logic(
                         except Exception:
                             continue
                         msgs = obj.get("messages") or []
+                        raw_candidates = obj.get("question_candidates")
+                        if isinstance(raw_candidates, list):
+                            new_candidates = [str(c) for c in raw_candidates if c]
+                            if new_candidates != candidate_labels:
+                                candidate_labels = list(new_candidates)
+                                candidate_button_updates = _candidate_button_updates(candidate_labels)
+                        focus_urls = obj.get("focus_image_urls") or []
+                        if isinstance(focus_urls, list):
+                            focus_urls = [str(u) for u in focus_urls if u]
+                        else:
+                            focus_urls = []
+                        if focus_urls and focus_urls != last_focus_image_urls:
+                            last_focus_image_urls = list(focus_urls)
+                            # Insert image bubble only once per image set (first time or when switching focus).
+                            # Avoid spamming the same image on every user turn.
+                            already_in_history = False
+                            try:
+                                for u in focus_urls[:2]:
+                                    if any(u in str(m.get("content") or "") for m in history if isinstance(m, dict)):
+                                        already_in_history = True
+                                        break
+                            except Exception:
+                                already_in_history = False
+                            if not already_in_history:
+                                md = "\n".join([f"![题目图/切片]({u})" for u in focus_urls[:2]])
+                                history.insert(
+                                    max(0, len(history) - 1),
+                                    {"role": "assistant", "content": f"我将参考你这题的图片/切片：\n\n{md}"},
+                                )
+                                yield "", history, candidate_labels, *candidate_button_updates
                         # Find latest assistant message content
                         latest = ""
                         for m in reversed(msgs):
@@ -660,7 +1053,7 @@ async def tutor_chat_logic(
                         if latest and latest != last_rendered:
                             assistant_msg["content"] = latest
                             last_rendered = latest
-                            yield "", history
+                            yield "", history, candidate_labels, *candidate_button_updates
                         continue
 
                     if current_event == "done":
@@ -668,8 +1061,27 @@ async def tutor_chat_logic(
 
     except Exception as e:
         assistant_msg["content"] = f"系统错误：{str(e)}"
-        yield "", history
+        yield "", history, candidate_labels, *candidate_button_updates
         return
+
+
+async def _candidate_chat_logic(
+    idx: int,
+    history: List[Dict[str, str]],
+    session_id: str,
+    subject: str,
+    auth_token: Optional[str],
+    candidates: List[str],
+) -> AsyncGenerator[Tuple[Any, ...], None]:
+    text = ""
+    if isinstance(candidates, list) and 0 <= idx < len(candidates):
+        text = str(candidates[idx])
+    if not text:
+        updates = _candidate_button_updates(candidates or [])
+        yield "", (history or []), (candidates or []), *updates
+        return
+    async for update in tutor_chat_logic(text, history, session_id, subject, auth_token):
+        yield update
 
 
 def create_demo():
@@ -775,78 +1187,86 @@ def create_demo():
             )
 
         with gr.Tabs():
-            # ========== Tab 1: 智能批改 ==========
-            with gr.Tab("📝 智能批改"):
+            # ========== Tab 1: 统一对话 ==========
+            with gr.Tab("💬 对话"):
+                gr.Markdown(
+                    "上传图片后系统会自动识别与批改，并把**识别原文 + visual_facts + 批改结果**展示在对话框里。\n\n"
+                    "- 你可以直接说：`讲讲第23题` / `再讲讲19题` / `第2题有没有更简便的方法？`\n"
+                    "- 系统会尝试根据题号在本次 session 中定位对应题目。\n"
+                )
                 with gr.Row():
                     with gr.Column(scale=1):
                         input_img = gr.File(
                             label="📤 上传图片",
                             file_types=["image"],
-                            height=300
+                            height=260,
                         )
                         subject_dropdown = gr.Dropdown(
                             choices=["math", "english"],
                             value="math",
-                            label="📚 学科 (Subject)"
+                            label="📚 学科 (Subject)",
                         )
                         provider_dropdown = gr.Dropdown(
                             choices=["doubao", "qwen3"],
                             value="doubao",
-                            label="🤖 视觉模型 (Provider)"
+                            label="🤖 视觉模型 (Provider)",
                         )
-                        grade_btn = gr.Button("🚀 开始批改", variant="primary")
-
-                    with gr.Column(scale=1):
+                        grade_btn = gr.Button("🚀 开始识别/批改", variant="primary")
                         status_md = gr.Markdown(label="状态")
-                        output_md = gr.Markdown(label="📊 批改结果")
                         session_id_state = gr.State()
                         image_url_state = gr.State()
 
+                    with gr.Column(scale=1):
+                        chatbot = gr.Chatbot(
+                            label="💬 对话",
+                            height=520,
+                            latex_delimiters=[
+                                {"left": "$$", "right": "$$", "display": True},
+                                {"left": "$", "right": "$", "display": False},
+                            ],
+                        )
+                        candidates_state = gr.State(value=[])
+                        with gr.Row():
+                            candidate_buttons = [
+                                gr.Button(visible=False) for _ in range(MAX_CANDIDATE_BUTTONS)
+                            ]
+                        msg = gr.Textbox(
+                            label="💭 你的问题",
+                            placeholder="这道题为什么错了？应该怎么思考？",
+                        )
+                        clear_btn = gr.Button("🗑️ 清除历史")
+
                 grade_btn.click(
                     fn=grade_homework_logic,
-                    inputs=[input_img, subject_dropdown, provider_dropdown, auth_token_state],
-                    outputs=[output_md, session_id_state, image_url_state, status_md],
+                    inputs=[input_img, subject_dropdown, provider_dropdown, auth_token_state, chatbot],
+                    outputs=[chatbot, session_id_state, image_url_state, status_md],
                 )
-
-            # ========== Tab 2: 苏格拉底辅导 ==========
-            with gr.Tab("👩‍🏫 苏格拉底辅导"):
-                gr.Markdown(
-                    "基于批改结果进行启发式辅导，默认不限轮对话（苏格拉底式引导，不直接给答案）。\n\n"
-                    "- 你可以直接说：`讲讲第23题` / `再讲讲19题` / `第2题有没有更简便的方法？`\n"
-                    "- 系统会尝试根据题号在本次 session 中定位对应题目（若定位不确定会回退为整页）。\n"
-                )
-
-                # Enable LaTeX rendering in chat bubbles (Route A).
-                chatbot = gr.Chatbot(
-                    label="💬 辅导对话",
-                    height=400,
-                    latex_delimiters=[
-                        {"left": "$$", "right": "$$", "display": True},
-                        {"left": "$", "right": "$", "display": False},
-                    ],
-                )
-                msg = gr.Textbox(
-                    label="💭 你的问题",
-                    placeholder="这道题为什么错了？应该怎么思考？"
-                )
-                clear_btn = gr.Button("🗑️ 清除历史")
 
                 # 发送消息
                 msg.submit(
                     fn=tutor_chat_logic,
                     inputs=[msg, chatbot, session_id_state, subject_dropdown, auth_token_state],
-                    outputs=[msg, chatbot],
+                    outputs=[msg, chatbot, candidates_state, *candidate_buttons],
                 )
+
+                for idx, btn in enumerate(candidate_buttons):
+                    btn.click(
+                        fn=lambda h, s, sub, tok, c, i=idx: _candidate_chat_logic(
+                            i, h, s, sub, tok, c
+                        ),
+                        inputs=[chatbot, session_id_state, subject_dropdown, auth_token_state, candidates_state],
+                        outputs=[msg, chatbot, candidates_state, *candidate_buttons],
+                    )
 
                 # 清除历史
                 clear_btn.click(
-                    fn=lambda: ([], ""),
+                    fn=lambda: ([], "", [], *_candidate_button_updates([]), None, ""),
                     inputs=None,
-                    outputs=[chatbot, msg],
-                    queue=False
+                    outputs=[chatbot, msg, candidates_state, *candidate_buttons, session_id_state, status_md],
+                    queue=False,
                 )
 
-            # ========== Tab 3: Vision 调试 ==========
+            # ========== Tab 2: Vision 调试 ==========
             with gr.Tab("👁️ Vision 调试"):
                 with gr.Row():
                     with gr.Column(scale=1):

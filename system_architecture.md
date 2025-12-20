@@ -45,8 +45,8 @@ graph TD
 *   **Framework**: **FastAPI** (高性能异步 Web 框架)。
 *   **Responsibilities**:
     *   `/uploads`: 后端权威上传（将原始文件落到 Storage，返回 `upload_id/page_image_urls`）。
-    *   `/grade`: Vision 识别 + LLM 批改，产出 `vision_raw_text` 与结构化批改结果，并写入 session/qbank（后续会持久化为 submissions）。
-    *   `/chat`: SSE 辅导；当用户要求看图/图形判断时必须触发 qindex/relook，拿不到图则明确说明“看不到图”（禁止嘴硬）。
+    *   `/grade`: Vision 识别 + LLM 批改，产出 `vision_raw_text`、结构化批改结果与 `judgment_basis`，并写入 session/qbank（后续会持久化为 submissions）。`visual_facts` 仅用于审计/复盘。
+    *   `/chat`: SSE 辅导；只读取 `/grade` 产出的 `judgment_basis + vision_raw_text`，不做实时看图。若 `visual_facts` 缺失仍给结论，但需提示“视觉事实缺失，本次判断仅基于识别文本”。若题目无法定位，返回候选题目列表供 UI 按钮选择。
     *   qindex worker: 题目定位(bbox) + 切片裁剪上传（重任务离线化）。
 
 ### 2.3 数据存储 (Storage)
@@ -97,13 +97,9 @@ sequenceDiagram
     Student->>App: "讲讲第9题/你看不到图吗"
     App->>API: POST /api/v1/chat (session_id, question)  (SSE)
 
-    alt 用户要求看图/图形判断
-        API->>Redis: Ensure qindex queued (if needed)
-        API-->>App: "正在读取图片并生成切片，请稍等…" (SSE)
-        Worker->>Redis: BRPOP -> build slices -> write qindex:{session_id}
-        API->>API: relook via Vision using slice (or page)
-        API-->>App: 仅基于可见信息输出（拿不到图则明确“看不到图”）
-    else 普通文本辅导
-        API-->>App: 苏格拉底式引导（不直接给答案）
+    alt visual_facts 缺失
+        API-->>App: 给出结论，但提示“视觉事实缺失，本次判断仅基于识别文本”
+    else visual_facts 可用
+        API-->>App: 推理 LLM 参考 judgment_basis 与识别原文
     end
 ```

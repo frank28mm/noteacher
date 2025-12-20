@@ -6,7 +6,6 @@ Tests visual check detection and math formatting for display.
 from homework_agent.api.chat import (
     _user_requests_visual_check,
     _format_math_for_display,
-    _should_relook_focus_question,
 )
 
 
@@ -72,25 +71,3 @@ class TestFormatMathForDisplay:
         except Exception:
             assert False, "Should not raise exception"
 
-
-class TestShouldRelookFocusQuestion:
-    """Tests for _should_relook_focus_question function."""
-
-    def test_explicit_relook_triggers(self):
-        """Should return True when user challenges recognition."""
-        assert _should_relook_focus_question("题目不对", {}) is True
-        assert _should_relook_focus_question("识别错了", {}) is True
-        assert _should_relook_focus_question("看图", {}) is True
-
-    def test_already_relooked_skip(self):
-        """Should return False if already relooked (unless explicit challenge)."""
-        focus = {"vision_recheck_text": "already did it"}
-        # Explicit challenge should still trigger
-        assert _should_relook_focus_question("识别错了", focus) is True
-        # Non-challenge should skip
-        assert _should_relook_focus_question("继续讲", focus) is False
-
-    def test_non_visual_message_skip(self):
-        """Should return False for regular non-visual messages."""
-        assert _should_relook_focus_question("这题怎么做", {}) is False
-        assert _should_relook_focus_question("讲讲第3题", {}) is False

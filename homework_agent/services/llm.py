@@ -9,6 +9,7 @@ LLM Client - 文本推理客户端
 """
 
 import json
+import re
 import logging
 from typing import Optional, List, Dict, Any, Union, Iterable
 from pydantic import BaseModel, Field
@@ -36,6 +37,55 @@ from homework_agent.utils.settings import get_settings
 from homework_agent.utils.observability import log_event
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_first_json_object(text: str) -> Optional[str]:
+    if not text:
+        return None
+    s = str(text)
+    start = s.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1]
+    return None
+
+
+def _repair_json_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    s = str(text)
+    block = _extract_first_json_object(s)
+    if not block:
+        start = s.find("{")
+        end = s.rfind("}")
+        if start >= 0 and end > start:
+            block = s[start : end + 1]
+        else:
+            return None
+    # Remove trailing commas before closing braces/brackets.
+    cleaned = re.sub(r",\s*([}\]])", r"\1", block)
+    return cleaned
 
 
 def _log_retry(op: str, retry_state):
@@ -138,6 +188,8 @@ class LLMClient:
         allowed = {sev.value for sev in Severity}
         normalized: List[Dict[str, Any]] = []
         for item in wrong_items or []:
+            if not isinstance(item, dict):
+                continue
             copy_item = dict(item)
             steps = copy_item.get("math_steps") or copy_item.get("steps")
             if isinstance(steps, list):
@@ -281,6 +333,36 @@ class LLMClient:
                 )
                 return MathGradingResult(**result_data)
             except Exception as parse_err:
+                repaired = _repair_json_text(content or "")
+                if repaired:
+                    try:
+                        result_data = json.loads(repaired)
+                        if "wrong_items" in result_data:
+                            result_data["wrong_items"] = self._normalize_math_wrong_items(result_data.get("wrong_items"))
+                            for it in result_data["wrong_items"] or []:
+                                if isinstance(it, dict):
+                                    it.pop("standard_answer", None)
+                        log_event(
+                            logger,
+                            "llm_grade_math_parsed_repaired",
+                            provider=provider,
+                            model=model,
+                            content_len=len(content or ""),
+                            repaired_len=len(repaired),
+                        )
+                        return MathGradingResult(**result_data)
+                    except Exception as repair_err:
+                        log_event(
+                            logger,
+                            "llm_grade_math_parse_repair_failed",
+                            level="error",
+                            provider=provider,
+                            model=model,
+                            error_type=repair_err.__class__.__name__,
+                            error=str(repair_err),
+                            content_len=len(content or ""),
+                            content_tail=(content or "")[-200:],
+                        )
                 log_event(
                     logger,
                     "llm_grade_math_parse_failed",
@@ -388,6 +470,31 @@ class LLMClient:
                 )
                 return EnglishGradingResult(**result_data)
             except Exception as parse_err:
+                repaired = _repair_json_text(content or "")
+                if repaired:
+                    try:
+                        result_data = json.loads(repaired)
+                        log_event(
+                            logger,
+                            "llm_grade_english_parsed_repaired",
+                            provider=provider,
+                            model=model,
+                            content_len=len(content or ""),
+                            repaired_len=len(repaired),
+                        )
+                        return EnglishGradingResult(**result_data)
+                    except Exception as repair_err:
+                        log_event(
+                            logger,
+                            "llm_grade_english_parse_repair_failed",
+                            level="error",
+                            provider=provider,
+                            model=model,
+                            error_type=repair_err.__class__.__name__,
+                            error=str(repair_err),
+                            content_len=len(content or ""),
+                            content_tail=(content or "")[-200:],
+                        )
                 log_event(
                     logger,
                     "llm_grade_english_parse_failed",
@@ -546,30 +653,51 @@ class LLMClient:
         if not isinstance(focus_question, dict):
             return None
 
-        # 优先从 image_refs 中提取切片
+        def _extract_from_pages(pages):
+            """从 pages 列表中提取切片 URL"""
+            if not isinstance(pages, list):
+                return None
+            for p in pages:
+                if not isinstance(p, dict):
+                    continue
+                # 优先：regions 中标注为 figure 的切片（几何题通常必须看图）
+                regions = p.get("regions")
+                if isinstance(regions, list):
+                    for r in regions:
+                        if not isinstance(r, dict):
+                            continue
+                        if (r.get("kind") or "").lower() == "figure" and r.get("slice_image_url"):
+                            return str(r.get("slice_image_url"))
+                # 优先选择 slice_image_urls（列表）
+                slice_urls = p.get("slice_image_urls")
+                if isinstance(slice_urls, list) and slice_urls:
+                    return str(slice_urls[0])
+                # 备选：slice_image_url（单个）
+                slice_url = p.get("slice_image_url")
+                if slice_url:
+                    return str(slice_url)
+                # 再备选：regions 中的切片
+                if isinstance(regions, list):
+                    for r in regions:
+                        if isinstance(r, dict):
+                            r_slice = r.get("slice_image_url")
+                            if r_slice:
+                                return str(r_slice)
+            return None
+
+        # 方式1：从 image_refs 中提取（如果存在）
         image_refs = focus_question.get("image_refs")
         if isinstance(image_refs, dict):
             pages = image_refs.get("pages")
-            if isinstance(pages, list):
-                for p in pages:
-                    if not isinstance(p, dict):
-                        continue
-                    # 优先选择 slice_image_urls（列表）
-                    slice_urls = p.get("slice_image_urls")
-                    if isinstance(slice_urls, list) and slice_urls:
-                        return str(slice_urls[0])
-                    # 备选：slice_image_url（单个）
-                    slice_url = p.get("slice_image_url")
-                    if slice_url:
-                        return str(slice_url)
-                    # 再备选：regions 中的切片
-                    regions = p.get("regions")
-                    if isinstance(regions, list):
-                        for r in regions:
-                            if isinstance(r, dict):
-                                r_slice = r.get("slice_image_url")
-                                if r_slice:
-                                    return str(r_slice)
+            url = _extract_from_pages(pages)
+            if url:
+                return url
+
+        # 方式2：从 focus_question.pages 中直接提取（qindex 数据结构）
+        pages = focus_question.get("pages")
+        url = _extract_from_pages(pages)
+        if url:
+            return url
 
         # 回退到 page_image_urls
         page_urls = focus_question.get("page_image_urls")
@@ -614,6 +742,29 @@ class LLMClient:
             "strategy": strategy,
         }
         messages: List[Dict[str, str]] = [{"role": "system", "content": SOCRATIC_TUTOR_SYSTEM_PROMPT}]
+        # For visually risky questions, force the model to anchor on the image first (facts before reasoning).
+        has_visual_facts = False
+        gate_passed = False
+        try:
+            focus_q = (wrong_item_context or {}).get("focus_question") if isinstance(wrong_item_context, dict) else None
+            visual_risk = bool(isinstance(focus_q, dict) and focus_q.get("visual_risk") is True)
+            has_visual_facts = bool(isinstance(focus_q, dict) and isinstance(focus_q.get("visual_facts"), dict))
+            gate = focus_q.get("vfe_gate") if isinstance(focus_q, dict) else None
+            gate_passed = bool(isinstance(gate, dict) and gate.get("passed") is True)
+            if visual_risk:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "该题为图形/视觉风险题。若上下文提供了 visual_facts（VFE 结构化事实），"
+                            "必须把它当作唯一可引用的“图上事实来源”；若提供 hypotheses，需先检查其 evidence 是否与 facts 一致再引用；"
+                            "不要根据图片自行补充或改写事实；"
+                            "若 visual_facts 缺失/不足，请明确说明“视觉事实不足”，再基于识别原文给出解释，并提示可能不确定。"
+                        ),
+                    }
+                )
+        except Exception:
+            pass
         if wrong_item_context:
             messages.append(
                 {
@@ -630,6 +781,10 @@ class LLMClient:
             }
         )
 
+        # Append a short tail of history (so the model can react to user corrections).
+        # IMPORTANT: do not let a fixed “请结合图片…” message override the user's real input.
+        current_question = str(question)
+        last_user_idx: Optional[int] = None
         if history:
             tail = history[-12:]
             for m in tail:
@@ -638,41 +793,22 @@ class LLMClient:
                 if role not in {"user", "assistant"}:
                     continue
                 messages.append({"role": role, "content": str(content)})
+                if role == "user" and str(content) == current_question:
+                    last_user_idx = len(messages) - 1
 
-        # 尝试提取切片 URL 并构建多模态消息
-        slice_url = self._extract_slice_url_from_context(wrong_item_context)
-        if slice_url:
-            # 导入下载函数
-            from homework_agent.utils.url_image_helpers import _download_as_data_uri
-
-            # 下载图片并转换为 base64
-            data_uri = _download_as_data_uri(slice_url)
-            if data_uri:
-                # 构建多模态消息：图片 + 文本
-                focus_q = wrong_item_context.get("focus_question") if wrong_item_context else {}
-                qnum = focus_q.get("question_number") if isinstance(focus_q, dict) else "未知题号"
-
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": data_uri}
-                        },
-                        {
-                            "type": "text",
-                            "text": f"这是第{qnum}题的题目图片切片。请结合图片内容进行辅导。"
-                        }
-                    ]
-                })
-            else:
-                # 下载失败，回退到纯文本
-                if not messages or messages[-1]["role"] != "user" or messages[-1]["content"] != str(question):
-                    messages.append({"role": "user", "content": str(question)})
+        # Ensure the current user question is present as the latest turn.
+        # (Upstream usually appends it into `history`, but keep this defensive.)
+        if last_user_idx is None:
+            messages.append({"role": "user", "content": current_question})
+            last_user_idx = len(messages) - 1
         else:
-            # 没有切片 URL，使用纯文本
-            if not messages or messages[-1]["role"] != "user" or messages[-1]["content"] != str(question):
-                messages.append({"role": "user", "content": str(question)})
+            # If the last message isn't the current question (e.g. mis-ordered history),
+            # append a fresh copy so the model answers the right prompt.
+            if messages[-1].get("role") != "user" or messages[-1].get("content") != current_question:
+                messages.append({"role": "user", "content": current_question})
+                last_user_idx = len(messages) - 1
+
+        # Stable mode: do not attach images to chat LLM; rely on cached visual_facts only.
 
         model = model_override or (self.silicon_model if provider == "silicon" else self.ark_model)
         stream = client.chat.completions.create(

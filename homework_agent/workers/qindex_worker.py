@@ -119,6 +119,7 @@ def main() -> int:
                     error_type=e.__class__.__name__,
                     error=str(e),
                 )
+
             log_event(
                 logger,
                 "qindex_job_done",

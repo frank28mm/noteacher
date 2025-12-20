@@ -26,7 +26,7 @@
 ## 2) Grade
 
 ### `POST /api/v1/grade`
-对作业图片进行识别与批改。支持两种输入：
+对作业图片进行识别与批改（同一次 Vision 调用输出 `vision_raw_text`，并产出可审计的 `visual_facts`；批改 LLM 输出 `judgment_basis` 作为判定依据）。支持两种输入：
 - 直接给 `images[].url`（公网 URL）
 - 给 `upload_id`（推荐）：后端按 `X-User-Id/DEV_USER_ID + upload_id` 反查并补齐图片列表
 
@@ -41,9 +41,14 @@
   - `session_id`: string（chat 必需）
   - `summary`: string
   - `wrong_items`: array
+    - 每个 wrong_item 包含 `judgment_basis?: string[]`（判定依据，中文短句）
+  - `questions`: array（全题列表，含正确题目）
+    - 每题包含 `verdict` 与 `judgment_basis?: string[]`
   - `warnings`: string[]
   - `vision_raw_text`: string|null
+  - `visual_facts`: object|null（结构化视觉事实，仅用于审计/复盘）
   - `job_id`: string|null（当异步时）
+  - 说明：`visual_facts` 写入 qbank（`GET /session/{session_id}/qbank`），用于审计/复盘；前端默认展示 `judgment_basis` 而非 raw facts。
 
 ### `GET /api/v1/jobs/{job_id}`
 异步批改任务查询（当 `/grade` 返回 `status="processing"` 时使用）。
@@ -51,7 +56,7 @@
 ## 3) Chat (SSE)
 
 ### `POST /api/v1/chat`
-苏格拉底式辅导，使用 SSE 返回事件流。**前置要求**：必须先完成一次 `/grade` 并拿到 `session_id`（即便全对也允许辅导）。
+报告式对话（直接结论 + 解释），使用 SSE 返回事件流。**前置要求**：必须先完成一次 `/grade` 并拿到 `session_id`（即便全对也允许对话）。
 
 - Request（JSON，简化）：
   - `session_id`: string
@@ -76,9 +81,14 @@
 
 #### 行为约束（产品要求）
 - chat 必须基于 `/grade` 交付的 qbank/错题上下文对话；缺失则明确提示用户先批改，禁止编造。
-- 当用户提出“看图/图形/表格/统计图”等视觉诉求时：
-  - 先确保 qindex 切片存在（必要时 enqueue 并等待），再进行 relook（Vision 重识别）；
-  - 若仍拿不到视觉信息，必须明确回复“看不到图”，禁止臆测式解释。
+- **chat 不实时看图**：只使用 `/grade` 产出的 `judgment_basis` 与 `vision_raw_text`。
+- 若 `visual_facts` 缺失：仍给出结论，但必须提示“视觉事实缺失，本次判断仅基于识别文本”。
+
+#### ChatResponse（SSE `event: chat`）
+除 `messages/session_id/retry_after_ms` 外，SSE 增量消息还会携带 UI 辅助字段：
+- `focus_image_urls?: string[]`：当前聚焦题的切片/整页 URL（用于在 chat 气泡中显示“我参考的图”）
+- `focus_image_source?: "slice_figure" | "slice_question" | "page" | "unknown"`：URL 来源提示（图形/题干/整页）
+- `question_candidates?: string[]`：当题目无法定位时返回的候选题目（用于 UI 渲染快捷按钮/列表）
 
 ## 4) Session Debug (仅用于验收/调试)
 

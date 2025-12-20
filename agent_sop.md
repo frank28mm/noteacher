@@ -23,7 +23,7 @@
 #### 1.0.1 核心架构
 - 后端框架：FastAPI 0.100+ (Python 3.10+)；HTTP 直连 LLM/Vision API（OpenAI/Anthropic），不使用 Claude Agent SDK、不依赖 .claude 目录。
 - AI 模型（Reasoning/Chat）：Phase 1 `/grade` 与 `/chat` 当 provider=ark 时均使用 `ARK_REASONING_MODEL` 指定的 Doubao 模型（测试环境可指向 `doubao-seed-1-6-vision-250815`）；`ARK_REASONING_MODEL_THINKING` 不作为必需项。Qwen3 推理仅作为内部调试/备用，不对外暴露或新增其他 LLM 选项。保留 OpenAI/Anthropic 作为内部备用，不向终端暴露。
-- 视觉/OCR：用户可选 `"doubao"`(Ark doubao-seed-1-6-vision-250815) 或 `"qwen3"`(SiliconFlow Qwen/Qwen3-VL-32B-Thinking)，默认 `"doubao"`；不对外提供 OpenAI 视觉选项。`doubao` 仅支持公网 URL 输入；`qwen3` 支持 URL 或 Base64 兜底。备选 Azure Computer Vision；备用 Tesseract（本地）。
+- 视觉/OCR：用户可选 `"doubao"`(Ark doubao-seed-1-6-vision-250815) 或 `"qwen3"`(SiliconFlow Qwen/Qwen3-VL-32B-Thinking)，默认 `"doubao"`；不对外提供 OpenAI 视觉选项。`doubao` **优先公网 URL**，但支持 Data-URL(base64) 兜底（绕开 provider-side URL 拉取不稳定）；`qwen3` 支持 URL 或 Data-URL(base64)。备选 Azure Computer Vision；备用 Tesseract（本地）。
 - 数据存储：Supabase（Postgres + Storage）作为持久化主存；Redis 作为缓存/队列（会话、qbank/qindex、异步任务协调）。
 - 队列：Redis list + 独立 worker（qindex 通过 `BRPOP` 消费队列）。
 - 部署：Docker；可选 K8s/云函数。
@@ -79,10 +79,10 @@ graph TD
     L --> M{需要辅导？}
     M -->|否| N[结束]
     M -->|是| O[启动Chat会话（已批改）]
-    O --> P[苏格拉底辅导循环（不限轮次，默认不直接给答案）]
-    P --> Q{继续？}
-    Q -->|是| R[继续辅导]
-    Q -->|否| S[结束会话/关闭引导]
+    O --> P[Chat 页面输出：识别原文 + 视觉事实 + 批改结论]
+    P --> Q{继续提问？}
+    Q -->|是| R[继续对话/解释]
+    Q -->|否| S[结束会话]
 ```
 
 ### 1.2 输入/输出标准
@@ -152,10 +152,12 @@ graph TD
   - 验证 context_item_ids 是否存在于之前的批改结果中
   - 加载错题详情作为辅导上下文（若未提供，视为泛辅导但仍限数学/英语）
   - 仅读取当前批次上下文，不读取历史画像；长期画像仅写入不读取
+  - 题号解析需支持“非数字题名”（如“思维与拓展/旋转题”等）：用 qbank 的 `question_aliases` 做模糊匹配；若仍无法定位，返回候选题目列表（用于 UI 按钮快速选择）
 
-✅ 看图保底（产品要求）:
-  - 若用户提出“看图/图形/表格/统计图”等视觉诉求：必须触发 qindex（生成切片）与 relook（Vision 重识别）
-  - 若仍拿不到图/切片：必须明确说明“看不到图”，禁止臆测式解释（禁止“从图形来看…”）
+✅ 看图策略（稳定优先）:
+  - Chat **不实时看图**：只读取 `/grade` 产出的 `judgment_basis + vision_raw_text`。
+  - 若 visual_facts 缺失：仍给出结论，但必须提示“视觉事实缺失，本次判断仅基于识别文本”。
+  - 如用户仍要求看图：提示“切片生成中/请稍后或补充清晰局部图”，不在 chat 中发起 VFE。
 ```
 
 ### 2.2 阶段2：图像处理与内容识别
@@ -172,6 +174,18 @@ graph TD
 - OCR + 题块 bbox + 切片裁剪/上传属于重任务，**不得在 API 主进程内同步执行**。
 - `/grade` 完成后仅负责 **enqueue** 一个 qindex 任务到 Redis 队列（默认 `qindex:queue`）。
 - 独立 worker `python -m homework_agent.workers.qindex_worker` 负责消费队列，生成 bbox/slice 并写回 `qindex:{session_id}`。
+- chat 侧会把该题切片 refs 透传为 `focus_image_urls/focus_image_source`（用于 UI 渲染）；**visual_facts 只在 /grade 生成**，qindex 不再产出视觉事实。
+- 当题目无法定位时，SSE 会返回 `question_candidates`（候选题目列表），前端可渲染为快捷按钮引导用户切题。
+
+### 2.1.1.1 视觉事实抽取（MVP）
+- 入口：`homework_agent/services/vision_facts.py`
+- 触发：**/grade 阶段**，与 `vision_raw_text` 同一次 Vision 调用输出（避免二次调用与不一致）。
+- 日志（必须可回放）：
+  - `vfe_start(scene_type,image_source,image_url)`
+  - `vfe_done(scene_type,confidence,unknowns_count,repaired_json)`
+- qbank 持久化字段：
+  - `qbank.questions[q_num].visual_facts`（结构化事实，仅用于审计/复盘）
+  - `qbank.questions[q_num].question_aliases`（非数字题名别名，用于 chat 路由）
 
 **处理步骤**:
 ```python
@@ -266,32 +280,31 @@ graph TD
 
 ### 2.4 阶段4：辅导对话
 
-#### SOP-4.1: 辅导启动
-**触发条件**: 学生问"为什么？"、"怎么做？"等
+#### SOP-4.1: 报告式对话启动
+**触发条件**: 学生进入对话或追问具体题目
 
 **前置准备**:
 ```python
 ✅ 加载上下文:
-  - 从GradeResponse加载wrong_item详情
-  - 提取相关math_steps或semantic_score
+  - 从GradeResponse加载错题/判定结果
+  - 读取 vision_raw_text + judgment_basis（如有）
   - 初始化interaction_count = 0
 
-✅ 设定辅导策略:
-  - 选择提示级别（轻提示/方向提示/重提示）
-  - 准备引导问题
-  - 确保不直接给出答案
+✅ 输出策略:
+  - 默认直接给出结论 + 解释（报告式）
+  - 必须基于识别文本/judgment_basis，避免凭空补图
+  - 若 visual_facts 缺失：给出结论，但明确标注“基于识别文本，视觉事实缺失”
 ```
 
-#### SOP-4.2: 苏格拉底辅导循环（默认不限轮，基于已批改 session）
-**调用prompt**: `SOCRATIC_TUTOR_SYSTEM_PROMPT`
+#### SOP-4.2: 对话循环（报告式输出 + 允许追问）
+**调用prompt**: 以“结论 + 解释”为主（不再要求苏格拉底式引导）
 
 **策略要点**:
 ```python
-  - 仅在完成批改后使用（即便全对也可辅导），不做纯闲聊。
-  - 默认不限轮；如指定错题上下文，可按需要设置软性上限（提示递进），但不强制。
-  - 苏格拉底式引导：只给提示/反问/分步引导，不直接给答案；保持鼓励口吻。
-  - 提示递进示例（可按需要重复循环）：轻提示 -> 方向提示 -> 重提示/定位错误类型。若需给出完整解析，可通过 UI 触发，而非自动上限。
-  - 状态标记：continue/explained（不再使用 limit_reached 作为硬阈值）。
+  - 仅在完成批改后使用（即便全对也可对话），不做纯闲聊。
+  - 默认不限轮；用户可持续追问细节与依据。
+  - 回答必须引用 vision_raw_text / judgment_basis 的事实描述。
+  - 若 visual_facts 缺失：加“视觉事实缺失，本次判断仅基于识别文本”的明确提示。
 ```
 
 > SSE 心跳/断线：心跳建议 30s；若 90s 内无数据可断开；客户端可用 last-event-id 续接。

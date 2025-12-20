@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field, AnyUrl, field_validator
 
 # --- Basic Enums ---
@@ -156,6 +156,13 @@ class WrongItem(BaseModel):
         description="Internal extracted keywords used in strict mode (for audit/debug)",
     )
     
+    # Judgment basis - LLM's reasoning for the verdict
+    judgment_basis: Optional[List[str]] = Field(
+        None,
+        description="判定依据：LLM 说明它是如何判断的（中文短句列表）",
+    )
+
+    
     # English specific could be added here if needed, but 'reason' usually suffices for MVP or 'semantic_score'
 
 class GradeRequest(BaseModel):
@@ -191,6 +198,16 @@ class GradeResponse(BaseModel):
     vision_raw_text: Optional[str] = Field(
         None, description="Vision API 原始识别文本，用于调试和验证"
     )
+    visual_facts: Optional[Dict[str, Any]] = Field(
+        None, description="视觉事实（按题号聚合的结构化事实 JSON）"
+    )
+    figure_present: Optional[Dict[str, str]] = Field(
+        None, description="题目是否包含图像（按题号聚合，true/false/unknown）"
+    )
+    questions: Optional[List[Dict[str, Any]]] = Field(
+        None, description="全题列表（含正确题目），每题包含 verdict、judgment_basis 等字段"
+    )
+
 
 # --- Chat/Socratic Structures ---
 class Message(BaseModel):
@@ -223,3 +240,15 @@ class ChatResponse(BaseModel):
         None, description="Backoff hint for clients when rate limiting applies"
     )
     cross_subject_flag: Optional[bool] = None
+    focus_image_urls: Optional[List[str]] = Field(
+        default=None,
+        description="Optional image URLs for the current focused question (e.g. qindex slice URLs) for UI rendering.",
+    )
+    focus_image_source: Optional[str] = Field(
+        default=None,
+        description="Source hint for focus_image_urls: slice_figure/slice_question/page/unknown.",
+    )
+    question_candidates: Optional[List[str]] = Field(
+        default=None,
+        description="Optional candidate question numbers/titles for UI fallback selection.",
+    )

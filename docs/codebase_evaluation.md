@@ -41,11 +41,13 @@ homework_agent/
 - 清晰的分层架构 (API → Core → Services → Utils)
 - 依赖方向正确 (上层依赖下层，无循环依赖)
 - 新拆分的 `_*_stages.py` 有效降低了主文件复杂度
+- 视觉事实抽取（VFE）具备独立服务层与结构化 schema，支持异步产物缓存与复用
 
 **改进建议**:
 - `core/qindex.py` (495 LOC) 略大，可考虑进一步拆分
 - `demo_ui.py` (903 LOC) 作为演示 UI 可独立为 `demo/` 子目录
 - API 版本前缀：后端已统一挂载在 `/api/v1/*`（FastAPI `include_router(..., prefix="/api/v1")`）；建议所有客户端/文档/脚本统一使用该前缀，并预留未来 `/api/v2` 兼容升级路径
+ - Chat 的“实时 VFE”路径已计划下沉为异步产物（见 `docs/stable_vfe_plan.md`），建议移除 chat 内的 vision 依赖以降低不稳定性
 
 ---
 

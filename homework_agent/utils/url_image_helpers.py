@@ -64,6 +64,8 @@ def _download_as_data_uri(url: str) -> Optional[str]:
     """Best-effort: download image bytes locally and convert to data URI for base64 fallback."""
     if not url:
         return None
+
+    # Try using httpx for public URLs first
     try:
         import httpx
 
@@ -71,7 +73,8 @@ def _download_as_data_uri(url: str) -> Optional[str]:
         with httpx.Client(timeout=20.0, follow_redirects=True, trust_env=False) as client:
             r = client.get(url)
         if r.status_code != 200:
-            return None
+            raise httpx.HTTPStatusError(f"HTTP {r.status_code}", request=r.request, response=r)
+
         content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip() or "image/jpeg"
         data = r.content or b""
         if not data:
@@ -81,8 +84,36 @@ def _download_as_data_uri(url: str) -> Optional[str]:
         b64 = base64.b64encode(data).decode("ascii")
         return f"data:{content_type};base64,{b64}"
     except Exception as e:
-        logger.debug(f"_download_as_data_uri failed: {e}")
-        return None
+        logger.debug(f"httpx download failed for {url}: {e}")
+
+    # Try using Supabase SDK for private URLs (e.g., Supabase storage URLs)
+    try:
+        from homework_agent.utils.supabase_client import get_storage_client
+        storage = get_storage_client()
+
+        # Extract bucket and path from Supabase URL
+        # URL format: https://xxx.supabase.co/storage/v1/object/public/bucket/path
+        if "supabase.co/storage/v1/object/" in url:
+            # Parse the URL to get bucket and path
+            parts = url.split("/storage/v1/object/public/")[-1]
+            if "/" in parts:
+                bucket = parts.split("/")[0]
+                path = "/".join(parts.split("/")[1:])
+            else:
+                logger.debug(f"Invalid Supabase URL format: {url}")
+                return None
+
+            # Download from Supabase storage
+            data = storage.download_bytes(path, bucket_name=bucket)
+            if data:
+                content_type = "image/jpeg"  # Supabase images are typically JPEG
+                b64 = base64.b64encode(data).decode("ascii")
+                return f"data:{content_type};base64,{b64}"
+    except Exception as e:
+        logger.debug(f"Supabase download failed for {url}: {e}")
+
+    logger.debug(f"All download methods failed for URL: {url}")
+    return None
 
 
 def _is_provider_image_fetch_issue(err: Exception) -> bool:

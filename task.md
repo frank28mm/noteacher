@@ -11,10 +11,19 @@
 - [ ] **验证**
     - [x] 用 Demo 调试 Tab 直调 Vision（qwen3/doubao）确认能拿到识别原文
     - [x] 用 Demo 批改 Tab 跑样例，确认 Grade 返回 `vision_raw_text` + 判定字段符合新标准
+ 
+- [ ] **Bugfix: LLM 批改 JSON 解析容错（demo_51cac223）**
+    - [x] 容错：`wrong_items` 非 dict 元素直接跳过，避免 `dict(item)` 崩溃
+    - [x] JSON 修复：处理截断/智能引号/重复字段的 best-effort 修复
+    - [x] Prompt 加固：强调完整 JSON、字段齐全、禁止截断
+
+- [x] **Chat VFE 超时兜底（缩图/代理）**
+- [x] **/grade 视觉事实缺失提示（不做 fail-closed，仅提示“基于识别文本”）**
 
 - [ ] **Phase 2: 题号检索 + BBox/Slice（路线3：OCR/版面分析）**
     - [x] `/grade` 后写入 session 全题快照（qbank，按 question_number 可查）
     - [x] `/chat` 支持用户直接点名“第23题/第19题”，无需手工勾选错题
+    - [x] `/chat` 无法定位题目时返回候选题目列表（SSE `question_candidates`）+ Demo UI 按钮快捷切题
     - [x] OCR/版面分析生成整题 bbox（可多 bbox），默认 5% padding + clamp（qindex；由独立 worker 生成）
     - [x] 裁剪并上传切片图到 Supabase，写入 `slice_image_url`（失败回退整页 + warnings；由独立 worker 生成）
 

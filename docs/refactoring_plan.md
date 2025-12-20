@@ -184,14 +184,14 @@ The function has 6 logical stages:
 2. **Context Binding** (lines 861-1070): Resolve focus question, qbank, qindex
 3. **Visual Path** (lines 1130-1345): Handle image slices, mandatory visual checks
 4. **Corrections** (lines 1346-1400): Capture user corrections for OCR errors
-5. **Relook Logic** (lines 1400-1470): Re-run vision when user challenges
+5. **Cached Visual Facts** (lines 1400-1470): Read cached VFE outputs and gate usage
 6. **LLM Streaming** (lines 1470-1604): Producer-consumer pattern for SSE
 
 ### Proposed Changes
 
 #### Proposed module placement
 
-`chat_stream` is tightly coupled to SSE streaming, session cache, qindex, and relook. Similar to grading:
+`chat_stream` is tightly coupled to SSE streaming, session cache, qindex, and cached visual facts. Similar to grading:
 
 - Start with in-file private helpers in `homework_agent/api/chat.py`
 - Then move to `homework_agent/api/_chat_stages.py`
@@ -214,11 +214,11 @@ def resolve_chat_context(...) -> Dict[str, Any]:
 async def ensure_slices(...) -> EnsureSlicesOutcome:
     """Ensure qindex slices exist (enqueue + wait + DB fallback)."""
 
-async def run_relook(...) -> RelookOutcome:
-    """Run vision relook on the best available image."""
+async def read_cached_visual_facts(...) -> VisualFactsOutcome:
+    """Read cached visual facts from qbank/session (no real-time vision)."""
 
 async def handle_visual_path(...) -> Optional[bytes]:
-    """Product requirement: fail-closed if user requested visual judgement and we still have no visual signal."""
+    """Product requirement: no real-time vision in chat; if cached facts missing, still answer with warning."""
     
 def stream_llm_response(...) -> AsyncIterator[bytes]:
     """Producer-consumer LLM streaming."""
@@ -248,20 +248,20 @@ async def chat_stream(req, request, last_event_id) -> AsyncIterator[bytes]:
   - inputs: `req`, `session_id`, `user_id`, `request_id`
   - session state: `session_data`, `history`, `interaction_count`, `focus_question_number`
   - resolved: `qbank`, `qindex`, `wrong_item_context`, `focus_question`
-  - visual artifacts: `image_refs`, `vision_recheck_text`, `relook_error`
+  - visual artifacts: `visual_facts`, `vfe_gate`, `image_refs`
 - `ChatDeps` (injectable)
   - cache/session store
   - submission store (DB fallback for slices)
   - qindex queue interface
-  - vision client + semaphore
+  - (no vision client in chat; VFE runs async after slices)
   - llm client
   - time functions
 
 #### Product requirement guardrails to preserve (must not regress)
 
 - If user explicitly requests looking at the image/diagram (or uses dispute terms like 同位角/内错角/位置关系/看图):
-  - Try to obtain slices (`qindex`) and/or run `relook`.
-  - If still unavailable: **explicitly tell the user “看不到图/信息不足”，and do not guess.**
+  - Use cached `visual_facts` only.
+  - If missing: **explicitly tell the user “未读图/信息不足”，and do not guess.**
 
 ---
 
@@ -306,7 +306,7 @@ These are “cheap integration checks” that prevent silent regressions in stre
   - Assert `retry_after_ms` behavior on “waiting slices” path (if applicable).
 
 - `test_chat_fail_closed_when_visual_required`
-  - When user asks “看图/位置关系/同位角内错角” and no slices/relook available:
+- When user asks “看图/位置关系/同位角内错角” and no cached visual facts available:
     - response must contain a clear “看不到图/无法判断位置关系”
     - must not contain “结合图形/从图形来看”这类不实表述
 
@@ -346,7 +346,7 @@ When extracting stages, apply these rules in the touched code blocks:
 | 7 | Extract `ChatContext` + `ChatDeps` | Low | Unit tests |
 | 8 | Extract in-file `_initialize_chat_session` | Low | Full suite |
 | 9 | Extract in-file `_resolve_chat_context` | Medium | Full suite |
-| 10 | Split visual into `_ensure_slices` + `_run_relook` | High | Full suite + manual |
+| 10 | Split visual into `_ensure_slices` + `read_cached_visual_facts` | High | Full suite + manual |
 | 11 | Simplify `chat_stream` | Low | Full suite |
 | 12 | (Optional) Move helpers to `_chat_stages.py` | Medium | Full suite |
 | 13 | Remove `WARNING DEBUG` logs once stable | Low | Full suite |

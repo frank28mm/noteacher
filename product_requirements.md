@@ -5,7 +5,7 @@
 ### 1.1 操作模式 (Input Workflow)
 *   **用户角色**：家长 或 学生（均可操作）。
 *   **上传路径（权威原图）**：前端仅负责把原始文件上传给后端；后端按 `user_id` 将原图落到云端存储（Supabase Storage），并返回 `upload_id`（一次上传=一次 Submission）与稳定的 `page_image_urls`。
-    *   后续所有业务（`/grade`、`/chat`、qindex/relook）只围绕这份“权威原图”展开，避免“URL 不稳定/拉取失败/权限漂移”导致的看图失败。
+    *   后续所有业务（`/grade`、`/chat`、qindex、视觉事实抽取）只围绕这份“权威原图/切片”展开，避免“URL 不稳定/拉取失败/权限漂移”导致的看图失败。
 *   **处理模式**：支持同步与异步两种（按图片数量与 SLA 自动选择）。
     *   用户拍摄多张作业照片（支持一次性上传，多页/PDF 拆页）。
     *   系统后台进行识别与批改；必要时转为异步任务（`job_id`）。
@@ -13,18 +13,26 @@
 
 ### 1.2 交互模式 (Interaction Mode)
 *   **使用前提**：必须先完成一次批改（即便全对也行），基于该次 Submission 进入辅导；不做“纯闲聊”。
-*   **指导风格**：**苏格拉底式引导 (Mode B)**。
-    *   Agent **严禁**直接给出答案（辅导对话只给提示/反问/分步引导）。
-    *   无通用 5 轮上限；当选定错题上下文时可按需要设置软性引导节奏，但默认不强制轮数封顶。
-    *   **部分正确的引导策略**：
-        * 定位优先级：逐步校验时只指出首个错误步骤；步骤均对但答案错时，提示“复核最后一步计算/抄写”，不直接给答案。
-        * 提示递进：第1轮轻提示（复述已对部分，聚焦疑点）；第2轮方向提示（指出检查点/公式）；第3轮重提示（指出错误类型或位置，不给结果）。
-        * 结构化反馈：`steps` 中用 `verdict` 标记 correct/incorrect/uncertain，可选 `severity`（计算错误/概念错误/格式）。
-        * 几何题：作图对但标注缺失则提示标注；辅助线错误则指出错误线段/关系，但不直接给正确作法，按上述递进。
-*   **答案获取**：如需提供完整答案/解析，必须在“非辅导对话”的独立页面/接口中提供；辅导对话中严禁直接给出答案。
+*   **指导风格**：**报告式输出（直接结论 + 解释）**。
+    *   默认直接给出结论与理由（更像“批改报告”），用户可继续追问细节。
+    *   仍可保留“提示/引导”的语气，但不再禁止给答案。
+    *   结构化反馈：`steps` 中用 `verdict` 标记 correct/incorrect/uncertain，可选 `severity`（计算错误/概念错误/格式）。
 *   **判定透明度**：批改结果需覆盖每道题，返回学生作答/标准答案/判定（选项题注明 student_choice/correct_choice），判定枚举受限（verdict 仅 correct/incorrect/uncertain；severity 仅 calculation/concept/format/unknown/medium/minor）；不确定要标记，禁止编造 bbox。返回 `vision_raw_text` 便于审计。
-*   **Chat 首屏信息（产品要求）**：用户从批改进入 chat 页面时，首屏必须展示“批改结果 + 识别原文(vision_raw_text) + 原始图片”，让用户可快速校验系统工作质量。
+*   **题目定位体验**：用户可用数字题号或非数字题名（如“思维与拓展/旋转题”）发起辅导；若无法定位，必须返回候选题目列表，并在 UI 中提供可点击按钮进行切题。
+*   **Chat 首屏信息（产品要求）**：用户上传图片批改成功后，首屏必须在 **同一聊天页面** 展示：
+    *   识别原文（vision_raw_text）
+    *   判定依据（judgment_basis，中文短句清单）
+    *   批改结果（结论 + 解释）
     *   对话历史仅保留 7 天（定期清理）；超过 7 天再次进入仅展示该次 Submission 的批改结果与识别原文，不保证恢复旧对话上下文。
+
+### 1.2.1 图形题一致性（产品要求：看图要可信）
+*   **目标**：几何/图表/示意图这类题，**答案必须基于 vision 识别结果**；允许“有依据地错”，但必须可复盘、可解释。
+*   **实现策略（稳定优先，MVP）**：
+    *   **/grade 单次 Vision 调用**：输出 `vision_raw_text`，并生成可审计的 `visual_facts`（用于复盘，不直接展示）。
+    *   qindex 仅负责切片（优先 `figure` 图形区域切片）。
+    *   **Chat 只读 /grade 产出的 `judgment_basis + vision_raw_text`**，不做实时 relook/VFE。
+    *   **不再 fail-closed**：若 `visual_facts` 缺失，仍给出结论，但必须提示“视觉事实缺失，本次判断仅基于识别文本”。
+    *   辅导对话必须引用 `judgment_basis`/`vision_raw_text` 的描述作为依据，避免凭空补图。
 
 ### 1.3 数据闭环 (Data Loop)
 *   **权威事实（不可变）**：每次 Submission 都会长期保存：
@@ -40,6 +48,7 @@
 *   **短期保留（固定）**：
     *   Chat 对话历史：7 天（定期清理）
     *   qindex 切片：7 天（定期清理）
+    *   视觉事实（visual_facts）：随 qbank/Submission 快照保存（结构化 JSON，体积小），用于审计/复盘；若未来对 qbank 做 TTL，随之清理。
 *   **静默清理（系统策略）**：用户长时间静默后清除其数据，阈值为 **180 天**（以 last_active_at 为准；由后台定时任务执行）。
 
 ## 2. Agent 能力边界 (Agent Capabilities)
@@ -55,7 +64,7 @@
     *   必须识别并校验 **计算过程** (Step-by-step verification)，而不仅是最终答案。
     *   必须支持 **几何图形识别** (Geometric figures)，能够判断辅助线、几何标记是否正确。
     *   **输出形式**：Phase 1 输出"结构化字段 + 文本描述"，不做图像标注坐标：
-        * `steps` 数组：`index`, `verdict`(correct/incorrect/uncertain), `expected`, `observed`, `hint`（苏格拉底式引导），可选 `severity`/`category`（计算错误/概念错误/格式）。
+        * `steps` 数组：`index`, `verdict`(correct/incorrect/uncertain), `expected`, `observed`, `hint`（解释/提示），可选 `severity`/`category`（计算错误/概念错误/格式）。
         * `geometry`：文本判断（例：“辅助线 BE 画对了；∠ABC 标注缺失”），可选 `elements` 列表（type: line/angle/point; label: A,B,C; status: correct/missing/misplaced）。
     *   如后续需要步骤/几何高亮，可在错误项中补充可选 `bbox`，沿用统一坐标系。
 
@@ -119,7 +128,7 @@
 ### 4.1 通信协议 (Protocol)
 *   **流式交互 (Streaming)**：采用 **SSE (Server-Sent Events)** 协议。
     *   目的：支持 Agent 较长的思考推理过程，实现“打字机”即时反馈效果，避免客户端超时等待。
-    *   实时/流式场景（苏格拉底对话、小批量批改）：客户端/BFF ⇄ Python 直连 HTTP + SSE，单次超时 60s，可重试 1 次，需携带 idempotency-key 防重复；SSE 保持心跳，断线可选用 last-event-id 续接。
+    *   实时/流式场景（报告式对话、小批量批改）：客户端/BFF ⇄ Python 直连 HTTP + SSE，单次超时 60s，可重试 1 次，需携带 idempotency-key 防重复；SSE 保持心跳，断线可选用 last-event-id 续接。
     *   异步长任务（批量/多页批改）：客户端/BFF 通过 HTTP 提交任务，Python 接收后内部入队（Redis）。状态回传可用 webhook 回调（失败重试 ≤3 次，指数退避）或轮询任务状态接口；任务创建请求超时 60s，可重试 1 次，需 idempotency-key。
     *   本仓库实现以 Python Agent + Redis worker 为主；BFF/前端可后续接入，不影响后端契约。
 

@@ -17,16 +17,20 @@
   - chat 对话历史保留 7 天（定期清理），超期不保证恢复对话；
   - 辅导链默认只读当前 Submission（单次上传）上下文，不读历史画像/历史错题；
   - 报告链可读取历史 submissions + 错题排除记录用于长期分析。
+- 题目路由（产品要求）：支持非数字题名（如“思维与拓展/旋转题”）；若无法定位，SSE 必须返回 `question_candidates` 供 UI 按钮选择，禁止继续沿用旧焦点乱讲。
 - 同步/异步：小批量尽量同步；预估超时/大批量返回 202+`job_id`，`/jobs/{job_id}` 查询状态。
 - 严格模式：英语 strict 模式需关键词提炼+阈值（~0.91）；回退策略按要求执行。
 - SSE：心跳 30s，90s 无数据可断开，支持 last-event-id 续接。
-- 视觉模型选择：仅允许用户选择白名单值 `doubao`(Ark) / `qwen3`(SiliconFlow)，默认 `doubao`；不向外暴露 OpenAI 视觉选项；后端需验证白名单避免任意 base_url/model 注入。`doubao` 仅支持公网 URL，`qwen3` 支持 URL 或 Base64 兜底。
+- 视觉模型选择：仅允许用户选择白名单值 `doubao`(Ark) / `qwen3`(SiliconFlow)，默认 `doubao`；不向外暴露 OpenAI 视觉选项；后端需验证白名单避免任意 base_url/model 注入。`doubao` 优先公网 URL，但允许 Data-URL(base64) 兜底（绕开 provider-side URL 拉取不稳定）；`qwen3` 支持 URL 或 Data-URL(base64) 兜底。
 - LLM/Chat 选择：Phase 1 `/grade` 与 `/chat` 当 provider=ark 时均使用 `ARK_REASONING_MODEL`（当前测试环境可指向 `doubao-seed-1-6-vision-250815`）；`ARK_REASONING_MODEL_THINKING` 不作为必需项。允许在白名单内通过 `llm_model` 做调试切换；不对外新增其他 LLM 选项，避免适配面膨胀。
 - MVP 验证策略：当前所有开发以本地测试跑通为先决条件，优先确保在本机环境（含本地存储/缓存）端到端可用，再考虑上线和云端替换。
 - 判定输出一致性（新增）：每题必须覆盖，标出学生作答/标准答案/is_correct；选项题写明 student_choice/correct_choice；verdict 仅 correct/incorrect/uncertain；severity 仅 calculation/concept/format/unknown/medium/minor；不确定标记 uncertain，不编造 bbox；`vision_raw_text` 必须返给客户端用于审计。
 - 题目定位与切片（BBox + Slice，MVP）：bbox 对象为“整题区域（题干+作答）”；允许多 bbox 列表；裁剪默认 5% padding，裁剪前 clamp 到 [0,1]；失败必须回退整页并写 warnings。切片 TTL 必须可配置（例如 24h 或 7d），Demo 可用 public bucket，生产建议 signed URL。
 - QIndex 后台任务（BBox/Slice）：不得在 API 主进程内执行 OCR/裁剪/上传等重任务；必须通过 Redis 队列交给独立 worker 处理（`python -m homework_agent.workers.qindex_worker`），API 仅 enqueue 并写入 `qindex queued` 占位 warnings。
 - QIndex 存储同源（产品化要求）：API 与 worker 必须连接同一个 Redis（同 `REDIS_URL`/`CACHE_PREFIX`），qindex 结果写入 `qindex:{session_id}` 后由 API 读取；无 Redis 或 OCR 未配置时，API 会写入 `qindex skipped: ...` 占位 warnings 以便客户端可解释降级。
+- 视觉事实（visual_facts，产品化要求）：由 `/grade` 同一次 Vision 调用生成，仅用于审计/复盘（不强制展示）。`judgment_basis` 作为用户可读的判定依据，必须在每题输出。
+  - 视觉事实输出为严格 JSON（允许 UNKNOWN）；若 visual_facts 缺失，仍需给出结论，但必须提示“视觉事实缺失，本次判断仅基于识别文本”。
+  - 可观测性：保留 `vfe_start/vfe_done/vfe_gate` 日志点位（如已接入），best-effort 写入 `qbank.questions[q].visual_facts` 便于复盘。
 - 数据保留（产品要求）：
   - 原始图片 + 批改结果 + 识别原文长期保留（除非用户删除或静默 180 天清理）；
   - chat_history 与切片默认 7 天 TTL（需有定时清理策略）。

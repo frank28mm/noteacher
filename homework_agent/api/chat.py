@@ -39,6 +39,17 @@ from homework_agent.utils.submission_store import (
     touch_submission,
 )
 from homework_agent.utils.url_image_helpers import _download_as_data_uri
+from homework_agent.utils.supabase_image_proxy import _create_proxy_image_urls
+
+from homework_agent.models.vision_facts import GateResult, SceneType, VisualFacts
+from homework_agent.services.vision_facts import (
+    VFE_CONF_MIN,
+    VFE_CONF_GEOMETRY,
+    detect_scene_type,
+    extract_visual_facts,
+    gate_visual_facts,
+    select_vfe_images,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +76,13 @@ async def _call_blocking_in_thread(
         )
 
 
-def _select_question_number_from_text(message: str, available: List[str]) -> Optional[str]:
+def _select_question_number_from_text(
+    message: str,
+    available: List[str],
+    question_meta: Optional[Dict[str, Any]] = None,
+    *,
+    allow_numeric_fallback: bool = True,
+) -> Tuple[Optional[str], str]:
     """
     Choose the best matching question_number from user message.
     Strategy (heuristic, deterministic):
@@ -75,58 +92,129 @@ def _select_question_number_from_text(message: str, available: List[str]) -> Opt
     - Fallback to common patterns like "第27题/27题/题27".
     """
     if not message or not available:
-        return None
+        return None, "none"
     msg = str(message)
+    msg_norm = msg.replace("（", "(").replace("）", ")")
     avail = [str(q) for q in (available or []) if q is not None and str(q).strip()]
     if not avail:
-        return None
+        return None, "none"
 
     # Collect all mentions with positions.
     mentions: List[Dict[str, Any]] = []
 
-    def _find_mentions(q: str) -> List[tuple[int, int]]:
-        if not q:
+    def _is_numeric_question_number(value: Optional[str]) -> bool:
+        if not value:
+            return False
+        s = str(value).strip().replace("（", "(").replace("）", ")")
+        s = re.sub(r"\s+", "", s)
+        s = re.sub(r"[①②③④⑤⑥⑦⑧⑨]", "", s)
+        return re.fullmatch(r"\d+(?:\(\d+\))?", s) is not None
+
+    def _normalize_text(value: str) -> str:
+        return (
+            str(value or "")
+            .strip()
+            .replace("（", "(")
+            .replace("）", ")")
+        )
+
+    def _find_mentions(term: str, numeric: bool) -> List[tuple[int, int]]:
+        if not term:
             return []
-        if q.isdigit():
+        if numeric:
             # Avoid matching "2" inside "28".
-            pat = re.compile(rf"(?<!\\d){re.escape(q)}(?!\\d)")
-            return [(m.start(), m.end()) for m in pat.finditer(msg)]
+            pat = re.compile(rf"(?<!\\d){re.escape(term)}(?!\\d)")
+            return [(m.start(), m.end()) for m in pat.finditer(msg_norm)]
         # Generic substring scan.
         out: List[tuple[int, int]] = []
         start = 0
         while True:
-            idx = msg.find(q, start)
+            idx = msg_norm.find(term, start)
             if idx < 0:
                 break
-            out.append((idx, idx + len(q)))
-            start = idx + max(1, len(q))
+            out.append((idx, idx + len(term)))
+            start = idx + max(1, len(term))
         return out
 
     for q in avail:
-        for s, e in _find_mentions(q):
-            mentions.append({"q": q, "start": s, "end": e})
+        qn = str(q)
+        qn_norm = _normalize_text(qn)
+        if not qn_norm:
+            continue
+        q_meta = question_meta.get(qn) if isinstance(question_meta, dict) else None
+        aliases: List[str] = [qn]
+        if isinstance(q_meta, dict):
+            extra = q_meta.get("question_aliases")
+            if isinstance(extra, list):
+                aliases.extend([str(a) for a in extra if a])
+
+        no_paren = re.sub(r"[（(][^）)]*[)）]", "", qn_norm).strip()
+        if no_paren and no_paren not in aliases:
+            aliases.append(no_paren)
+        alias_seen: set[str] = set()
+        numeric_qn = _is_numeric_question_number(qn_norm)
+        for alias in aliases:
+            alias_norm = _normalize_text(alias)
+            if not alias_norm or alias_norm in alias_seen:
+                continue
+            alias_seen.add(alias_norm)
+            if numeric_qn and alias_norm != qn_norm:
+                continue
+
+            for s, e in _find_mentions(alias_norm, numeric=numeric_qn):
+                if msg_norm == alias_norm:
+                    match_type = "exact"
+                elif qn_norm.startswith(alias_norm):
+                    match_type = "prefix"
+                elif alias_norm != qn_norm and alias_norm != no_paren:
+                    match_type = "keyword"
+                else:
+                    match_type = "contains"
+                mentions.append(
+                    {
+                        "q": qn,
+                        "start": s,
+                        "end": e,
+                        "match_type": match_type,
+                        "alias": alias_norm,
+                    }
+                )
+
+    if not mentions or not allow_numeric_fallback:
+        if mentions and not allow_numeric_fallback:
+            # Only allow non-numeric matches when numeric fallback is disabled.
+            non_numeric = [m for m in mentions if not _is_numeric_question_number(m.get("q"))]
+            if non_numeric:
+                # Prefer exact > prefix > contains > keyword, then latest mention.
+                priority = {"exact": 0, "prefix": 1, "contains": 2, "keyword": 3}
+                non_numeric.sort(key=lambda m: (priority.get(m["match_type"], 99), -m["start"], -len(m["alias"])))
+                chosen = non_numeric[0]
+                return chosen["q"], chosen["match_type"]
+            return None, "none"
+        if not allow_numeric_fallback:
+            return None, "none"
 
     if not mentions:
         # Fallback: patterns like "第27题/27题/题27/28(1)②"
         pattern = re.compile(
             r"(?:第\\s*)?(\\d{1,3}(?:\\s*\\(\\s*\\d+\\s*\\)\\s*)?(?:[①②③④⑤⑥⑦⑧⑨])?)(?:\\s*题)?"
         )
-        found = [(m.group(1), m.start(1), m.end(1)) for m in pattern.finditer(msg)]
+        found = [(m.group(1), m.start(1), m.end(1)) for m in pattern.finditer(msg_norm)]
         if not found:
-            return None
+            return None, "none"
         # Prefer the latest mention.
         raw, _, _ = sorted(found, key=lambda x: x[1])[-1]
         raw = _normalize_question_number(raw)
         if not raw:
-            return None
+            return None, "none"
         # Map to available keys.
         if raw in avail:
-            return raw
+            return raw, "numeric_fallback"
         pref = [q for q in avail if q.startswith(f"{raw}(") or q.startswith(raw)]
         if pref:
             # Prefer the shortest matching key (treat as "whole question" if available).
-            return sorted(pref, key=len)[0]
-        return None
+            return sorted(pref, key=len)[0], "numeric_fallback"
+        return None, "none"
 
     # Score mentions: prefer requested vs negated, then latest occurrence, then specificity.
     POS_HINTS = (
@@ -164,16 +252,20 @@ def _select_question_number_from_text(message: str, available: List[str]) -> Opt
     )
 
     best = None
+    best_match_type = "none"
     best_score = -10**18
+    weights = {"exact": 4000, "prefix": 3000, "contains": 2000, "keyword": 1000}
     for m in mentions:
         q = m["q"]
         s = int(m["start"])
         e = int(m["end"])
-        left = msg[max(0, s - 8) : s]
-        around = msg[max(0, s - 12) : min(len(msg), e + 12)]
+        left = msg_norm[max(0, s - 8) : s]
+        around = msg_norm[max(0, s - 12) : min(len(msg_norm), e + 12)]
+        match_type = m.get("match_type") or "contains"
+        alias_len = len(str(m.get("alias") or q))
 
-        score = 0
-        score += len(q) * 100  # specificity
+        score = weights.get(match_type, 0)
+        score += alias_len * 100  # specificity
         score += s  # prefer later mention
         if any(h in left for h in POS_HINTS):
             score += 500
@@ -186,8 +278,9 @@ def _select_question_number_from_text(message: str, available: List[str]) -> Opt
         if score > best_score:
             best_score = score
             best = q
+            best_match_type = match_type
 
-    return best
+    return best, best_match_type
 
 
 def _extract_requested_question_number(message: str) -> Optional[str]:
@@ -349,6 +442,14 @@ def _pick_relook_image_url(focus_question: Dict[str, Any]) -> Optional[str]:
             for p in pages:
                 if not isinstance(p, dict):
                     continue
+                # Prefer figure/diagram slices when available (geometry/pattern questions).
+                regions = p.get("regions")
+                if isinstance(regions, list):
+                    for r in regions:
+                        if not isinstance(r, dict):
+                            continue
+                        if (r.get("kind") or "").lower() == "figure" and r.get("slice_image_url"):
+                            return str(r.get("slice_image_url"))
                 slice_urls = p.get("slice_image_urls") or p.get("slice_image_url") or []
                 if isinstance(slice_urls, str) and slice_urls:
                     return slice_urls
@@ -408,7 +509,7 @@ def _user_requests_visual_check(message: str) -> bool:
             "看不到图片",
             "你没看到图",
             "你没看图",
-            "形状"
+            "形状",
             "位置关系",
             "表格",
             "统计图",
@@ -497,8 +598,31 @@ def _should_relook_focus_question(user_msg: str, focus_question: Dict[str, Any])
     if already_relooked:
         return False
 
-    # If grade flagged this question as visually risky, proactively re-look once on first entry.
-    if (focus_question or {}).get("visual_risk") is True:
+    # If grade flagged this question as visually risky (or qindex has a figure slice),
+    # proactively re-look once on first entry of that question.
+    has_figure_slice = False
+    try:
+        refs = (focus_question or {}).get("image_refs")
+        pages = None
+        if isinstance(refs, dict):
+            pages = refs.get("pages")
+        if not isinstance(pages, list):
+            pages = (focus_question or {}).get("pages")
+        if isinstance(pages, list):
+            for p in pages:
+                if not isinstance(p, dict):
+                    continue
+                regions = p.get("regions")
+                if isinstance(regions, list) and any(
+                    isinstance(r, dict) and (r.get("kind") or "").lower() == "figure" and r.get("slice_image_url")
+                    for r in regions
+                ):
+                    has_figure_slice = True
+                    break
+    except Exception:
+        has_figure_slice = False
+
+    if (focus_question or {}).get("visual_risk") is True or has_figure_slice:
         if _extract_requested_question_number(msg) or _has_explicit_question_switch_intent(msg):
             return True
 
@@ -525,70 +649,241 @@ async def _relook_focus_question_via_vision(
     subject: Subject,
     question_number: str,
     focus_question: Dict[str, Any],
+    user_text: str,
+    request_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Best-effort: run Vision again with a question-specific prompt to recover missing stem/examples.
+    Best-effort: run Vision Fact Extraction (VFE) on the best available slice for the focus question.
     Returns a dict that can be merged into focus_question, or None if relook failed.
     """
     settings = get_settings()
-    img_url = _pick_relook_image_url(focus_question)
-    if not img_url:
+    sel = select_vfe_images(focus_question=focus_question)
+    if not sel.image_urls:
         return None
 
-    # Prefer local download + data URI to avoid provider-side URL fetch flakiness.
-    data_uri = _download_as_data_uri(img_url)
     prefer_ark = bool(settings.ark_api_key and settings.ark_base_url)
     provider = VisionProvider.DOUBAO if prefer_ark else VisionProvider.QWEN3
-    images = [ImageRef(base64=data_uri)] if data_uri else [ImageRef(url=img_url)]
+    qcontent = str((focus_question or {}).get("question_content") or "")
+    visual_risk = bool((focus_question or {}).get("visual_risk") is True)
+    has_figure = bool(sel.image_source == "slice_figure")
+    image_urls = list(sel.image_urls)
+    image_source = sel.image_source
 
-    prompt = (
-        f"请只关注第{question_number}题。"
-        "如果题目包含示意图/箭头/表格/序列示例（如 ABCD 出现顺序、对应数字位置），必须原样抄写示例并用文字说明顺序/位置关系；不要推断。"
-        "特别重要的几何题要求："
-        "1. 必须详细描述所有线段的方向（水平/竖直/倾斜）和位置（上方/下方/左侧/右侧）"
-        "2. 必须明确标注各点的位置（如 A 在左，D 在右，AD 为水平线等）"
-        "3. 必须详细描述每个角的具体位置和在图形中的方位"
-        "4. 对于涉及平行线的题目，必须明确：哪条是截线，哪条是被截线，角分别在截线的哪一侧"
-        "5. 如果涉及同位角/内错角，必须明确说明角在截线的同侧还是两侧，在被截线的同旁还是之间"
-        "6. 对于角度关系判定，必须提供充分的视觉证据和位置描述"
-        "请输出：题目原文、选项（如有）、学生作答（如有）、学生作答状态，以及任何可能误读公式/规律的风险提示。"
+    # For large page images, proactively generate a lightweight proxy to reduce VFE timeouts.
+    if image_source == "page":
+        proxy_urls = _create_proxy_image_urls(image_urls, session_id=session_id, prefix="vfe_proxy/")
+        if proxy_urls:
+            image_urls = proxy_urls
+            image_source = "page_proxy"
+    scene_type = detect_scene_type(
+        subject=subject,
+        user_text=user_text,
+        question_content=qcontent,
+        visual_risk=visual_risk,
+        has_figure_slice=has_figure,
     )
-    # Re-look is user-facing; keep it bounded but not so short that it always times out on slow vision.
+
     budget = min(60.0, float(settings.grade_vision_timeout_seconds))
-    client = VisionClient()
+    if request_id:
+        log_event(
+            logger,
+            "vfe_start",
+            level="warning",
+            request_id=request_id,
+            session_id=session_id,
+            focus_qn=str(question_number),
+            scene_type=scene_type.value,
+            image_source=image_source,
+            image_url=image_urls[0],
+            budget_s=int(budget),
+        )
     try:
-        res = await _call_blocking_in_thread(
-            client.analyze,
-            images=images,
-            prompt=prompt,
+        facts, repaired_json, raw = await _call_blocking_in_thread(
+            extract_visual_facts,
+            image_urls=image_urls,
+            scene_type=scene_type,
             provider=provider,
             timeout_seconds=budget,
             semaphore=VISION_SEMAPHORE,
         )
     except asyncio.TimeoutError:
-        return {"relook_error": f"重识别超时: {int(budget)}s"}
+        # Retry once with proxy-sized images (helps provider-side timeouts on large slices).
+        if image_source != "page_proxy":
+            proxy_urls = _create_proxy_image_urls(image_urls, session_id=session_id, prefix="vfe_proxy/")
+            if proxy_urls:
+                retry_budget = min(40.0, budget)
+                try:
+                    facts, repaired_json, raw = await _call_blocking_in_thread(
+                        extract_visual_facts,
+                        image_urls=proxy_urls,
+                        scene_type=scene_type,
+                        provider=provider,
+                        timeout_seconds=retry_budget,
+                        semaphore=VISION_SEMAPHORE,
+                    )
+                    image_urls = proxy_urls
+                    image_source = f"{image_source}_proxy"
+                except asyncio.TimeoutError:
+                    pass
+                except Exception:
+                    pass
+        if "facts" in locals():
+            # Retry succeeded, continue with gating below.
+            pass
+        else:
+            gate = GateResult(
+                passed=False,
+                trigger="vision_timeout",
+                critical_unknowns_hit=[],
+                user_facing_message=f"我这边看图超时了（{int(budget)}s），暂时无法确认图形位置关系。",
+                repaired_json=False,
+            )
+            if request_id:
+                log_event(
+                    logger,
+                    "vfe_gate",
+                    level="warning",
+                    request_id=request_id,
+                    session_id=session_id,
+                    focus_qn=str(question_number),
+                    scene_type=scene_type.value,
+                    trigger=gate.trigger,
+                    image_source=image_source,
+                    critical_unknowns_hit=[],
+                )
+            return {"relook_error": f"VFE fail-closed: {gate.trigger}", "vfe_gate": gate.model_dump()}
     except Exception as e:
-        return {"relook_error": f"重识别失败: {e}"}
+        gate = GateResult(
+            passed=False,
+            trigger="vision_api_failed",
+            critical_unknowns_hit=[],
+            user_facing_message="视觉服务暂时不可用，我目前无法确认图形位置关系；请稍后重试或发更清晰的局部截图。",
+            repaired_json=False,
+        )
+        if request_id:
+            log_event(
+                logger,
+                "vfe_gate",
+                request_id=request_id,
+                    session_id=session_id,
+                    focus_qn=str(question_number),
+                    scene_type=scene_type.value,
+                    trigger=gate.trigger,
+                    image_source=image_source,
+                    critical_unknowns_hit=[],
+                    error=str(e),
+                    level="warning",
+                )
+        return {"relook_error": f"VFE fail-closed: {gate.trigger}", "vfe_gate": gate.model_dump()}
 
-    # Parse the relook text into a minimal per-question payload.
-    parsed = build_question_bank_from_vision_raw_text(
-        session_id=session_id,
-        subject=subject,
-        vision_raw_text=res.text or "",
-        page_image_urls=[img_url],
+    if not isinstance(facts, VisualFacts):
+        gate = GateResult(
+            passed=False,
+            trigger="parse_failure",
+            critical_unknowns_hit=[],
+            user_facing_message="我没能从图片里稳定提取到结构化事实，因此不能可靠判断图形位置关系；请发更清晰的局部截图或稍后重试。",
+            repaired_json=bool(repaired_json),
+        )
+        if request_id:
+            log_event(
+                logger,
+                "vfe_gate",
+                request_id=request_id,
+                session_id=session_id,
+                focus_qn=str(question_number),
+                scene_type=scene_type.value,
+                trigger=gate.trigger,
+                image_source=sel.image_source,
+                critical_unknowns_hit=[],
+                repaired_json=bool(repaired_json),
+                level="warning",
+            )
+        return {"relook_error": f"VFE fail-closed: {gate.trigger}", "vfe_gate": gate.model_dump()}
+
+    gate = gate_visual_facts(
+        facts=facts,
+        scene_type=scene_type,
+        visual_risk=visual_risk,
+        user_text=user_text,
+        image_source=sel.image_source,
+        repaired_json=bool(repaired_json),
     )
-    q = None
-    qs = parsed.get("questions") if isinstance(parsed, dict) else None
-    if isinstance(qs, dict):
-        q = qs.get(str(question_number))
-    payload: Dict[str, Any] = {"vision_recheck_text": (res.text or "")[:2200]}
-    if isinstance(q, dict):
-        for k in ("question_content", "student_answer", "answer_status", "options"):
-            if q.get(k):
-                payload[k] = q.get(k)
-        vw = q.get("warnings")
-        if isinstance(vw, list) and vw:
-            payload["warnings"] = list(dict.fromkeys((focus_question.get("warnings") or []) + vw))
+
+    if request_id:
+        log_event(
+            logger,
+            "vfe_done",
+            level="warning",
+            request_id=request_id,
+            session_id=session_id,
+            focus_qn=str(question_number),
+            scene_type=scene_type.value,
+            confidence=float(getattr(facts, "confidence", 0.0) or 0.0),
+            unknowns_count=len(getattr(facts, "unknowns", []) or []),
+            warnings_count=len(getattr(facts, "warnings", []) or []),
+            repaired_json=bool(repaired_json),
+            image_source=image_source,
+        )
+        if not gate.passed:
+            log_event(
+                logger,
+                "vfe_gate",
+                request_id=request_id,
+                session_id=session_id,
+                focus_qn=str(question_number),
+                scene_type=scene_type.value,
+                trigger=gate.trigger,
+                image_source=image_source,
+                critical_unknowns_hit=gate.critical_unknowns_hit,
+                repaired_json=bool(repaired_json),
+                level="warning",
+            )
+
+    payload: Dict[str, Any] = {
+        "visual_facts": facts.model_dump(),
+        "vfe_gate": gate.model_dump(),
+        "vfe_scene_type": scene_type.value,
+        "vfe_image_source": image_source,
+        "vfe_image_urls": image_urls[:2],
+    }
+
+    # Keep backward-compatible "vision_recheck_text" only when facts are usable.
+    if gate.passed:
+        preview_lines: List[str] = []
+        try:
+            bundle = facts.facts
+            for line in (bundle.lines or [])[:6]:
+                parts = [getattr(line, "name", None), getattr(line, "direction", None), getattr(line, "relative", None)]
+                preview_lines.append("- " + " ".join([str(p) for p in parts if p]))
+            for ang in (bundle.angles or [])[:6]:
+                parts = [
+                    getattr(ang, "name", None),
+                    f"at {getattr(ang, 'at', None)}" if getattr(ang, "at", None) else None,
+                    f"between {','.join(getattr(ang, 'between', None) or [])}"
+                    if getattr(ang, "between", None)
+                    else None,
+                    f"side={getattr(ang, 'transversal_side', None)}",
+                    f"between_lines={getattr(ang, 'between_lines', None)}",
+                ]
+                preview_lines.append("- " + " ".join([str(p) for p in parts if p]))
+        except Exception:
+            preview_lines = []
+        if not preview_lines and raw:
+            preview_lines = [raw[:800]]
+        payload["vision_recheck_text"] = "\n".join(preview_lines)[:2200]
+    else:
+        payload["relook_error"] = f"VFE fail-closed: {gate.trigger}"
+
+    # If confidence is borderline, keep a hint in warnings for transparency.
+    conf_threshold = (
+        VFE_CONF_GEOMETRY
+        if scene_type in (SceneType.MATH_GEOMETRY_2D, SceneType.MATH_GEOMETRY_3D)
+        else VFE_CONF_MIN
+    )
+    if float(getattr(facts, "confidence", 0.0) or 0.0) < float(conf_threshold):
+        ws = focus_question.get("warnings") if isinstance(focus_question.get("warnings"), list) else []
+        payload["warnings"] = list(dict.fromkeys((ws or []) + ["VFE: low confidence"]))
+
     return payload
 
 
@@ -828,6 +1123,7 @@ def _abort_with_assistant_message(
     message: str,
     done_status: str,
     retry_after_ms: Optional[int] = None,
+    question_candidates: Optional[List[str]] = None,
 ) -> None:
     session_data["history"].append({"role": "assistant", "content": message})
     save_session(session_id, session_data)
@@ -836,6 +1132,7 @@ def _abort_with_assistant_message(
         session_id=session_id,
         retry_after_ms=retry_after_ms,
         cross_subject_flag=None,
+        question_candidates=question_candidates,
     )
     chunks = [
         _sse_event("chat", payload.model_dump_json()),
@@ -852,6 +1149,7 @@ def _abort_with_user_and_assistant_message(
     assistant_message: str,
     done_status: str,
     retry_after_ms: Optional[int] = None,
+    question_candidates: Optional[List[str]] = None,
 ) -> None:
     session_data["history"].append({"role": "user", "content": user_message})
     session_data["history"].append({"role": "assistant", "content": assistant_message})
@@ -861,6 +1159,7 @@ def _abort_with_user_and_assistant_message(
         session_id=session_id,
         retry_after_ms=retry_after_ms,
         cross_subject_flag=None,
+        question_candidates=question_candidates,
     )
     chunks = [
         _sse_event("chat", payload.model_dump_json()),
@@ -1016,8 +1315,13 @@ async def _best_effort_relook_if_needed(
                 subject=req.subject,
                 question_number=str(fqnum),
                 focus_question=focus_obj,
+                user_text=req.question,
+                request_id=request_id,
             )
             if isinstance(patch, dict) and patch:
+                # Mark that VFE/relook was attempted in this turn (used for fail-closed gating).
+                if any(k in patch for k in ("vfe_gate", "visual_facts", "relook_error", "vision_recheck_text")):
+                    wrong_item_context["_vfe_attempted_this_turn"] = True
                 log_event(
                     logger,
                     "chat_relook_applied",
@@ -1056,6 +1360,40 @@ async def _best_effort_relook_if_needed(
                 wrong_item_context["focus_question"] = focus_obj
         except Exception as e2:
             logger.debug(f"Recording relook_error failed: {e2}")
+
+
+def _fail_closed_if_vfe_failed_this_turn(
+    *,
+    req: ChatRequest,
+    session_id: str,
+    session_data: Dict[str, Any],
+    wrong_item_context: Dict[str, Any],
+) -> None:
+    """
+    P0: If this turn attempted VFE and it failed for a visually risky question,
+    do NOT proceed to LLM (avoid "贴图但乱讲"). Return the gate's user-facing message.
+    """
+    if not wrong_item_context.get("_vfe_attempted_this_turn"):
+        return
+    focus_obj = wrong_item_context.get("focus_question")
+    if not isinstance(focus_obj, dict):
+        return
+    if focus_obj.get("visual_risk") is not True:
+        return
+    gate = focus_obj.get("vfe_gate")
+    if not (isinstance(gate, dict) and gate.get("passed") is False):
+        return
+    msg = str(gate.get("user_facing_message") or "").strip()
+    if not msg:
+        msg = "这题需要先稳定看清图形信息，但我本轮没有成功从图片里提取到可靠事实；请稍后再试或发更清晰的局部截图。"
+    _abort_with_user_and_assistant_message(
+        session_id=session_id,
+        session_data=session_data,
+        user_message=req.question,
+        assistant_message=msg,
+        done_status="continue",
+        retry_after_ms=1500,
+    )
 
 
 def _diagram_guardrail_abort_if_needed(
@@ -1179,19 +1517,7 @@ async def _run_chat_turn(
             done_status="error",
         )
 
-    await _best_effort_relook_if_needed(
-        req=req,
-        session_id=session_id,
-        request_id=request_id,
-        wrong_item_context=wrong_item_context,
-    )
-
-    _diagram_guardrail_abort_if_needed(
-        req=req,
-        session_id=session_id,
-        session_data=session_data,
-        wrong_item_context=wrong_item_context,
-    )
+    # Stable mode: chat does not run real-time VFE/relook.
 
     async for chunk in _stream_socratic_llm_to_sse(
         llm_client=llm_client,

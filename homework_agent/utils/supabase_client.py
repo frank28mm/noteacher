@@ -206,6 +206,21 @@ class SupabaseStorageClient:
         public_url = self.client.storage.from_(self.bucket).get_public_url(unique_filename)
         return str(public_url).rstrip("?")
 
+    def download_bytes(
+        self,
+        path: str,
+        *,
+        bucket_name: Optional[str] = None,
+    ) -> Optional[bytes]:
+        """从 Supabase Storage 下载文件并返回二进制内容"""
+        bucket = bucket_name or self.bucket
+        try:
+            data = self.client.storage.from_(bucket).download(path)
+            return data
+        except Exception as e:
+            logger.debug(f"Failed to download from Supabase storage: {e}")
+            return None
+
 
 def get_storage_client() -> SupabaseStorageClient:
     """获取 SupabaseStorageClient 实例 (单例模式)"""

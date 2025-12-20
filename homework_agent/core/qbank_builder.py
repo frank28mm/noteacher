@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from homework_agent.core.slice_policy import analyze_visual_risk
@@ -51,6 +52,36 @@ def _normalize_question_number(value: Any) -> Optional[str]:
     from homework_agent.core.qbank_parser import _normalize_question_number as _norm
 
     return _norm(value)
+
+
+def _is_numeric_question_number(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    s = str(value).strip().replace("（", "(").replace("）", ")")
+    s = re.sub(r"\s+", "", s)
+    s = re.sub(r"[①②③④⑤⑥⑦⑧⑨]", "", s)
+    return re.fullmatch(r"\d+(?:\(\d+\))?", s) is not None
+
+
+def _generate_question_aliases(qn: str) -> List[str]:
+    """
+    Generate aliases for non-numeric question titles.
+    Example: "思维与拓展(旋转题)" -> ["思维与拓展(旋转题)", "思维与拓展", "思维", "拓展", "旋转题"]
+    """
+    s = str(qn or "").strip()
+    if not s:
+        return []
+    s = s.replace("（", "(").replace("）", ")")
+    aliases: List[str] = [s]
+    no_paren = re.sub(r"[（(][^）)]*[)）]", "", s).strip()
+    if no_paren and no_paren != s:
+        aliases.append(no_paren)
+    tokens = re.split(r"[与和、/\\s]+|[()（）]", s)
+    for t in tokens:
+        t = t.strip()
+        if len(t) >= 2 and t not in aliases:
+            aliases.append(t)
+    return aliases
 
 
 def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -136,6 +167,7 @@ def build_question_bank(
     questions: List[Dict[str, Any]],
     vision_raw_text: str,
     page_image_urls: List[str],
+    visual_facts_map: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a queryable question bank snapshot keyed by question_number."""
     qlist = normalize_questions(questions)
@@ -204,7 +236,19 @@ def build_question_bank(
         q["visual_risk"] = bool(vr)
         if reasons:
             q["visual_risk_reasons"] = reasons
+        # Attach aliases for non-numeric question titles (used by chat routing).
+        if not _is_numeric_question_number(qn):
+            q["question_aliases"] = _generate_question_aliases(str(qn))
+        else:
+            q["question_aliases"] = []
         by_qn[str(qn)] = q
+
+    # 4) Attach visual_facts (if provided) to per-question payloads.
+    if isinstance(visual_facts_map, dict):
+        for qn, facts in visual_facts_map.items():
+            qn_str = str(qn)
+            if qn_str in by_qn and isinstance(by_qn.get(qn_str), dict) and isinstance(facts, dict):
+                by_qn[qn_str]["visual_facts"] = facts
     return {
         "session_id": session_id,
         "subject": subject.value if hasattr(subject, "value") else str(subject),
@@ -296,4 +340,3 @@ def dedupe_wrong_items(wrong_items: List[Dict[str, Any]]) -> List[Dict[str, Any]
         seen.add(key)
         deduped.append(item)
     return deduped
-

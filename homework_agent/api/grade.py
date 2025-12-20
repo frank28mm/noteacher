@@ -23,7 +23,10 @@ from homework_agent.services.llm import LLMClient, MathGradingResult, EnglishGra
 from homework_agent.services.qindex_queue import enqueue_qindex_job
 from homework_agent.utils.settings import get_settings
 from homework_agent.core.qindex import qindex_is_configured
+from homework_agent.models.vision_facts import SceneType
+from homework_agent.services.vision_facts import parse_visual_facts_map, _extract_first_json_object
 from homework_agent.core.qbank import (
+    _normalize_question_number,
     assign_stable_item_ids,
     build_question_bank,
     build_question_bank_from_vision_raw_text,
@@ -33,6 +36,7 @@ from homework_agent.core.qbank import (
 )
 from homework_agent.core.slice_policy import should_create_slices_for_bank
 from homework_agent.core.slice_policy import pick_question_numbers_for_slices
+from homework_agent.core.slice_policy import analyze_visual_risk
 from homework_agent.api.session import (
     cache_store,
     save_mistakes,
@@ -215,13 +219,48 @@ def cache_response(idempotency_key: str, response: GradeResponse) -> None:
     )
 
 
+VISION_OCR_START = "<<<OCR_TEXT>>>"
+VISION_OCR_END = "<<<END_OCR_TEXT>>>"
+VISION_FACTS_START = "<<<VISUAL_FACTS_JSON>>>"
+VISION_FACTS_END = "<<<END_VISUAL_FACTS_JSON>>>"
+
 GRADE_VISION_PROMPT = (
-    "请识别并提取作业内容，包括题目、答案和解题步骤。逐题输出“学生作答状态”：若看到答案/勾选则写明，若未看到答案/空白/未勾选，明确标注“未作答”或“可能未作答”。"
-    "选择题必须完整列出选项（A/B/C/D 每一项的原文），并明确学生选择了哪个选项；若未勾选，标注未作答。"
-    "对含幂/分式/下标的公式请双写：先按原式抄写（含上下标、分式），再给出纯文本展开形式（如 10^(n+1)、(a-b)^2/(c+d)）。"
-    "特别自检指数/分母的 +1、±、平方/立方等细节，如有疑似误读，直接在结果中标注“可能误读公式：…”。"
-    "对“规律/序列/图示题”（含箭头/示例/表格/图形），必须先原样抄写题目给出的示例（例如 A→B→C→D→C→B 或对应数字位置），不要凭空推断；若示例在图中，请描述图中出现的字母/顺序/位置关系。"
-    "注意：你只负责识别与抄录（OCR+结构化），不要进行解题/判定/推理，不要写出你推断的正确答案或规律（例如“应为6n+3”这类）。如果示例/图中信息没识别出来，请明确写“示例未识别到/看不清”，并在 warnings 中标注风险。"
+    "请同时输出【OCR识别原文】与【图形视觉事实】两部分，格式必须严格遵守（不要输出其它文本/Markdown）：\n"
+    f"{VISION_OCR_START}\n"
+    "请识别并提取作业内容，包括题目、答案和解题步骤。逐题输出“学生作答状态”：若看到答案/勾选则写明，若未看到答案/空白/未勾选，明确标注“未作答”或“可能未作答”。\n"
+    "选择题必须完整列出选项（A/B/C/D 每一项的原文），并明确学生选择了哪个选项；若未勾选，标注未作答。\n"
+    "对含幂/分式/下标的公式请双写：先按原式抄写（含上下标、分式），再给出纯文本展开形式（如 10^(n+1)、(a-b)^2/(c+d)）。\n"
+    "特别自检指数/分母的 +1、±、平方/立方等细节，如有疑似误读，直接在结果中标注“可能误读公式：…”。\n"
+    "对“规律/序列/图示题”（含箭头/示例/表格/图形），必须先原样抄写题目给出的示例（例如 A→B→C→D→C→B 或对应数字位置），不要凭空推断；若示例在图中，请描述图中出现的字母/顺序/位置关系。\n"
+    "注意：你只负责识别与抄录，不要进行解题/判定/推理；不要写出你推断的正确答案或规律（例如“应为6n+3”这类）。如果示例/图中信息没识别出来，请明确写“示例未识别到/看不清”，并在 warnings 中标注风险。\n"
+    f"{VISION_OCR_END}\n\n"
+    f"{VISION_FACTS_START}\n"
+    "输出严格 JSON（不要 extra 文本/Markdown），结构如下：\n"
+    "{\n"
+    '  "questions": {\n'
+    '    "9": {\n'
+    '      "scene_type": "math.geometry_2d|math.function_graph|...|unknown",\n'
+    '      "figure_present": "true|false|unknown",\n'
+    '      "confidence": 0.0,\n'
+    '      "facts": {\n'
+    '        "lines": [{"name":"AD","direction":"horizontal","relative":"above BC"}],\n'
+    '        "points": [{"name":"A","relative":"left_of D; above B"}],\n'
+    '        "angles": [{"name":"∠2","at":"D","between":["AD","DC"],"transversal_side":"left|right|unknown","between_lines":"true|false|unknown"}],\n'
+    '        "labels": ["30° at C"],\n'
+    '        "spatial": ["AD above BC"]\n'
+    "      },\n"
+    '      "hypotheses": [{"statement":"...","confidence":0.0,"evidence":["..."]}],\n'
+    '      "unknowns": ["diagram_missing"],\n'
+    '      "warnings": []\n'
+    "    }\n"
+    "  }\n"
+    "}\n"
+    "规则：\n"
+    "- facts 只能客观描述（上/下/左/右/在XX之间/线段方向），不得输出“同位角/内错角/平行/垂直”等关系判定词。\n"
+    "- 必须输出 figure_present（true/false/unknown），仅基于视觉识别，不做推断。\n"
+    "- 如果看不清/不确定，写 UNKNOWN，并放入 unknowns。\n"
+    "- 每道题都给一个对象；无图则 unknowns 包含 diagram_missing。\n"
+    f"{VISION_FACTS_END}"
 )
 
 
@@ -285,11 +324,105 @@ def _init_grading_ctx(req: GradeRequest, provider_str: str) -> _GradingCtx:
     )
 
 
+def _split_vision_output(text: Optional[str]) -> tuple[str, Optional[str], str]:
+    """Split vision output into OCR text + visual_facts JSON block (if present)."""
+    s = (text or "").strip()
+    if not s:
+        return "", None, "fail"
+    if VISION_OCR_START in s and VISION_OCR_END in s:
+        ocr = s.split(VISION_OCR_START, 1)[1].split(VISION_OCR_END, 1)[0].strip()
+        facts = None
+        if VISION_FACTS_START in s and VISION_FACTS_END in s:
+            facts = s.split(VISION_FACTS_START, 1)[1].split(VISION_FACTS_END, 1)[0].strip()
+        return ocr or s, facts, "marker"
+    # Fallback: some models ignore markers and use CN headers.
+    cn_facts_tag = "【图形视觉事实】"
+    if cn_facts_tag in s:
+        before, after = s.split(cn_facts_tag, 1)
+        ocr = re.sub(r"^【OCR识别原文】\s*", "", before.strip()).strip()
+        facts = after.strip()
+        facts = re.sub(r"^```(?:json)?", "", facts, flags=re.IGNORECASE).strip()
+        facts = facts.strip("`").strip()
+        return ocr or s, facts or None, "cn"
+
+    # Fallback: Markdown header format (### VISUAL_FACTS_JSON)
+    md_facts_patterns = [
+        r"###\s*VISUAL_FACTS_JSON\s*",
+        r"###\s*visual_facts_json\s*",
+        r"###\s*Visual Facts JSON\s*",
+    ]
+    for pattern in md_facts_patterns:
+        match = re.search(pattern, s, re.IGNORECASE)
+        if match:
+            before = s[:match.start()].strip()
+            after = s[match.end():].strip()
+            ocr = re.sub(r"^###\s*OCR[识识]?别?原文\s*", "", before, flags=re.IGNORECASE).strip()
+            facts = after.strip()
+            facts = re.sub(r"^```(?:json)?", "", facts, flags=re.IGNORECASE).strip()
+            facts = facts.strip("`").strip()
+            return ocr or s, facts or None, "md"
+
+
+    block = _extract_first_json_object(s)
+    if block:
+        ocr = s.replace(block, "").strip()
+        return ocr or s, block, "json"
+
+    # JSON repair: try to recover truncated JSON by appending closing brackets
+    json_start = s.find("{")
+    if json_start >= 0:
+        candidate = s[json_start:]
+        for suffix in ["}", "}}", "}}}", "]}", "]}}"]:
+            try:
+                import json
+                json.loads(candidate + suffix)
+                ocr = s[:json_start].strip() or s
+                return ocr, candidate + suffix, "repair"
+            except Exception:
+                continue
+
+    return s, None, "fail"
+
+
+
+def _extract_figure_present_map(visual_facts_map: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    if not isinstance(visual_facts_map, dict) or not visual_facts_map:
+        return None
+    out: Dict[str, str] = {}
+    for qn, facts in visual_facts_map.items():
+        if not isinstance(facts, dict):
+            continue
+        raw = facts.get("figure_present")
+        if isinstance(raw, bool):
+            val = "true" if raw else "false"
+        else:
+            val = str(raw or "").strip().lower()
+        if val in {"true", "false", "unknown"}:
+            out[str(qn)] = val
+    return out or None
+
+
+def _attach_visual_facts_to_bank(bank: Dict[str, Any], visual_facts_map: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Best-effort: attach per-question visual_facts into qbank questions."""
+    if not (isinstance(bank, dict) and visual_facts_map and isinstance(visual_facts_map, dict)):
+        return bank
+    qs = bank.get("questions")
+    if not isinstance(qs, dict):
+        return bank
+    for qn, facts in visual_facts_map.items():
+        qn_str = str(qn)
+        if qn_str in qs and isinstance(qs.get(qn_str), dict) and isinstance(facts, dict):
+            qs[qn_str]["visual_facts"] = facts
+    bank["questions"] = qs
+    return bank
+
+
 def _abort_llm_stage_with_vision_only_bank(
     *,
     ctx: _GradingCtx,
     req: GradeRequest,
     vision_raw_text: str,
+    visual_facts_map: Optional[Dict[str, Any]],
     page_image_urls: List[str],
     reason_summary: str,
     warn_text: str,
@@ -302,6 +435,7 @@ def _abort_llm_stage_with_vision_only_bank(
             vision_raw_text=vision_raw_text,
             page_image_urls=page_image_urls,
         )
+        bank_fallback = _attach_visual_facts_to_bank(bank_fallback, visual_facts_map)
         extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
         persist_question_bank(
             session_id=ctx.session_id,
@@ -315,6 +449,7 @@ def _abort_llm_stage_with_vision_only_bank(
     else:
         warnings = [warn_text]
 
+    figure_present_map = _extract_figure_present_map(visual_facts_map)
     raise _GradingAbort(
         GradeResponse(
             wrong_items=[],
@@ -328,6 +463,8 @@ def _abort_llm_stage_with_vision_only_bank(
             cross_subject_flag=None,
             warnings=warnings,
             vision_raw_text=vision_raw_text,
+            visual_facts=visual_facts_map or None,
+            figure_present=figure_present_map,
         )
     )
 
@@ -338,6 +475,7 @@ def _abort_parse_failed_after_fallbacks(
     req: GradeRequest,
     grading_result: Any,
     vision_raw_text: str,
+    visual_facts_map: Optional[Dict[str, Any]],
     page_image_urls: List[str],
     vision_fallback_warning: Optional[str],
 ) -> None:
@@ -349,6 +487,7 @@ def _abort_parse_failed_after_fallbacks(
             vision_raw_text=vision_raw_text,
             page_image_urls=page_image_urls,
         )
+        bank_fallback = _attach_visual_facts_to_bank(bank_fallback, visual_facts_map)
         extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
         persist_question_bank(
             session_id=ctx.session_id,
@@ -363,6 +502,7 @@ def _abort_parse_failed_after_fallbacks(
     else:
         extra_warn = None
 
+    figure_present_map = _extract_figure_present_map(visual_facts_map)
     raise _GradingAbort(
         GradeResponse(
             wrong_items=sanitize_wrong_items(getattr(grading_result, "wrong_items", []) or []),
@@ -378,6 +518,8 @@ def _abort_parse_failed_after_fallbacks(
             + ([vision_fallback_warning] if vision_fallback_warning else [])
             + ([extra_warn] if ctx.session_id and extra_warn else []),
             vision_raw_text=vision_raw_text,
+            visual_facts=visual_facts_map or None,
+            figure_present=figure_present_map,
         )
     )
 
@@ -388,6 +530,7 @@ def _persist_done_qbank_snapshot(
     req: GradeRequest,
     grading_result: Any,
     vision_raw_text: str,
+    visual_facts_map: Optional[Dict[str, Any]],
     page_image_urls: List[str],
     vision_fallback_warning: Optional[str],
 ) -> Optional[str]:
@@ -403,6 +546,7 @@ def _persist_done_qbank_snapshot(
         questions=questions_list,
         vision_raw_text=vision_raw_text,
         page_image_urls=page_image_urls,
+        visual_facts_map=visual_facts_map,
     )
     extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank) else None
     persist_question_bank(
@@ -519,8 +663,11 @@ def _build_done_grade_response(
     req: GradeRequest,
     grading_result: Any,
     vision_raw_text: str,
+    visual_facts_map: Optional[Dict[str, Any]],
+    figure_present_map: Optional[Dict[str, str]],
     vision_fallback_warning: Optional[str],
     extra_warn: Optional[str],
+    visual_facts_warn: Optional[str],
 ) -> GradeResponse:
     return GradeResponse(
         wrong_items=grading_result.wrong_items,
@@ -532,10 +679,25 @@ def _build_done_grade_response(
         total_items=grading_result.total_items,
         wrong_count=grading_result.wrong_count,
         cross_subject_flag=grading_result.cross_subject_flag,
-        warnings=((grading_result.warnings or []) + ([vision_fallback_warning] if vision_fallback_warning else []))
-        + ([extra_warn] if ctx.session_id and extra_warn else []),
+        warnings=(
+            (grading_result.warnings or [])
+            + ([vision_fallback_warning] if vision_fallback_warning else [])
+            + ([visual_facts_warn] if visual_facts_warn else [])
+            + ([extra_warn] if ctx.session_id and extra_warn else [])
+        ),
         vision_raw_text=vision_raw_text,
+        visual_facts=visual_facts_map or None,
+        figure_present=figure_present_map,
+        questions=getattr(grading_result, "questions", None),
     )
+
+
+
+def _apply_visual_risk_fail_closed(grading_result: Any, subject: Subject) -> Any:
+    """
+    Deprecated: fail-closed gating is disabled in stable mode.
+    """
+    return grading_result
 
 
 async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse:
@@ -549,21 +711,64 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
     except _GradingAbort as abort:
         return abort.response
 
+    vision_full_text = str(getattr(vision_result, "text", "") or "")
+    vision_raw_text, visual_facts_json, parse_path = _split_vision_output(vision_full_text)
+    visual_facts_map: Dict[str, Any] = {}
+    visual_facts_warn: Optional[str] = None
+    visual_facts_repaired = False
+    if visual_facts_json:
+        visual_facts_map, visual_facts_repaired = parse_visual_facts_map(
+            visual_facts_json, scene_type=SceneType.UNKNOWN
+        )
+        if not visual_facts_map:
+            visual_facts_warn = "视觉事实解析失败，本次判断仅基于识别原文。"
+    else:
+        visual_facts_warn = "视觉事实缺失，本次判断仅基于识别原文。"
+
+    parse_path_final = "repair" if visual_facts_repaired else parse_path
+    log_event(
+        logger,
+        "grade_vision_split",
+        session_id=ctx.session_id,
+        request_id=ctx.request_id,
+        has_markers=bool(VISION_OCR_START in vision_full_text and VISION_FACTS_START in vision_full_text),
+        has_cn_facts=bool("【图形视觉事实】" in vision_full_text),
+        ocr_len=len(vision_raw_text or ""),
+        facts_len=len(visual_facts_json or ""),
+        parse_path=parse_path_final,
+    )
+
+    ctx.meta_base["visual_facts_available"] = bool(visual_facts_map)
+    ctx.meta_base["visual_facts_repaired_json"] = bool(visual_facts_repaired)
+    figure_present_map = _extract_figure_present_map(visual_facts_map)
+
     llm_client = LLMClient()
+    vision_text_for_llm = vision_raw_text
+    if visual_facts_map:
+        try:
+            vision_text_for_llm = (
+                f"{vision_raw_text}\n\n[visual_facts]\n"
+                + json.dumps(visual_facts_map, ensure_ascii=False)
+            )
+        except Exception:
+            vision_text_for_llm = vision_raw_text
 
     try:
         grading_result = await _run_grade_llm(
             ctx=ctx,
             req=req,
             llm_client=llm_client,
-            vision_text=str(getattr(vision_result, "text", "") or ""),
+            vision_text=vision_text_for_llm,
         )
+        if visual_facts_warn:
+            grading_result.warnings = list(dict.fromkeys((grading_result.warnings or []) + [visual_facts_warn]))
 
     except asyncio.TimeoutError as e:
         _abort_llm_stage_with_vision_only_bank(
             ctx=ctx,
             req=req,
-            vision_raw_text=vision_result.text,
+            vision_raw_text=vision_raw_text,
+            visual_facts_map=visual_facts_map,
             page_image_urls=ctx.page_image_urls,
             reason_summary="LLM grading timeout",
             warn_text=f"LLM timeout: {str(e)}",
@@ -572,7 +777,8 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         _abort_llm_stage_with_vision_only_bank(
             ctx=ctx,
             req=req,
-            vision_raw_text=vision_result.text,
+            vision_raw_text=vision_raw_text,
+            visual_facts_map=visual_facts_map,
             page_image_urls=ctx.page_image_urls,
             reason_summary=f"LLM grading failed: {str(e)}",
             warn_text=f"LLM error: {str(e)}",
@@ -584,7 +790,8 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             ctx=ctx,
             req=req,
             grading_result=grading_result,
-            vision_raw_text=vision_result.text,
+            vision_raw_text=vision_raw_text,
+            visual_facts_map=visual_facts_map,
             page_image_urls=ctx.page_image_urls,
             vision_fallback_warning=vision_fallback_warning,
         )
@@ -594,7 +801,8 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         ctx=ctx,
         req=req,
         grading_result=grading_result,
-        vision_raw_text=vision_result.text,
+        vision_raw_text=vision_raw_text,
+        visual_facts_map=visual_facts_map,
         page_image_urls=ctx.page_image_urls,
         vision_fallback_warning=vision_fallback_warning,
     )
@@ -607,9 +815,12 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
         ctx=ctx,
         req=req,
         grading_result=grading_result,
-        vision_raw_text=vision_result.text,
+        vision_raw_text=vision_raw_text,
+        visual_facts_map=visual_facts_map,
+        figure_present_map=figure_present_map,
         vision_fallback_warning=vision_fallback_warning,
         extra_warn=extra_warn,
+        visual_facts_warn=visual_facts_warn,
     )
 
 
@@ -797,6 +1008,7 @@ async def grade_homework(
             cross_subject_flag=None,
             warnings=["大批量任务已转为异步处理"],
             vision_raw_text=None,
+            figure_present=None,
         )
 
     try:
