@@ -178,6 +178,10 @@ class GradeRequest(BaseModel):
         VisionProvider.DOUBAO,
         description="Vision provider selection, default doubao (URL preferred; may use data-url(base64) fallback); qwen3 is optional fallback (URL or data-url)",
     )
+    llm_provider: Optional[str] = Field(
+        None,
+        description="LLM provider for grading: 'ark' (doubao), 'silicon' (qwen3). If None, uses config default.",
+    )
     mode: Optional[SimilarityMode] = Field(
         None, description="normal/strict (applies to English grading)"
     )

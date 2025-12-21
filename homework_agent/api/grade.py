@@ -760,7 +760,8 @@ async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse
             llm_client=llm_client,
             vision_text=vision_text_for_llm,
         )
-        if visual_facts_warn:
+        # Only add visual_facts warning if the map is truly empty after all parsing attempts
+        if visual_facts_warn and not visual_facts_map:
             grading_result.warnings = list(dict.fromkeys((grading_result.warnings or []) + [visual_facts_warn]))
 
     except asyncio.TimeoutError as e:
@@ -973,7 +974,11 @@ async def grade_homework(
 
     # 3. 决定同步/异步
     is_large_batch = len(req.images) > 5
-    provider_str = "silicon" if req.vision_provider == VisionProvider.QWEN3 else "ark"
+    # LLM provider: use explicit llm_provider if set, else derive from vision_provider
+    if req.llm_provider:
+        provider_str = req.llm_provider  # "ark" or "silicon"
+    else:
+        provider_str = "silicon" if req.vision_provider == VisionProvider.QWEN3 else "ark"
 
     if is_large_batch:
         job_id = generate_job_id()

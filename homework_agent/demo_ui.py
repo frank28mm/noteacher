@@ -320,10 +320,28 @@ def format_vision_raw_text(result: Dict[str, Any]) -> str:
     vision_raw = re.sub(r"---VISUAL_FACTS_JSON---.*", "", vision_raw, flags=re.DOTALL).strip()
     vision_raw = re.sub(r"<<<[A-Z_]+>>>\s*", "", vision_raw).strip()
     vision_raw = re.sub(r"<<<END_[A-Z_]+>>>\s*", "", vision_raw).strip()
+    
+    # Strip JSON blocks that might appear at the end (e.g., visual_facts JSON)
+    vision_raw = re.sub(r"```json\s*\{.*", "", vision_raw, flags=re.DOTALL).strip()
+    vision_raw = re.sub(r"\{[\s\n]*\"questions\":\s*\{.*", "", vision_raw, flags=re.DOTALL).strip()
+    
+    # Convert LaTeX delimiters from \( \) to $ $ for MathJax rendering
+    # First handle escaped backslashes: \\( \\) -> $ $
+    vision_raw = re.sub(r"\\\(", "$", vision_raw)
+    vision_raw = re.sub(r"\\\)", "$", vision_raw)
+    # Also handle display math: \[ \] -> $$ $$
+    vision_raw = re.sub(r"\\\[", "$$", vision_raw)
+    vision_raw = re.sub(r"\\\]", "$$", vision_raw)
+    
+    # Use blockquote format to allow LaTeX rendering via MathJax (instead of code block which prevents it)
+    # Add blockquote prefix to each line
+    lines = vision_raw.split("\n")
+    quoted_lines = [f"> {line}" for line in lines]
+    quoted_text = "\n".join(quoted_lines)
     return (
         "<details>\n"
         "<summary>📷 识别原文（点击查看）</summary>\n\n"
-        f"```\n{vision_raw}\n```\n"
+        f"{quoted_text}\n"
         "</details>"
     )
 
@@ -633,7 +651,11 @@ def format_grade_report(result: Dict[str, Any]) -> str:
         for warning in result.get("warnings") or []:
             if warning not in seen:
                 # Filter out internal/technical warnings not meant for users
-                if "URL 拉取失败" in warning or "url_head status" in warning:
+                if (
+                    "URL 拉取失败" in warning
+                    or "url_head status" in warning
+                    or "视觉事实" in warning
+                ):
                     continue
                 md += f"- {warning}\n"
                 seen.add(warning)
@@ -645,11 +667,29 @@ def format_grade_report(result: Dict[str, Any]) -> str:
     return md
 
 
+def _chunk_text_for_stream(text: str, *, max_chars: int = 240) -> List[str]:
+    """Split text into small chunks for streaming display."""
+    if not text:
+        return [""]
+    chunks: List[str] = []
+    buf = ""
+    for line in text.splitlines(keepends=True):
+        if buf and len(buf) + len(line) > max_chars:
+            chunks.append(buf)
+            buf = line
+        else:
+            buf += line
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
 async def call_grade_api(
     *,
     upload_id: str,
     subject: str,
     provider: str,
+    llm_provider: str,
     session_id: str,
     auth_token: Optional[str],
 ) -> Dict[str, Any]:
@@ -659,7 +699,8 @@ async def call_grade_api(
         "upload_id": upload_id,
         "subject": subject,
         "session_id": session_id,
-        "vision_provider": provider
+        "vision_provider": provider,
+        "llm_provider": llm_provider,
     }
 
     # Demo 端的 HTTP timeout 必须 ≥ 后端 grade 的 SLA，否则前端会“系统报错”但后端仍在跑。
@@ -776,7 +817,7 @@ async def call_chat_api(
     return content or "无响应"
 
 
-async def grade_homework_logic(img_path, subject, provider, auth_token, history):
+async def grade_homework_logic(img_path, subject, provider, llm_provider, auth_token, history):
     """批改作业主逻辑（流式状态更新）：上传 → Vision → 批改 → 渲染到 Chat"""
     # gr.File returns path string or object with .name
     if hasattr(img_path, "name"):
@@ -836,6 +877,7 @@ async def grade_homework_logic(img_path, subject, provider, auth_token, history)
                 upload_id=upload_id,
                 subject=subject,
                 provider=provider,
+                llm_provider=llm_provider,
                 session_id=session_id,
                 auth_token=auth_token,
             )
@@ -863,8 +905,14 @@ async def grade_homework_logic(img_path, subject, provider, auth_token, history)
                 }
             )
             image_added = True
-        history.append({"role": "assistant", "content": format_grade_report(result)})
-        yield history, session_id, page_url, _render_stage_lines("done", int(time.monotonic() - started))
+        report = format_grade_report(result)
+        history.append({"role": "assistant", "content": ""})
+        for chunk in _chunk_text_for_stream(report):
+            history[-1]["content"] += chunk
+            yield history, session_id, page_url, _render_stage_lines(
+                "done", int(time.monotonic() - started)
+            )
+            await asyncio.sleep(0.02)
         return
 
     except ValueError as e:
@@ -1209,7 +1257,13 @@ def create_demo():
                         provider_dropdown = gr.Dropdown(
                             choices=["doubao", "qwen3"],
                             value="doubao",
-                            label="🤖 视觉模型 (Provider)",
+                            label="🤖 视觉模型 (Vision)",
+                        )
+                        llm_dropdown = gr.Dropdown(
+                            choices=["ark", "silicon"],
+                            value="ark",
+                            label="🧠 批改模型 (LLM)",
+                            info="ark=doubao-seed, silicon=qwen3-max",
                         )
                         grade_btn = gr.Button("🚀 开始识别/批改", variant="primary")
                         status_md = gr.Markdown(label="状态")
@@ -1238,7 +1292,7 @@ def create_demo():
 
                 grade_btn.click(
                     fn=grade_homework_logic,
-                    inputs=[input_img, subject_dropdown, provider_dropdown, auth_token_state, chatbot],
+                    inputs=[input_img, subject_dropdown, provider_dropdown, llm_dropdown, auth_token_state, chatbot],
                     outputs=[chatbot, session_id_state, image_url_state, status_md],
                 )
 

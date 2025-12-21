@@ -89,7 +89,8 @@ def main() -> int:
                 continue
 
             bank = get_question_bank(job.session_id) or {}
-            allow = job.question_numbers or pick_question_numbers_for_slices(bank)
+            # Slice all questions - removed visual_risk filtering to ensure comprehensive coverage
+            allow = job.question_numbers or None  # None = no filtering, slice all detected questions
             log_event(
                 logger,
                 "qindex_job_start",

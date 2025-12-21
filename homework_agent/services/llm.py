@@ -72,6 +72,14 @@ def _extract_first_json_object(text: str) -> Optional[str]:
 
 
 def _repair_json_text(text: str) -> Optional[str]:
+    """
+    Attempt to repair malformed JSON from LLM output.
+    
+    Handles common issues:
+    - Trailing commas before } or ]
+    - Missing commas between elements (e.g., }{, ][, "...", etc.)
+    - Leading/trailing prose around JSON block
+    """
     if not text:
         return None
     s = str(text)
@@ -81,10 +89,87 @@ def _repair_json_text(text: str) -> Optional[str]:
         end = s.rfind("}")
         if start >= 0 and end > start:
             block = s[start : end + 1]
+        elif start >= 0:
+            # Truncated JSON - no closing brace found, extract from start to end
+            block = s[start:]
         else:
             return None
-    # Remove trailing commas before closing braces/brackets.
+    
+    # Step 1: Remove trailing commas before closing braces/brackets.
     cleaned = re.sub(r",\s*([}\]])", r"\1", block)
+    
+    # Step 2: Insert missing commas between elements.
+    # Pattern: `}` followed by whitespace/newline then `{` or `"` (next element)
+    cleaned = re.sub(r"}\s*\n\s*{", r"},\n{", cleaned)
+    cleaned = re.sub(r"}\s*\n\s*\"", r"},\n\"", cleaned)
+    # Pattern: `]` followed by whitespace/newline then `{` or `[` (next element in array context)
+    cleaned = re.sub(r"]\s*\n\s*\[", r"],\n[", cleaned)
+    cleaned = re.sub(r"]\s*\n\s*{", r"},\n{", cleaned)  # Note: this might be inside an array of objects
+    # Pattern: closing quote of value, newline, then opening quote of key (missing comma)
+    # e.g., "value"\n"key" -> "value",\n"key"
+    # Be careful: only match when it looks like end-of-value followed by new key
+    cleaned = re.sub(r'"\s*\n\s*"([^"]+)":', r'",\n"\1":', cleaned)
+    
+    # Step 3: Try to fix unterminated strings by attempting suffix repairs
+    # Count unbalanced quotes, braces, brackets
+    try:
+        import json
+        json.loads(cleaned)
+        return cleaned  # Already valid
+    except Exception:
+        pass
+    
+    # Step 3b: Escape control characters that might be in unterminated strings
+    # This helps when LLM output is truncated mid-string
+    def escape_control_chars(s: str) -> str:
+        # Escape newlines and tabs that aren't already escaped
+        result = []
+        i = 0
+        while i < len(s):
+            c = s[i]
+            if c == '\\' and i + 1 < len(s):
+                # Already escaped, keep as is
+                result.append(s[i:i+2])
+                i += 2
+            elif c == '\n':
+                result.append('\\n')
+                i += 1
+            elif c == '\r':
+                result.append('\\r')
+                i += 1
+            elif c == '\t':
+                result.append('\\t')
+                i += 1
+            else:
+                result.append(c)
+                i += 1
+        return ''.join(result)
+    
+    cleaned_escaped = escape_control_chars(cleaned)
+    
+    # Try common suffix repairs for truncated output
+    suffixes_to_try = [
+        '"}]}',      # Close string, close array, close object
+        '"}]',       # Close string, close array
+        '"]}',       # Close string, close array, close object
+        '"}',        # Close string, close object
+        '"]',        # Close string, close array
+        '"',         # Just close string
+        '}]}',       # Close array, close object
+        '}]',        # Close array
+        ']}',        # Close array, close object
+        '}',         # Close object
+        ']',         # Close array
+    ]
+    
+    for suffix in suffixes_to_try:
+        try:
+            import json
+            json.loads(cleaned_escaped + suffix)
+            return cleaned_escaped + suffix
+        except Exception:
+            continue
+    
     return cleaned
 
 
@@ -208,6 +293,34 @@ class LLMClient:
             normalized.append(copy_item)
         return normalized
 
+    def _normalize_judgment_basis(
+        self, basis: Any, *, reason: Optional[str] = None
+    ) -> List[str]:
+        """Clamp judgment_basis to 2-5 short Chinese sentences; fill if missing."""
+        out: List[str] = []
+        if isinstance(basis, list):
+            for item in basis:
+                s = str(item).strip()
+                if s:
+                    out.append(s)
+        elif isinstance(basis, str):
+            s = basis.strip()
+            if s:
+                out.append(s)
+
+        reason_line = None
+        if reason:
+            reason_line = f"依据：{str(reason).strip()}"
+
+        if len(out) < 2 and reason_line and reason_line not in out:
+            out.append(reason_line)
+        if len(out) < 2:
+            out.append("依据题干与作答进行判断")
+
+        if len(out) > 5:
+            out = out[:5]
+        return out
+
     def _get_client(self, provider: str = "silicon") -> OpenAI:
         """获取OpenAI兼容客户端"""
         allowed = {"silicon", "ark", "openai"}
@@ -280,14 +393,20 @@ class LLMClient:
                 model=model,
                 messages=messages,
                 temperature=0.1,
-                # Full-question `questions[]` can be long; too-low max_tokens frequently truncates JSON.
-                max_tokens=4096,
+                # Full-question `questions[]` can be long; use doubao's max (32768) to avoid truncation.
+                max_tokens=32768,
                 response_format={"type": "json_object"},
             )
 
             content = response.choices[0].message.content
+            # Log finish_reason to check if output was truncated
+            finish_reason = response.choices[0].finish_reason if response.choices else "unknown"
+            logger.info(f"[grade_math] finish_reason={finish_reason}, content_len={len(content or '')}")
             try:
                 result_data = json.loads(content)
+                # Log questions count for debugging
+                questions = result_data.get("questions") or []
+                logger.info(f"[grade_math] questions_count={len(questions)}, total_items={result_data.get('total_items')}")
                 # Output contract hardening:
                 # - Do not keep `standard_answer` (avoid leakage + reduce payload).
                 # - Keep only the first non-correct step for incorrect/uncertain; omit steps for correct.
@@ -299,6 +418,9 @@ class LLMClient:
                         q.pop("standard_answer", None)
                         verdict = (q.get("verdict") or "").strip().lower()
                         steps = q.get("math_steps") or q.get("steps")
+                        q["judgment_basis"] = self._normalize_judgment_basis(
+                            q.get("judgment_basis"), reason=q.get("reason")
+                        )
                         if verdict == "correct":
                             q.pop("math_steps", None)
                             q.pop("steps", None)
@@ -321,6 +443,9 @@ class LLMClient:
                     for it in result_data["wrong_items"] or []:
                         if isinstance(it, dict):
                             it.pop("standard_answer", None)
+                            it["judgment_basis"] = self._normalize_judgment_basis(
+                                it.get("judgment_basis"), reason=it.get("reason")
+                            )
                 log_event(
                     logger,
                     "llm_grade_math_parsed",
@@ -342,6 +467,16 @@ class LLMClient:
                             for it in result_data["wrong_items"] or []:
                                 if isinstance(it, dict):
                                     it.pop("standard_answer", None)
+                                    it["judgment_basis"] = self._normalize_judgment_basis(
+                                        it.get("judgment_basis"), reason=it.get("reason")
+                                    )
+                        questions = result_data.get("questions")
+                        if isinstance(questions, list):
+                            for q in questions:
+                                if isinstance(q, dict):
+                                    q["judgment_basis"] = self._normalize_judgment_basis(
+                                        q.get("judgment_basis"), reason=q.get("reason")
+                                    )
                         log_event(
                             logger,
                             "llm_grade_math_parsed_repaired",
@@ -451,13 +586,27 @@ class LLMClient:
                 model=model,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=4096,
+                max_tokens=32768,
                 response_format={"type": "json_object"},
             )
 
             content = response.choices[0].message.content
             try:
                 result_data = json.loads(content)
+                questions = result_data.get("questions")
+                if isinstance(questions, list):
+                    for q in questions:
+                        if isinstance(q, dict):
+                            q["judgment_basis"] = self._normalize_judgment_basis(
+                                q.get("judgment_basis"), reason=q.get("reason")
+                            )
+                wrong_items = result_data.get("wrong_items")
+                if isinstance(wrong_items, list):
+                    for it in wrong_items:
+                        if isinstance(it, dict):
+                            it["judgment_basis"] = self._normalize_judgment_basis(
+                                it.get("judgment_basis"), reason=it.get("reason")
+                            )
                 log_event(
                     logger,
                     "llm_grade_english_parsed",
@@ -474,6 +623,20 @@ class LLMClient:
                 if repaired:
                     try:
                         result_data = json.loads(repaired)
+                        questions = result_data.get("questions")
+                        if isinstance(questions, list):
+                            for q in questions:
+                                if isinstance(q, dict):
+                                    q["judgment_basis"] = self._normalize_judgment_basis(
+                                        q.get("judgment_basis"), reason=q.get("reason")
+                                    )
+                        wrong_items = result_data.get("wrong_items")
+                        if isinstance(wrong_items, list):
+                            for it in wrong_items:
+                                if isinstance(it, dict):
+                                    it["judgment_basis"] = self._normalize_judgment_basis(
+                                        it.get("judgment_basis"), reason=it.get("reason")
+                                    )
                         log_event(
                             logger,
                             "llm_grade_english_parsed_repaired",

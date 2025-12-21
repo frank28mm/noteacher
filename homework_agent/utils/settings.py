@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     silicon_base_url: str = Field(default="https://api.siliconflow.cn/v1", validation_alias="SILICON_BASE_URL")
     silicon_vision_model: str = Field(default="Qwen/Qwen3-VL-32B-Thinking", validation_alias="SILICON_VISION_MODEL")
     # Strict user requirement: Use Qwen3-VL-32B-Thinking for reasoning as well
-    silicon_reasoning_model: str = Field(default="Qwen/Qwen3-VL-32B-Thinking", validation_alias="SILICON_REASONING_MODEL")
+    silicon_reasoning_model: str = Field(default="Qwen/Qwen3-VL-235B-A22B-Instruct", validation_alias="SILICON_REASONING_MODEL")
 
     ark_api_key: str | None = Field(default=None, validation_alias="ARK_API_KEY")
     ark_base_url: str = Field(default="https://ark.cn-beijing.volces.com/api/v3", validation_alias="ARK_BASE_URL")
@@ -108,23 +108,23 @@ class Settings(BaseSettings):
 
     # SLA / Time budgets (seconds)
     grade_completion_sla_seconds: int = Field(
-        # Completion SLA should cover both Vision and LLM budgets (+ margin).
-        default=600, validation_alias="GRADE_COMPLETION_SLA_SECONDS"
+        # Completion SLA should cover both Vision (240s) and LLM (600s) budgets (+ margin).
+        default=900, validation_alias="GRADE_COMPLETION_SLA_SECONDS"
     )
     grade_vision_timeout_seconds: int = Field(
         # Vision can be slow on some images; keep a safer default than 60s.
         default=240, validation_alias="GRADE_VISION_TIMEOUT_SECONDS"
     )
     grade_llm_timeout_seconds: int = Field(
-        # Full-question grading JSON can be slow; keep a safer default.
-        default=300, validation_alias="GRADE_LLM_TIMEOUT_SECONDS"
+        # Full-question grading JSON can be slow; 600s (10min) for large homework with detailed judgment_basis.
+        default=600, validation_alias="GRADE_LLM_TIMEOUT_SECONDS"
     )
     vision_client_timeout_seconds: int = Field(
         # Low-level client timeout should not undercut grade vision budget.
         default=240, validation_alias="VISION_CLIENT_TIMEOUT_SECONDS"
     )
     llm_client_timeout_seconds: int = Field(
-        default=300, validation_alias="LLM_CLIENT_TIMEOUT_SECONDS"
+        default=600, validation_alias="LLM_CLIENT_TIMEOUT_SECONDS"
     )
 
     # Concurrency limits (to avoid thread pile-ups)
