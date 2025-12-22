@@ -310,6 +310,7 @@ def format_vision_raw_text(result: Dict[str, Any]) -> str:
     vision_raw = result.get("vision_raw_text")
     if not vision_raw:
         return "> 未返回识别原文（可能识别失败或超时）。"
+    vision_raw = _repair_latex_escapes(vision_raw)
     # Strip various format markers
     if "【图形视觉事实】" in vision_raw:
         vision_raw = vision_raw.split("【图形视觉事实】", 1)[0].strip()
@@ -351,6 +352,24 @@ def _normalize_bool_str(value: Any) -> str:
         return "true" if value else "false"
     s = str(value or "").strip().lower()
     return s if s in {"true", "false", "unknown"} else "unknown"
+
+
+def _repair_latex_escapes(text: Any) -> str:
+    """
+    Recover common LaTeX commands that were broken by JSON escape parsing.
+    Example: "\\frac" -> "\f" (form feed) + "rac" after json.loads.
+    """
+    if text is None:
+        return ""
+    s = str(text)
+    # JSON escape side effects: \f, \t, \b, \v, \r become control chars.
+    # Convert them back to backslash-prefixed sequences.
+    s = s.replace("\f", "\\f")
+    s = s.replace("\t", "\\t")
+    s = s.replace("\b", "\\b")
+    s = s.replace("\v", "\\v")
+    s = s.replace("\r", "\\r")
+    return s
 
 
 def _translate_relative(text: str) -> str:
@@ -508,13 +527,27 @@ def _format_visual_facts_nl(vf: Dict[str, Any]) -> List[str]:
 
 
 
-def format_grade_report(result: Dict[str, Any]) -> str:
-    """Render grading output with visual_facts evidence merged into wrong items."""
-    md = "✅ 批改完成，以下是识别与批改结果：\n\n"
-    md += (
-        "⚠️ 批改依据说明：以下结果基于 AI 对图片的识别与图形分析，可能存在误读或漏判。\n"
-        "建议核对「识别原文」和「AI 识别依据」后再参考结论。\n\n"
-    )
+def _order_qnums(keys: List[str]) -> List[str]:
+    """Sort question numbers: 1, 2, 3, 5, 5(1), 5(2), 6, 6(1), 6(2), ..., 思维与拓展"""
+    import re
+
+    def sort_key(k: str):
+        m = re.match(r"^(\d+)(?:\((\d+)\))?", str(k))
+        if m:
+            base = int(m.group(1))
+            sub = int(m.group(2)) if m.group(2) else 0
+            return (0, base, sub, k)
+        return (1, 0, 0, k)
+
+    try:
+        return sorted(keys, key=sort_key)
+    except Exception:
+        return keys
+
+
+def build_grade_report_sections(result: Dict[str, Any]) -> List[str]:
+    """Build modular report sections for streaming display."""
+    sections: List[str] = []
 
     status = result.get("status")
     wrong_items = result.get("wrong_items") or []
@@ -523,17 +556,16 @@ def format_grade_report(result: Dict[str, Any]) -> str:
         wrong_count = len(wrong_items)
 
     if status and status != "done":
-        md += "### ❌ 批改失败\n"
+        md = "❌ 批改失败\n"
         if result.get("warnings"):
             md += "原因（warnings）：\n"
             for w in result.get("warnings") or []:
                 md += f"- {w}\n"
-        return md
+        return [md]
 
     vf_map = result.get("visual_facts")
     vf_map = vf_map if isinstance(vf_map, dict) else {}
 
-    # Build questions_map to get judgment_basis for all questions
     questions_list = result.get("questions") or []
     questions_map: Dict[str, Dict[str, Any]] = {}
     for q in questions_list:
@@ -542,24 +574,6 @@ def format_grade_report(result: Dict[str, Any]) -> str:
             if qn:
                 questions_map[str(qn)] = q
 
-    def _order_qnums(keys: List[str]) -> List[str]:
-        """Sort question numbers: 1, 2, 3, 5, 5(1), 5(2), 6, 6(1), 6(2), ..., 思维与拓展"""
-        import re
-        def sort_key(k: str):
-            # Extract base number and sub-part: "5(1)" -> (5, 1), "5" -> (5, 0)
-            m = re.match(r'^(\d+)(?:\((\d+)\))?', str(k))
-            if m:
-                base = int(m.group(1))
-                sub = int(m.group(2)) if m.group(2) else 0
-                return (0, base, sub, k)  # numeric first
-            # Non-numeric (e.g., 思维与拓展) go last
-            return (1, 0, 0, k)
-        try:
-            return sorted(keys, key=sort_key)
-        except Exception:
-            return keys
-
-
     wrong_qns: List[str] = []
     for item in wrong_items:
         qnum = item.get("question_number") or item.get("question_index") or item.get("id")
@@ -567,34 +581,32 @@ def format_grade_report(result: Dict[str, Any]) -> str:
             wrong_qns.append(str(qnum))
     wrong_qn_set = {str(q) for q in wrong_qns}
 
-    # Get all question numbers from questions list (preferred) or visual_facts (fallback)
     all_qns_set = set(questions_map.keys()) | set(vf_map.keys())
     all_qns = _order_qnums(list(all_qns_set))
-    # Filter out internal/English-only question numbers (likely duplicates of Chinese names)
-    # e.g., "thinking_and_expansion" is same as "思维与拓展"
+
     internal_qn_patterns = ["thinking_and_expansion", "extra", "bonus"]
-    
-    # Also filter out parent question numbers when sub-questions exist
-    # e.g., if "5(1)", "5(2)" exist, filter out bare "5"
     import re
     has_subquestions = set()
     for q in all_qns:
-        m = re.match(r'^(\d+)\(\d+\)', str(q))
+        m = re.match(r"^(\d+)\(\d+\)", str(q))
         if m:
             has_subquestions.add(m.group(1))
-    
+
     correct_qns = [
-        q for q in all_qns 
-        if q not in wrong_qn_set 
+        q
+        for q in all_qns
+        if q not in wrong_qn_set
         and q.lower() not in internal_qn_patterns
-        and not (q.replace("_", "").isalpha() and len(q) > 10)  # pure long English likely internal
-        and not (str(q).isdigit() and str(q) in has_subquestions)  # skip bare "5" if "5(1)" exists
+        and not (q.replace("_", "").isalpha() and len(q) > 10)
+        and not (str(q).isdigit() and str(q) in has_subquestions)
     ]
 
+    header = "✅ 批改完成，以下是识别与批改结果：\n\n"
+    header += "⚠️ 批改依据说明\n"
+    header += "以下结果基于 AI 对图片的识别和图形分析，可能存在误读或漏判。\n"
+    header += "建议核对下方“识别原文”和“AI 识别依据”后再参考批改结论。\n\n"
+    header += "📊 批改结果\n"
 
-
-
-    md += "📊 批改结果\n"
     if correct_qns:
         correct_count = len(correct_qns)
     elif result.get("total_items") is not None and wrong_count is not None:
@@ -604,67 +616,75 @@ def format_grade_report(result: Dict[str, Any]) -> str:
 
     wrong_total = wrong_count if wrong_count is not None else len(wrong_items)
     if correct_count is None:
-        md += f"✅ 正确：待确认 | ❌ 错误：{wrong_total} 道\n\n"
+        header += f"✅ 正确：待确认 | ❌ 错误：{wrong_total} 道\n"
     else:
-        md += f"✅ 正确：{correct_count} 道 | ❌ 错误：{wrong_total} 道\n\n"
+        header += f"✅ 正确：{correct_count} 道 | ❌ 错误：{wrong_total} 道\n"
+    sections.append(header)
 
     if wrong_items:
-        md += "---\n"
+        md = "---\n"
         for item in wrong_items:
             qnum = item.get("question_number") or item.get("question_index") or "N/A"
-            qtext = item.get("question_content") or item.get("question") or "N/A"
-            md += f"❌ **题 {qnum}** {qtext}\n"
-            md += f"- 错误原因：{item.get('reason', 'N/A')}\n"
+            qtext = _repair_latex_escapes(item.get("question_content") or item.get("question") or "N/A")
+            reason = _repair_latex_escapes(item.get("reason", "N/A"))
+            md += f"❌ 题 {qnum}（展开） {qtext}\n"
+            md += f"  - 错误原因：{reason}\n"
 
-            # Use judgment_basis from wrong_item (preferred), fallback to questions_map
             basis = item.get("judgment_basis") or []
             if not basis:
                 q_data = questions_map.get(str(qnum)) or {}
                 basis = q_data.get("judgment_basis") or []
             if basis and isinstance(basis, list):
-                md += "- AI 判断依据：\n"
+                md += "  - AI 识别依据：\n"
                 for b in basis:
                     if isinstance(b, str) and b.strip():
-                        md += f"  - {b.strip()}\n"
+                        md += f"    - {_repair_latex_escapes(b.strip())}\n"
+            else:
+                md += "  - AI 识别依据：未返回\n"
             md += "\n"
-
-
+        sections.append(md)
 
     if correct_qns:
-        md += "---\n"
+        md = "---\n"
         for qn in correct_qns:
             q_data = questions_map.get(str(qn)) or {}
             basis = q_data.get("judgment_basis") or []
             if basis and isinstance(basis, list):
-                md += f"<details><summary>✅ 题 {qn} ▶ 点击查看 AI 判断依据</summary>\n\n"
+                md += f"<details><summary>✅ 题 {qn} ▶ 点击查看 AI 识别依据</summary>\n\n"
                 for b in basis:
                     if isinstance(b, str) and b.strip():
-                        md += f"- {b.strip()}\n"
+                        md += f"- {_repair_latex_escapes(b.strip())}\n"
                 md += "</details>\n\n"
             else:
                 md += f"✅ 题 {qn}\n\n"
-
+        sections.append(md)
 
     if result.get("warnings"):
-        md += "⚠️ 警告\n"
+        md = "⚠️ 警告\n"
         seen = set()
         for warning in result.get("warnings") or []:
-            if warning not in seen:
-                # Filter out internal/technical warnings not meant for users
-                if (
-                    "URL 拉取失败" in warning
-                    or "url_head status" in warning
-                    or "视觉事实" in warning
-                ):
-                    continue
-                md += f"- {warning}\n"
+            if warning in seen:
+                continue
+            if (
+                "URL 拉取失败" in warning
+                or "url_head status" in warning
+                or "视觉事实" in warning
+            ):
                 seen.add(warning)
+                continue
+            md += f"- {warning}\n"
+            seen.add(warning)
         md += "\n"
+        if md.strip() != "⚠️ 警告":
+            sections.append(md)
+
+    sections.append("---\n" + format_vision_raw_text(result))
+    return sections
 
 
-    md += "---\n"
-    md += format_vision_raw_text(result)
-    return md
+def format_grade_report(result: Dict[str, Any]) -> str:
+    """Render grading output for non-streaming consumers."""
+    return "\n\n".join(build_grade_report_sections(result))
 
 
 def _chunk_text_for_stream(text: str, *, max_chars: int = 240) -> List[str]:
@@ -905,14 +925,15 @@ async def grade_homework_logic(img_path, subject, provider, llm_provider, auth_t
                 }
             )
             image_added = True
-        report = format_grade_report(result)
-        history.append({"role": "assistant", "content": ""})
-        for chunk in _chunk_text_for_stream(report):
-            history[-1]["content"] += chunk
-            yield history, session_id, page_url, _render_stage_lines(
-                "done", int(time.monotonic() - started)
-            )
-            await asyncio.sleep(0.02)
+        sections = build_grade_report_sections(result)
+        for section in sections:
+            history.append({"role": "assistant", "content": ""})
+            for chunk in _chunk_text_for_stream(section):
+                history[-1]["content"] += chunk
+                yield history, session_id, page_url, _render_stage_lines(
+                    "done", int(time.monotonic() - started)
+                )
+                await asyncio.sleep(0.02)
         return
 
     except ValueError as e:
@@ -993,21 +1014,22 @@ async def tutor_chat_logic(
     auth_token = (auth_token or "").strip() or None
     candidate_labels: List[str] = []
     candidate_button_updates = _candidate_button_updates(candidate_labels)
+    tool_status = ""
 
     # 只允许批改后对话
     if not session_id:
         history.append({"role": "assistant", "content": "请先上传图片并完成识别/批改，我需要基于这次作业来辅导。"})
-        yield "", history, candidate_labels, *candidate_button_updates
+        yield "", history, candidate_labels, *candidate_button_updates, tool_status
         return
 
     # 先把用户消息显示出来
     history.append({"role": "user", "content": message})
-    yield "", history, candidate_labels, *candidate_button_updates
+    yield "", history, candidate_labels, *candidate_button_updates, tool_status
 
     # 插入“思考中...”占位，并在收到首条 chat 更新后替换为真实输出
     assistant_msg = {"role": "assistant", "content": "思考中... (0s)"}
     history.append(assistant_msg)
-    yield "", history, candidate_labels, *candidate_button_updates
+    yield "", history, candidate_labels, *candidate_button_updates, tool_status
 
     payload = {
         "history": [],
@@ -1050,7 +1072,7 @@ async def tutor_chat_logic(
                         elapsed = int(time.monotonic() - start)
                         if assistant_msg["content"].startswith("思考中"):
                             assistant_msg["content"] = f"思考中... ({elapsed}s)"
-                            yield "", history, candidate_labels, *candidate_button_updates
+                            yield "", history, candidate_labels, *candidate_button_updates, tool_status
                         continue
 
                     if current_event == "error":
@@ -1091,7 +1113,7 @@ async def tutor_chat_logic(
                                     max(0, len(history) - 1),
                                     {"role": "assistant", "content": f"我将参考你这题的图片/切片：\n\n{md}"},
                                 )
-                                yield "", history, candidate_labels, *candidate_button_updates
+                                yield "", history, candidate_labels, *candidate_button_updates, tool_status
                         # Find latest assistant message content
                         latest = ""
                         for m in reversed(msgs):
@@ -1101,7 +1123,18 @@ async def tutor_chat_logic(
                         if latest and latest != last_rendered:
                             assistant_msg["content"] = latest
                             last_rendered = latest
-                            yield "", history, candidate_labels, *candidate_button_updates
+                            yield "", history, candidate_labels, *candidate_button_updates, tool_status
+                        continue
+
+                    if current_event == "tool_progress":
+                        try:
+                            obj = json.loads(data)
+                        except Exception:
+                            obj = {}
+                        tool_name = str(obj.get("tool") or obj.get("name") or "tool")
+                        status = str(obj.get("status") or "running")
+                        tool_status = f"🔧 工具进度：{tool_name} · {status}"
+                        yield "", history, candidate_labels, *candidate_button_updates, tool_status
                         continue
 
                     if current_event == "done":
@@ -1109,7 +1142,7 @@ async def tutor_chat_logic(
 
     except Exception as e:
         assistant_msg["content"] = f"系统错误：{str(e)}"
-        yield "", history, candidate_labels, *candidate_button_updates
+        yield "", history, candidate_labels, *candidate_button_updates, tool_status
         return
 
 
@@ -1126,10 +1159,24 @@ async def _candidate_chat_logic(
         text = str(candidates[idx])
     if not text:
         updates = _candidate_button_updates(candidates or [])
-        yield "", (history or []), (candidates or []), *updates
+        yield "", (history or []), (candidates or []), *updates, ""
         return
     async for update in tutor_chat_logic(text, history, session_id, subject, auth_token):
         yield update
+
+
+def _make_candidate_handler(idx: int):
+    async def _handler(
+        history: List[Dict[str, str]],
+        session_id: str,
+        subject: str,
+        auth_token: Optional[str],
+        candidates: List[str],
+    ) -> AsyncGenerator[Tuple[Any, ...], None]:
+        async for update in _candidate_chat_logic(idx, history, session_id, subject, auth_token, candidates):
+            yield update
+
+    return _handler
 
 
 def create_demo():
@@ -1238,7 +1285,7 @@ def create_demo():
             # ========== Tab 1: 统一对话 ==========
             with gr.Tab("💬 对话"):
                 gr.Markdown(
-                    "上传图片后系统会自动识别与批改，并把**识别原文 + visual_facts + 批改结果**展示在对话框里。\n\n"
+                    "上传图片后系统会自动识别与批改，并把**识别原文 + AI 识别依据 + 批改结果**展示在对话框里。\n\n"
                     "- 你可以直接说：`讲讲第23题` / `再讲讲19题` / `第2题有没有更简便的方法？`\n"
                     "- 系统会尝试根据题号在本次 session 中定位对应题目。\n"
                 )
@@ -1279,6 +1326,7 @@ def create_demo():
                                 {"left": "$", "right": "$", "display": False},
                             ],
                         )
+                        tool_status_md = gr.Markdown(label="🔧 工具进度", value="")
                         candidates_state = gr.State(value=[])
                         with gr.Row():
                             candidate_buttons = [
@@ -1300,23 +1348,21 @@ def create_demo():
                 msg.submit(
                     fn=tutor_chat_logic,
                     inputs=[msg, chatbot, session_id_state, subject_dropdown, auth_token_state],
-                    outputs=[msg, chatbot, candidates_state, *candidate_buttons],
+                    outputs=[msg, chatbot, candidates_state, *candidate_buttons, tool_status_md],
                 )
 
                 for idx, btn in enumerate(candidate_buttons):
                     btn.click(
-                        fn=lambda h, s, sub, tok, c, i=idx: _candidate_chat_logic(
-                            i, h, s, sub, tok, c
-                        ),
+                        fn=_make_candidate_handler(idx),
                         inputs=[chatbot, session_id_state, subject_dropdown, auth_token_state, candidates_state],
-                        outputs=[msg, chatbot, candidates_state, *candidate_buttons],
+                        outputs=[msg, chatbot, candidates_state, *candidate_buttons, tool_status_md],
                     )
 
                 # 清除历史
                 clear_btn.click(
-                    fn=lambda: ([], "", [], *_candidate_button_updates([]), None, ""),
+                    fn=lambda: ([], "", [], *_candidate_button_updates([]), "", None, ""),
                     inputs=None,
-                    outputs=[chatbot, msg, candidates_state, *candidate_buttons, session_id_state, status_md],
+                    outputs=[chatbot, msg, candidates_state, *candidate_buttons, tool_status_md, session_id_state, status_md],
                     queue=False,
                 )
 

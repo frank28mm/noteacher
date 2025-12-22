@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime
@@ -20,7 +21,7 @@ from homework_agent.api.session import (
     _merge_bank_meta,
     _now_ts,
 )
-from homework_agent.utils.observability import log_event
+from homework_agent.utils.observability import log_event, trace_span
 from homework_agent.utils.submission_store import load_qindex_image_refs, resolve_submission_for_session
 
 # Keep abort type + small helpers in chat.py (avoid exception-type mismatch across modules).
@@ -255,6 +256,7 @@ async def _run_mandatory_visual_path(
         yield b""
 
 
+@trace_span("chat.prepare_context")
 def _prepare_chat_context_or_abort(
     *,
     req: ChatRequest,
@@ -555,6 +557,9 @@ async def _stream_socratic_llm_to_sse(
     if not already_has_user:
         session_data["history"].append({"role": "user", "content": req.question})
     llm_history = list(session_data["history"][-12:])
+    summary = session_data.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        llm_history = [{"role": "system", "content": f"会话摘要：{summary.strip()}"}] + llm_history
 
     def _producer():
         try:
@@ -603,6 +608,11 @@ async def _stream_socratic_llm_to_sse(
 
         if item is DONE:
             break
+        if isinstance(item, dict) and item.get("event"):
+            evt = item.get("event")
+            data = json.dumps(item.get("data") or {}, ensure_ascii=False)
+            yield f"event: {evt}\ndata: {data}\n\n".encode("utf-8")
+            continue
         if isinstance(item, dict) and item.get("error"):
             raise RuntimeError(item.get("error"))
 

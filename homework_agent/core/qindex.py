@@ -14,7 +14,8 @@ from homework_agent.core.layout_index import (
     crop_and_upload_slices,
 )
 from homework_agent.utils.settings import get_settings
-from homework_agent.utils.observability import log_event, redact_url
+from homework_agent.services.image_preprocessor import maybe_preprocess_for_ocr
+from homework_agent.utils.observability import log_event, redact_url, trace_span
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ def qindex_is_configured() -> tuple[bool, str]:
     return True, f"ok (OCR_PROVIDER={provider or 'siliconflow_deepseek'})"
 
 
+@trace_span("qindex.build_question_index_for_pages")
 def build_question_index_for_pages(
     page_urls: List[str],
     *,
@@ -90,12 +92,14 @@ def build_question_index_for_pages(
         if not page_url:
             continue
         t_page = time.monotonic()
+        ocr_page_url = maybe_preprocess_for_ocr(page_url) or page_url
         try:
             log_event(
                 logger,
                 "qindex_page_start",
                 page_index=page_idx,
                 page_image_url=redact_url(page_url),
+                ocr_image_url=redact_url(ocr_page_url) if ocr_page_url != page_url else None,
             )
             # Download image once to get size (also needed for slice cropping)
             from homework_agent.core.layout_index import download_image
@@ -107,14 +111,14 @@ def build_question_index_for_pages(
             task_status = None
             ocr_provider_name = "unknown"
             if provider in ("baidu", "baidu_paddleocr_vl"):
-                task_id = ocr_baidu.submit(image_url=page_url)
+                task_id = ocr_baidu.submit(image_url=ocr_page_url)
                 task = ocr_baidu.wait(task_id)
                 task_status = task.status
                 blocks = ocr_baidu.extract_text_blocks(task.raw)
                 ocr_provider_name = "baidu_paddleocr_vl"
             elif provider in ("siliconflow_qwen3_vl", "siliconflow_qindex", "siliconflow_vl"):
                 allow_list = sorted(list(only_qnums)) if only_qnums is not None else None
-                loc = qwen_locator.locate(image_url=page_url, only_question_numbers=allow_list)
+                loc = qwen_locator.locate(image_url=ocr_page_url, only_question_numbers=allow_list)
                 task_status = "done" if loc.questions else "failed"
 
                 # Build layouts directly from locator results so we can support multi-bbox per question
@@ -249,7 +253,7 @@ def build_question_index_for_pages(
                 )
                 continue
             else:
-                res = ocr_deepseek.analyze(image_url=page_url)
+                res = ocr_deepseek.analyze(image_url=ocr_page_url)
                 task_id = None
                 task_status = "done" if res.blocks else "failed"
                 # Convert bbox_norm -> px location for layout_index

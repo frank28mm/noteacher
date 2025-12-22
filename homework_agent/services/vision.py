@@ -51,6 +51,8 @@ def _log_retry(op: str, retry_state):
 
 from homework_agent.models.schemas import ImageRef, VisionProvider
 from homework_agent.utils.settings import get_settings
+from homework_agent.services.image_preprocessor import maybe_preprocess_for_vision
+from homework_agent.utils.observability import trace_span
 
 
 class VisionResult(BaseModel):
@@ -97,6 +99,13 @@ class VisionClient:
             if ref.url:
                 if not self._is_public_url(str(ref.url)):
                     raise ValueError("Image URL must be public HTTP/HTTPS (no localhost/127)")
+                preprocessed = maybe_preprocess_for_vision(str(ref.url))
+                if preprocessed:
+                    if provider == VisionProvider.DOUBAO:
+                        blocks.append({"type": "input_image", "image_url": preprocessed})
+                    else:
+                        blocks.append({"type": "image_url", "image_url": {"url": preprocessed}})
+                    continue
                 if provider == VisionProvider.DOUBAO:
                     blocks.append({"type": "input_image", "image_url": str(ref.url)})
                 else:
@@ -117,6 +126,7 @@ class VisionClient:
                     blocks.append({"type": "image_url", "image_url": {"url": ref.base64}})
         return blocks
 
+    @trace_span("vision.analyze")
     @retry(
         retry=retry_if_exception_type(
             (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)

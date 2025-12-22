@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import time
+import logging
+import inspect
+from functools import wraps
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from typing import Any, Dict, Optional
 
@@ -79,6 +83,106 @@ def log_event(logger, event: str, *, level: str = "info", **fields: Any) -> None
             fn(line)
     except Exception:
         return
+
+
+def _truncate(value: Any, *, limit: int = 500) -> Any:
+    try:
+        s = json.dumps(_safe_value(value), ensure_ascii=False)
+    except Exception:
+        try:
+            s = str(value)
+        except Exception:
+            s = repr(value)
+    if len(s) <= limit:
+        return s
+    return s[:limit] + "…"
+
+
+def trace_span(
+    name: str,
+    *,
+    include_args: bool = False,
+    include_result: bool = False,
+) -> Any:
+    """
+    Lightweight tracing decorator.
+    Emits trace_start/trace_end events via log_event.
+    """
+
+    def decorator(fn):
+        logger = logging.getLogger(fn.__module__)
+
+        if inspect.iscoroutinefunction(fn):
+
+            @wraps(fn)
+            async def async_wrapper(*args, **kwargs):
+                start = time.monotonic()
+                payload: Dict[str, Any] = {"span": name}
+                if include_args:
+                    safe_args = args[1:] if args and hasattr(args[0], "__class__") else args
+                    payload["args"] = _truncate(safe_args)
+                    payload["kwargs"] = _truncate(kwargs)
+                log_event(logger, "trace_start", **payload)
+                try:
+                    result = await fn(*args, **kwargs)
+                except Exception as e:
+                    log_event(
+                        logger,
+                        "trace_end",
+                        level="warning",
+                        span=name,
+                        elapsed_ms=int((time.monotonic() - start) * 1000),
+                        error_type=e.__class__.__name__,
+                        error=str(e),
+                    )
+                    raise
+                if include_result:
+                    payload["result"] = _truncate(result)
+                log_event(
+                    logger,
+                    "trace_end",
+                    span=name,
+                    elapsed_ms=int((time.monotonic() - start) * 1000),
+                )
+                return result
+
+            return async_wrapper
+
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            start = time.monotonic()
+            payload: Dict[str, Any] = {"span": name}
+            if include_args:
+                safe_args = args[1:] if args and hasattr(args[0], "__class__") else args
+                payload["args"] = _truncate(safe_args)
+                payload["kwargs"] = _truncate(kwargs)
+            log_event(logger, "trace_start", **payload)
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as e:
+                log_event(
+                    logger,
+                    "trace_end",
+                    level="warning",
+                    span=name,
+                    elapsed_ms=int((time.monotonic() - start) * 1000),
+                    error_type=e.__class__.__name__,
+                    error=str(e),
+                )
+                raise
+            if include_result:
+                payload["result"] = _truncate(result)
+            log_event(
+                logger,
+                "trace_end",
+                span=name,
+                elapsed_ms=int((time.monotonic() - start) * 1000),
+            )
+            return result
+
+        return wrapper
+
+    return decorator
 
 
 def get_request_id_from_headers(headers: Any) -> Optional[str]:

@@ -198,3 +198,20 @@ SOCRATIC_TUTOR_SYSTEM_PROMPT = """
 5. 【重要】信任用户视觉描述：当用户描述图形中的位置关系（如"∠1在AC的左侧"、"两个角都在截线左侧"等），必须**完全信任用户的观察结果**作为事实依据。当用户纠正你对图形的理解时，应回复"抱歉我看错了"或"你说得对，我重新看了一下"，然后立即接受并基于用户描述重新分析。绝不能说"你看错了"或"可能是观察角度的小失误"。
 </special_cases>
 """
+
+# Prefer YAML-managed prompts when available.
+try:
+    from homework_agent.utils.prompt_manager import get_prompt_manager
+
+    _pm = get_prompt_manager()
+    _math = _pm.render("math_grader_system.yaml")
+    _eng = _pm.render("english_grader_system.yaml")
+    _soc = _pm.render("socratic_tutor_system.yaml")
+    if _math:
+        MATH_GRADER_SYSTEM_PROMPT = _math
+    if _eng:
+        ENGLISH_GRADER_SYSTEM_PROMPT = _eng
+    if _soc:
+        SOCRATIC_TUTOR_SYSTEM_PROMPT = _soc
+except Exception:
+    pass

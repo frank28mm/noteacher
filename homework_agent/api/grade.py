@@ -50,7 +50,7 @@ from homework_agent.api.session import (
     _ensure_session_id,
     IDP_TTL_HOURS,
 )
-from homework_agent.utils.observability import get_request_id_from_headers, log_event
+from homework_agent.utils.observability import get_request_id_from_headers, log_event, trace_span
 from homework_agent.utils.user_context import require_user_id
 from homework_agent.utils.submission_store import (
     resolve_page_image_urls,
@@ -700,6 +700,7 @@ def _apply_visual_risk_fail_closed(grading_result: Any, subject: Subject) -> Any
     return grading_result
 
 
+@trace_span("grade.perform_grading")
 async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse:
     """执行批改（同步/后台共用）。"""
     ctx = _init_grading_ctx(req, provider_str)

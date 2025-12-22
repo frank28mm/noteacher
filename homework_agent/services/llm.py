@@ -11,6 +11,7 @@ LLM Client - 文本推理客户端
 import json
 import re
 import logging
+import time
 from typing import Optional, List, Dict, Any, Union, Iterable
 from pydantic import BaseModel, Field
 from pydantic.config import ConfigDict
@@ -34,7 +35,8 @@ from homework_agent.core.prompts import (
 )
 from homework_agent.models.schemas import Subject, SimilarityMode, Severity
 from homework_agent.utils.settings import get_settings
-from homework_agent.utils.observability import log_event
+from homework_agent.utils.observability import log_event, trace_span
+from homework_agent.core.tools import get_default_tool_registry, load_default_tools
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +246,7 @@ class LLMClient:
     def __init__(self):
         """初始化LLM客户端"""
         settings = get_settings()
+        load_default_tools()
 
         # OpenAI配置 (可选)
         self.openai_api_key = settings.openai_api_key
@@ -267,6 +270,9 @@ class LLMClient:
             int(settings.llm_client_timeout_seconds),
             int(settings.grade_llm_timeout_seconds),
         )
+        self.tool_calling_enabled = bool(getattr(settings, "tool_calling_enabled", True))
+        self.max_tool_calls = int(getattr(settings, "max_tool_calls", 3))
+        self.tool_choice = getattr(settings, "tool_choice", "auto") or "auto"
 
     def _normalize_math_wrong_items(self, wrong_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """将 math_steps 中非白名单的 severity 归一化，避免后续 Pydantic 校验报错。"""
@@ -349,6 +355,134 @@ class LLMClient:
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
+    def _parse_tool_arguments(self, raw_args: Any) -> Dict[str, Any]:
+        if raw_args is None:
+            return {}
+        if isinstance(raw_args, dict):
+            return raw_args
+        raw = str(raw_args)
+        try:
+            return json.loads(raw)
+        except Exception:
+            repaired = _repair_json_text(raw)
+            if repaired:
+                try:
+                    return json.loads(repaired)
+                except Exception:
+                    return {}
+        return {}
+
+    def _tool_call_payload(self, call: Any) -> Dict[str, Any]:
+        try:
+            return call.model_dump()
+        except Exception:
+            fn = getattr(call, "function", None)
+            return {
+                "id": getattr(call, "id", None),
+                "type": "function",
+                "function": {
+                    "name": getattr(fn, "name", None),
+                    "arguments": getattr(fn, "arguments", None),
+                },
+            }
+
+    def _run_tool_loop(
+        self,
+        *,
+        client: OpenAI,
+        messages: List[Dict[str, Any]],
+        provider: str,
+        model: str,
+        progress_cb: Optional[Any] = None,
+    ) -> tuple[List[Dict[str, Any]], Optional[str]]:
+        if not self.tool_calling_enabled:
+            return messages, None
+
+        registry = get_default_tool_registry()
+        tools = registry.openai_tools()
+        if not tools:
+            return messages, None
+
+        steps = 0
+        while steps < self.max_tool_calls:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice=self.tool_choice,
+                temperature=0.2,
+                max_tokens=800,
+            )
+            msg = response.choices[0].message
+            tool_calls = getattr(msg, "tool_calls", None) or []
+            if not tool_calls:
+                return messages, msg.content or ""
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [self._tool_call_payload(c) for c in tool_calls],
+                }
+            )
+            for call in tool_calls:
+                fn = getattr(call, "function", None)
+                name = getattr(fn, "name", None) or ""
+                raw_args = getattr(fn, "arguments", None)
+                args = self._parse_tool_arguments(raw_args)
+                log_event(
+                    logger,
+                    "tool_call_start",
+                    provider=provider,
+                    model=model,
+                    tool=name,
+                )
+                t0 = time.monotonic()
+                try:
+                    if progress_cb:
+                        progress_cb(
+                            {
+                                "tool": name,
+                                "status": "running",
+                            }
+                        )
+                    result = registry.call(name, args, progress_cb=progress_cb)
+                    elapsed_ms = int((time.monotonic() - t0) * 1000)
+                    log_event(
+                        logger,
+                        "tool_call_done",
+                        provider=provider,
+                        model=model,
+                        tool=name,
+                        elapsed_ms=elapsed_ms,
+                    )
+                except Exception as e:
+                    elapsed_ms = int((time.monotonic() - t0) * 1000)
+                    log_event(
+                        logger,
+                        "tool_call_error",
+                        level="warning",
+                        provider=provider,
+                        model=model,
+                        tool=name,
+                        error_type=e.__class__.__name__,
+                        error=str(e),
+                        elapsed_ms=elapsed_ms,
+                    )
+                    result = {"status": "error", "message": str(e)}
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": getattr(call, "id", None),
+                        "content": json.dumps(result, ensure_ascii=False),
+                    }
+                )
+            steps += 1
+        return messages, None
+
+    @trace_span("grade_math")
+    @trace_span("llm.generate")
     @retry(
         retry=retry_if_exception_type(
             (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)
@@ -400,7 +534,9 @@ class LLMClient:
 
             content = response.choices[0].message.content
             # Log finish_reason to check if output was truncated
-            finish_reason = response.choices[0].finish_reason if response.choices else "unknown"
+            finish_reason = (
+                getattr(response.choices[0], "finish_reason", "unknown") if response.choices else "unknown"
+            )
             logger.info(f"[grade_math] finish_reason={finish_reason}, content_len={len(content or '')}")
             try:
                 result_data = json.loads(content)
@@ -538,6 +674,7 @@ class LLMClient:
                 warnings=[f"Error: {str(e)}"],
             )
 
+    @trace_span("grade_english")
     @retry(
         retry=retry_if_exception_type(
             (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)
@@ -693,6 +830,7 @@ class LLMClient:
                 warnings=[f"Error: {str(e)}"],
             )
 
+    @trace_span("socratic_tutor")
     @retry(
         retry=retry_if_exception_type(
             (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)
@@ -765,7 +903,7 @@ class LLMClient:
             for m in tail:
                 role = (m.get("role") if isinstance(m, dict) else None) or None
                 content = (m.get("content") if isinstance(m, dict) else None) or ""
-                if role not in {"user", "assistant"}:
+                if role not in {"user", "assistant", "system"}:
                     continue
                 messages.append({"role": role, "content": str(content)})
 
@@ -778,14 +916,23 @@ class LLMClient:
                 model = model_override
             else:
                 model = self.silicon_model if provider == "silicon" else self.ark_model
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.4,
-                max_tokens=800,
-            )
 
-            content = response.choices[0].message.content
+            messages, tool_content = self._run_tool_loop(
+                client=client,
+                messages=messages,
+                provider=provider,
+                model=model,
+            )
+            if tool_content is not None:
+                content = tool_content
+            else:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.4,
+                    max_tokens=800,
+                )
+                content = response.choices[0].message.content
 
             status = "continue"
 
@@ -884,7 +1031,7 @@ class LLMClient:
         provider: str = "silicon",
         model_override: Optional[str] = None,
         history: Optional[List[Dict[str, Any]]] = None,
-    ) -> Iterable[str]:
+    ) -> Iterable[Any]:
         """
         Stream 苏格拉底式辅导输出（同步生成器，供 SSE 透传）。
         - 仅产出文本增量，不返回结构化 status/interaction_count（调用方自行更新会话状态）。
@@ -953,7 +1100,7 @@ class LLMClient:
             for m in tail:
                 role = (m.get("role") if isinstance(m, dict) else None) or None
                 content = (m.get("content") if isinstance(m, dict) else None) or ""
-                if role not in {"user", "assistant"}:
+                if role not in {"user", "assistant", "system"}:
                     continue
                 messages.append({"role": role, "content": str(content)})
                 if role == "user" and str(content) == current_question:
@@ -974,6 +1121,27 @@ class LLMClient:
         # Stable mode: do not attach images to chat LLM; rely on cached visual_facts only.
 
         model = model_override or (self.silicon_model if provider == "silicon" else self.ark_model)
+
+        tool_events: List[Dict[str, Any]] = []
+
+        def _progress_cb(payload: Dict[str, Any]) -> None:
+            tool_events.append({"event": "tool_progress", "data": payload})
+
+        messages, tool_content = self._run_tool_loop(
+            client=client,
+            messages=messages,
+            provider=provider,
+            model=model,
+            progress_cb=_progress_cb,
+        )
+
+        for evt in tool_events:
+            yield evt
+
+        if tool_content is not None:
+            yield tool_content
+            return
+
         stream = client.chat.completions.create(
             model=model,
             messages=messages,

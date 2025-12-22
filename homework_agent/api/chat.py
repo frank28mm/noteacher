@@ -76,6 +76,13 @@ async def _call_blocking_in_thread(
         )
 
 
+_QNUM_SYMBOL_RE = re.compile(r"[★☆◆◇●•·◎○※▲△]")
+
+
+def _strip_qnum_symbols(value: Any) -> str:
+    return _QNUM_SYMBOL_RE.sub("", str(value or "")).strip()
+
+
 def _select_question_number_from_text(
     message: str,
     available: List[str],
@@ -95,6 +102,7 @@ def _select_question_number_from_text(
         return None, "none"
     msg = str(message)
     msg_norm = msg.replace("（", "(").replace("）", ")")
+    msg_norm = _strip_qnum_symbols(msg_norm)
     avail = [str(q) for q in (available or []) if q is not None and str(q).strip()]
     if not avail:
         return None, "none"
@@ -106,6 +114,7 @@ def _select_question_number_from_text(
         if not value:
             return False
         s = str(value).strip().replace("（", "(").replace("）", ")")
+        s = _strip_qnum_symbols(s)
         s = re.sub(r"\s+", "", s)
         s = re.sub(r"[①②③④⑤⑥⑦⑧⑨]", "", s)
         return re.fullmatch(r"\d+(?:\(\d+\))?", s) is not None
@@ -151,6 +160,9 @@ def _select_question_number_from_text(
         no_paren = re.sub(r"[（(][^）)]*[)）]", "", qn_norm).strip()
         if no_paren and no_paren not in aliases:
             aliases.append(no_paren)
+        stripped_symbol = _strip_qnum_symbols(qn_norm)
+        if stripped_symbol and stripped_symbol not in aliases:
+            aliases.append(stripped_symbol)
         alias_seen: set[str] = set()
         numeric_qn = _is_numeric_question_number(qn_norm)
         for alias in aliases:
@@ -158,7 +170,7 @@ def _select_question_number_from_text(
             if not alias_norm or alias_norm in alias_seen:
                 continue
             alias_seen.add(alias_norm)
-            if numeric_qn and alias_norm != qn_norm:
+            if numeric_qn and alias_norm != qn_norm and alias_norm != stripped_symbol:
                 continue
 
             for s, e in _find_mentions(alias_norm, numeric=numeric_qn):
@@ -308,17 +320,18 @@ def _extract_requested_question_number(message: str) -> Optional[str]:
         .replace("：", ":")
         .replace("；", ";")
     )
+    msg_num = _strip_qnum_symbols(msg)
 
     qtoken = r"(\d{1,3}(?:\s*\(\s*\d+\s*\)\s*)?(?:[①②③④⑤⑥⑦⑧⑨])?)"
 
     # Case 1: user sends a bare question number like "20(2)" / "28(1)②" / "27".
-    bare = re.fullmatch(rf"\s*{qtoken}\s*[。．.!！?？]*\s*", msg)
+    bare = re.fullmatch(rf"\s*{qtoken}\s*[。．.!！?？]*\s*", msg_num)
     if bare:
         return _normalize_question_number(bare.group(1))
 
     # Case 1.25: inline sub-question token anywhere (e.g. "我的20(3)哪里有问题？").
     # Safe because it requires a numeric "(n)" pattern, unlikely to appear in algebraic expressions.
-    inline_sub = re.search(r"(\d{1,3}\s*\(\s*\d+\s*\)\s*(?:[①②③④⑤⑥⑦⑧⑨])?)", msg)
+    inline_sub = re.search(r"(\d{1,3}\s*\(\s*\d+\s*\)\s*(?:[①②③④⑤⑥⑦⑧⑨])?)", msg_num)
     if inline_sub:
         return _normalize_question_number(inline_sub.group(1))
 
@@ -366,7 +379,7 @@ def _extract_requested_question_number(message: str) -> Optional[str]:
     # Match like: "讲解20题的第一小题" / "二十题第一小题" / "第20题(1)" etc.
     m_sub = re.search(
         r"(?:第\s*)?([0-9一二三四五六七八九十两]{1,6})\s*题.*?(?:第\s*)?([0-9一二三四五六七八九十]{1,3})\s*(?:小题|小问|问)",
-        msg,
+        msg_num,
     )
     if m_sub:
         base = _parse_cn_int(m_sub.group(1))
@@ -375,19 +388,19 @@ def _extract_requested_question_number(message: str) -> Optional[str]:
             return _normalize_question_number(f"{base}({sub})")
 
     # Case 2: explicit "question" context. Avoid capturing negatives: "-8" should not mean "第8题".
-    if re.search(r"(第\s*\d|题\s*\d|\d+\s*题|讲|聊|解释|辅导|说说|再讲|再聊)", msg):
+    if re.search(r"(第\s*\d|题\s*\d|\d+\s*题|讲|聊|解释|辅导|说说|再讲|再聊)", msg_num):
         # Prefer forms like "第20题" / "讲20(2)" / "聊第28(1)②题" / "题27".
-        m = re.search(rf"第\s*{qtoken}\s*题", msg)
+        m = re.search(rf"第\s*{qtoken}\s*题", msg_num)
         if m:
             return _normalize_question_number(m.group(1))
         # "20题" form (common Chinese input)
-        m = re.search(rf"{qtoken}\s*题", msg)
+        m = re.search(rf"{qtoken}\s*题", msg_num)
         if m:
             return _normalize_question_number(m.group(1))
-        m = re.search(rf"(?:题\s*|题号\s*){qtoken}", msg)
-        if m and not re.search(r"[-+*/^=]\s*$", msg[: m.start(1)]):
+        m = re.search(rf"(?:题\s*|题号\s*){qtoken}", msg_num)
+        if m and not re.search(r"[-+*/^=]\s*$", msg_num[: m.start(1)]):
             return _normalize_question_number(m.group(1))
-        m = re.search(rf"(?:讲|聊|解释|辅导|说说|再讲|再聊)\s*第?\s*{qtoken}\s*题?", msg)
+        m = re.search(rf"(?:讲|聊|解释|辅导|说说|再讲|再聊)\s*第?\s*{qtoken}\s*题?", msg_num)
         if m:
             return _normalize_question_number(m.group(1))
 
@@ -1488,6 +1501,11 @@ async def _run_chat_turn(
 ) -> AsyncIterator[bytes]:
     provider_str, model_override = _select_chat_model_or_raise(req)
     current_turn = session_data["interaction_count"]
+    try:
+        from homework_agent.services.context_compactor import compact_session_history
+        compact_session_history(session_data, provider=provider_str)
+    except Exception as e:
+        logger.debug(f"Session compaction failed (best-effort): {e}")
 
     wrong_item_context = _prepare_chat_context_or_abort(
         req=req,

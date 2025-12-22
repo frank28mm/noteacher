@@ -52,6 +52,12 @@ def setup_file_logging(
         h.setFormatter(fmt)
         h.name = handler_name
         logger.addHandler(h)
+        # Ensure logger emits at target level (root defaults to WARNING otherwise).
+        if logger.level == logging.NOTSET or logger.level > level:
+            logger.setLevel(level)
+        # Prevent duplicate emissions via root once this logger has a handler.
+        if logger.name:
+            logger.propagate = False
 
     targets = logger_names or [
         "",  # root

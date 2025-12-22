@@ -126,10 +126,37 @@ class Settings(BaseSettings):
     llm_client_timeout_seconds: int = Field(
         default=600, validation_alias="LLM_CLIENT_TIMEOUT_SECONDS"
     )
+    tool_calling_enabled: bool = Field(default=True, validation_alias="TOOL_CALLING_ENABLED")
+    max_tool_calls: int = Field(default=3, validation_alias="MAX_TOOL_CALLS")
+    tool_choice: str = Field(default="auto", validation_alias="TOOL_CHOICE")
 
     # Concurrency limits (to avoid thread pile-ups)
     max_concurrent_vision: int = Field(default=2, validation_alias="MAX_CONCURRENT_VISION")
     max_concurrent_llm: int = Field(default=4, validation_alias="MAX_CONCURRENT_LLM")
+
+    # Vision/OCR preprocessing (OpenCV-enhanced)
+    vision_preprocess_enabled: bool = Field(default=False, validation_alias="VISION_PREPROCESS_ENABLED")
+    vision_preprocess_timeout_seconds: int = Field(
+        default=20, validation_alias="VISION_PREPROCESS_TIMEOUT_SECONDS"
+    )
+    vision_preprocess_max_bytes: int = Field(
+        default=20 * 1024 * 1024, validation_alias="VISION_PREPROCESS_MAX_BYTES"
+    )
+
+    ocr_preprocess_enabled: bool = Field(default=False, validation_alias="OCR_PREPROCESS_ENABLED")
+    ocr_preprocess_prefix: str = Field(default="preprocessed/ocr/", validation_alias="OCR_PREPROCESS_PREFIX")
+    ocr_preprocess_timeout_seconds: int = Field(
+        default=20, validation_alias="OCR_PREPROCESS_TIMEOUT_SECONDS"
+    )
+    ocr_preprocess_max_bytes: int = Field(
+        default=20 * 1024 * 1024, validation_alias="OCR_PREPROCESS_MAX_BYTES"
+    )
+
+    # Context compaction (session memory)
+    context_compaction_enabled: bool = Field(default=False, validation_alias="CONTEXT_COMPACTION_ENABLED")
+    context_compaction_max_messages: int = Field(default=24, validation_alias="CONTEXT_COMPACTION_MAX_MESSAGES")
+    context_compaction_overlap: int = Field(default=6, validation_alias="CONTEXT_COMPACTION_OVERLAP")
+    context_compaction_interval: int = Field(default=8, validation_alias="CONTEXT_COMPACTION_INTERVAL")
 
     # QIndex worker queue (Redis required)
     qindex_queue_name: str = Field(default="qindex:queue", validation_alias="QINDEX_QUEUE_NAME")
