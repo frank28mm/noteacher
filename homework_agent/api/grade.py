@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from datetime import datetime
 import io
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple
-import re
 
 from fastapi import APIRouter, HTTPException, status, Request, Header, BackgroundTasks
 
@@ -18,20 +17,17 @@ from homework_agent.models.schemas import (
     GradeRequest, GradeResponse,
     VisionProvider, Subject, SimilarityMode, ImageRef
 )
-from homework_agent.services.vision import VisionClient
-from homework_agent.services.llm import LLMClient, MathGradingResult, EnglishGradingResult
+from homework_agent.services.llm import MathGradingResult, EnglishGradingResult
+from homework_agent.services.autonomous_agent import run_autonomous_grade_agent
 from homework_agent.services.qindex_queue import enqueue_qindex_job
 from homework_agent.utils.settings import get_settings
 from homework_agent.core.qindex import qindex_is_configured
-from homework_agent.models.vision_facts import SceneType
-from homework_agent.services.vision_facts import parse_visual_facts_map, _extract_first_json_object
 from homework_agent.core.qbank import (
-    _normalize_question_number,
     assign_stable_item_ids,
     build_question_bank,
-    build_question_bank_from_vision_raw_text,
     dedupe_wrong_items,
     derive_wrong_items_from_questions,
+    normalize_questions,
     sanitize_wrong_items,
 )
 from homework_agent.core.slice_policy import should_create_slices_for_bank
@@ -77,6 +73,12 @@ router = APIRouter()
 _settings_for_limits = get_settings()
 VISION_SEMAPHORE = asyncio.Semaphore(max(1, int(_settings_for_limits.max_concurrent_vision)))
 LLM_SEMAPHORE = asyncio.Semaphore(max(1, int(_settings_for_limits.max_concurrent_llm)))
+UNIFIED_AGENT_SEMAPHORE = asyncio.Semaphore(
+    max(1, int(getattr(_settings_for_limits, "unified_agent_max_concurrency", 2)))
+)
+AUTONOMOUS_AGENT_SEMAPHORE = asyncio.Semaphore(
+    max(1, int(getattr(_settings_for_limits, "autonomous_agent_max_concurrency", 2)))
+)
 
 async def _call_blocking_in_thread(
     fn,
@@ -140,9 +142,6 @@ def _needs_fallback(result: Any) -> bool:
         ):
             return True
     return False
-
-
-# Stage implementations moved to `homework_agent/api/_grading_stages.py` (to keep this router module smaller).
 
 
 
@@ -324,206 +323,6 @@ def _init_grading_ctx(req: GradeRequest, provider_str: str) -> _GradingCtx:
     )
 
 
-def _split_vision_output(text: Optional[str]) -> tuple[str, Optional[str], str]:
-    """Split vision output into OCR text + visual_facts JSON block (if present)."""
-    s = (text or "").strip()
-    if not s:
-        return "", None, "fail"
-    if VISION_OCR_START in s and VISION_OCR_END in s:
-        ocr = s.split(VISION_OCR_START, 1)[1].split(VISION_OCR_END, 1)[0].strip()
-        facts = None
-        if VISION_FACTS_START in s and VISION_FACTS_END in s:
-            facts = s.split(VISION_FACTS_START, 1)[1].split(VISION_FACTS_END, 1)[0].strip()
-        return ocr or s, facts, "marker"
-    # Fallback: some models ignore markers and use CN headers.
-    cn_facts_tag = "【图形视觉事实】"
-    if cn_facts_tag in s:
-        before, after = s.split(cn_facts_tag, 1)
-        ocr = re.sub(r"^【OCR识别原文】\s*", "", before.strip()).strip()
-        facts = after.strip()
-        facts = re.sub(r"^```(?:json)?", "", facts, flags=re.IGNORECASE).strip()
-        facts = facts.strip("`").strip()
-        return ocr or s, facts or None, "cn"
-
-    # Fallback: Markdown header format (### VISUAL_FACTS_JSON)
-    md_facts_patterns = [
-        r"###\s*VISUAL_FACTS_JSON\s*",
-        r"###\s*visual_facts_json\s*",
-        r"###\s*Visual Facts JSON\s*",
-    ]
-    for pattern in md_facts_patterns:
-        match = re.search(pattern, s, re.IGNORECASE)
-        if match:
-            before = s[:match.start()].strip()
-            after = s[match.end():].strip()
-            ocr = re.sub(r"^###\s*OCR[识识]?别?原文\s*", "", before, flags=re.IGNORECASE).strip()
-            facts = after.strip()
-            facts = re.sub(r"^```(?:json)?", "", facts, flags=re.IGNORECASE).strip()
-            facts = facts.strip("`").strip()
-            return ocr or s, facts or None, "md"
-
-
-    block = _extract_first_json_object(s)
-    if block:
-        ocr = s.replace(block, "").strip()
-        return ocr or s, block, "json"
-
-    # JSON repair: try to recover truncated JSON by appending closing brackets
-    json_start = s.find("{")
-    if json_start >= 0:
-        candidate = s[json_start:]
-        for suffix in ["}", "}}", "}}}", "]}", "]}}"]:
-            try:
-                import json
-                json.loads(candidate + suffix)
-                ocr = s[:json_start].strip() or s
-                return ocr, candidate + suffix, "repair"
-            except Exception:
-                continue
-
-    return s, None, "fail"
-
-
-
-def _extract_figure_present_map(visual_facts_map: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
-    if not isinstance(visual_facts_map, dict) or not visual_facts_map:
-        return None
-    out: Dict[str, str] = {}
-    for qn, facts in visual_facts_map.items():
-        if not isinstance(facts, dict):
-            continue
-        raw = facts.get("figure_present")
-        if isinstance(raw, bool):
-            val = "true" if raw else "false"
-        else:
-            val = str(raw or "").strip().lower()
-        if val in {"true", "false", "unknown"}:
-            out[str(qn)] = val
-    return out or None
-
-
-def _attach_visual_facts_to_bank(bank: Dict[str, Any], visual_facts_map: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Best-effort: attach per-question visual_facts into qbank questions."""
-    if not (isinstance(bank, dict) and visual_facts_map and isinstance(visual_facts_map, dict)):
-        return bank
-    qs = bank.get("questions")
-    if not isinstance(qs, dict):
-        return bank
-    for qn, facts in visual_facts_map.items():
-        qn_str = str(qn)
-        if qn_str in qs and isinstance(qs.get(qn_str), dict) and isinstance(facts, dict):
-            qs[qn_str]["visual_facts"] = facts
-    bank["questions"] = qs
-    return bank
-
-
-def _abort_llm_stage_with_vision_only_bank(
-    *,
-    ctx: _GradingCtx,
-    req: GradeRequest,
-    vision_raw_text: str,
-    visual_facts_map: Optional[Dict[str, Any]],
-    page_image_urls: List[str],
-    reason_summary: str,
-    warn_text: str,
-) -> None:
-    """Persist vision-only qbank and abort with a deterministic failure GradeResponse."""
-    if ctx.session_id:
-        bank_fallback = build_question_bank_from_vision_raw_text(
-            session_id=ctx.session_id,
-            subject=req.subject,
-            vision_raw_text=vision_raw_text,
-            page_image_urls=page_image_urls,
-        )
-        bank_fallback = _attach_visual_facts_to_bank(bank_fallback, visual_facts_map)
-        extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
-        persist_question_bank(
-            session_id=ctx.session_id,
-            bank=_merge_bank_meta(bank_fallback, ctx.meta_base),
-            grade_status="failed",
-            grade_summary=reason_summary,
-            grade_warnings=[w for w in [warn_text, extra_warn] if w],
-            timings_ms=ctx.timings_ms,
-        )
-        warnings = [w for w in [warn_text, extra_warn] if w]
-    else:
-        warnings = [warn_text]
-
-    figure_present_map = _extract_figure_present_map(visual_facts_map)
-    raise _GradingAbort(
-        GradeResponse(
-            wrong_items=[],
-            summary=reason_summary,
-            subject=req.subject,
-            job_id=None,
-            session_id=ctx.session_id,
-            status="failed",
-            total_items=None,
-            wrong_count=None,
-            cross_subject_flag=None,
-            warnings=warnings,
-            vision_raw_text=vision_raw_text,
-            visual_facts=visual_facts_map or None,
-            figure_present=figure_present_map,
-        )
-    )
-
-
-def _abort_parse_failed_after_fallbacks(
-    *,
-    ctx: _GradingCtx,
-    req: GradeRequest,
-    grading_result: Any,
-    vision_raw_text: str,
-    visual_facts_map: Optional[Dict[str, Any]],
-    page_image_urls: List[str],
-    vision_fallback_warning: Optional[str],
-) -> None:
-    """If parsing still failed after fallbacks, treat grading as failed (avoid 'done but empty')."""
-    if ctx.session_id:
-        bank_fallback = build_question_bank_from_vision_raw_text(
-            session_id=ctx.session_id,
-            subject=req.subject,
-            vision_raw_text=vision_raw_text,
-            page_image_urls=page_image_urls,
-        )
-        bank_fallback = _attach_visual_facts_to_bank(bank_fallback, visual_facts_map)
-        extra_warn = _visual_risk_warning_text() if _bank_has_visual_risk(bank_fallback) else None
-        persist_question_bank(
-            session_id=ctx.session_id,
-            bank=_merge_bank_meta(bank_fallback, ctx.meta_base),
-            grade_status="failed",
-            grade_summary=(getattr(grading_result, "summary", "") or "批改失败").strip(),
-            grade_warnings=(getattr(grading_result, "warnings", None) or [])
-            + ([vision_fallback_warning] if vision_fallback_warning else [])
-            + ([extra_warn] if extra_warn else []),
-            timings_ms=ctx.timings_ms,
-        )
-    else:
-        extra_warn = None
-
-    figure_present_map = _extract_figure_present_map(visual_facts_map)
-    raise _GradingAbort(
-        GradeResponse(
-            wrong_items=sanitize_wrong_items(getattr(grading_result, "wrong_items", []) or []),
-            summary=(getattr(grading_result, "summary", "") or "批改失败").strip(),
-            subject=req.subject,
-            job_id=None,
-            session_id=ctx.session_id,
-            status="failed",
-            total_items=getattr(grading_result, "total_items", None),
-            wrong_count=getattr(grading_result, "wrong_count", None),
-            cross_subject_flag=getattr(grading_result, "cross_subject_flag", None),
-            warnings=(getattr(grading_result, "warnings", None) or [])
-            + ([vision_fallback_warning] if vision_fallback_warning else [])
-            + ([extra_warn] if ctx.session_id and extra_warn else []),
-            vision_raw_text=vision_raw_text,
-            visual_facts=visual_facts_map or None,
-            figure_present=figure_present_map,
-        )
-    )
-
-
 def _persist_done_qbank_snapshot(
     *,
     ctx: _GradingCtx,
@@ -579,65 +378,112 @@ def _ensure_grading_counts(grading_result: Any) -> None:
             grading_result.total_items = None
 
 
-async def _run_grade_vision(
+def _build_grading_result_from_unified(
     *,
-    ctx: _GradingCtx,
-    req: GradeRequest,
-    vision_client: VisionClient,
-) -> tuple[Any, Optional[str]]:
-    """Wrapper to run vision stage with ctx-bound parameters (reduces perform_grading noise)."""
-    # Lazy import to avoid circular deps with `_GradingAbort` staying in this module.
-    from homework_agent.api._grading_stages import _run_grading_vision_stage
-
-    vision_result, ctx.page_image_urls, vision_fallback_warning = await _run_grading_vision_stage(
-        req=req,
-        session_id=ctx.session_id,
-        request_id=ctx.request_id,
-        settings=ctx.settings,
-        started_m=ctx.started_m,
-        deadline_m=ctx.deadline_m,
-        vision_prompt=GRADE_VISION_PROMPT,
-        vision_client=vision_client,
-        page_image_urls=ctx.page_image_urls,
-        page_image_urls_original=ctx.page_image_urls_original,
-        meta_base=ctx.meta_base,
-        timings_ms=ctx.timings_ms,
-        call_blocking_in_thread=_call_blocking_in_thread,
-        vision_semaphore=VISION_SEMAPHORE,
-        persist_question_bank=persist_question_bank,
-        merge_bank_meta=_merge_bank_meta,
-        save_grade_progress=save_grade_progress,
-        log_event=log_event,
-    )
-    return vision_result, vision_fallback_warning
-
-
-async def _run_grade_llm(
-    *,
-    ctx: _GradingCtx,
-    req: GradeRequest,
-    llm_client: LLMClient,
-    vision_text: str,
+    unified: UnifiedGradeResult,
+    subject: Subject,
 ) -> Any:
-    """Wrapper to run LLM stage with ctx-bound parameters (reduces perform_grading noise)."""
-    from homework_agent.api._grading_stages import _run_grading_llm_stage
+    """Convert unified agent output into Math/English grading result objects."""
+    results = unified.results or []
+    wrong_items: List[Dict[str, Any]] = []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        verdict = (r.get("verdict") or "").strip().lower()
+        if verdict != "correct":
+            wrong_items.append(
+                {
+                    "question_number": r.get("question_number"),
+                    "question_content": r.get("question_content"),
+                    "student_answer": r.get("student_answer"),
+                    "reason": r.get("reason"),
+                    "judgment_basis": r.get("judgment_basis"),
+                    "warnings": r.get("warnings") or [],
+                    "knowledge_tags": r.get("knowledge_tags") or [],
+                }
+            )
 
-    return await _run_grading_llm_stage(
-        req=req,
-        provider_str=ctx.provider_str,
-        llm_client=llm_client,
-        vision_text=vision_text,
-        settings=ctx.settings,
-        started_m=ctx.started_m,
-        deadline_m=ctx.deadline_m,
-        session_id=ctx.session_id,
-        request_id=ctx.request_id,
-        meta_base=ctx.meta_base,
-        timings_ms=ctx.timings_ms,
-        call_blocking_in_thread=_call_blocking_in_thread,
-        llm_semaphore=LLM_SEMAPHORE,
-        save_grade_progress=save_grade_progress,
-        log_event=log_event,
+    wrong_items = sanitize_wrong_items(wrong_items)
+    wrong_items = dedupe_wrong_items(wrong_items)
+    wrong_items = assign_stable_item_ids(wrong_items)
+
+    total_items = len(results) if isinstance(results, list) else None
+    wrong_count = len(wrong_items)
+    summary = unified.summary or "批改完成"
+
+    if subject == Subject.ENGLISH:
+        return EnglishGradingResult(
+            wrong_items=wrong_items,
+            questions=results,
+            summary=summary,
+            total_items=total_items,
+            wrong_count=wrong_count,
+            cross_subject_flag=None,
+            warnings=unified.warnings or [],
+        )
+
+    return MathGradingResult(
+        wrong_items=wrong_items,
+        questions=results,
+        summary=summary,
+        total_items=total_items,
+        wrong_count=wrong_count,
+        cross_subject_flag=None,
+        warnings=unified.warnings or [],
+    )
+
+
+def _build_grading_result_from_autonomous(
+    *,
+    autonomous: Any,
+    subject: Subject,
+) -> Any:
+    results = normalize_questions(autonomous.results or [])
+    wrong_items: List[Dict[str, Any]] = []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        verdict = (r.get("verdict") or "").strip().lower()
+        if verdict != "incorrect":
+            continue
+        wrong_items.append(
+            {
+                "question_number": r.get("question_number"),
+                "question_content": r.get("question_content"),
+                "student_answer": r.get("student_answer"),
+                "reason": r.get("reason"),
+                "judgment_basis": r.get("judgment_basis"),
+                "warnings": r.get("warnings") or [],
+                "knowledge_tags": r.get("knowledge_tags") or [],
+            }
+        )
+
+    wrong_items = sanitize_wrong_items(wrong_items)
+    wrong_items = dedupe_wrong_items(wrong_items)
+    wrong_items = assign_stable_item_ids(wrong_items)
+
+    total_items = len(results) if isinstance(results, list) else None
+    wrong_count = len(wrong_items)
+    summary = autonomous.summary or "批改完成"
+
+    if subject == Subject.ENGLISH:
+        return EnglishGradingResult(
+            wrong_items=wrong_items,
+            questions=results,
+            summary=summary,
+            total_items=total_items,
+            wrong_count=wrong_count,
+            cross_subject_flag=None,
+            warnings=autonomous.warnings or [],
+        )
+    return MathGradingResult(
+        wrong_items=wrong_items,
+        questions=results,
+        summary=summary,
+        total_items=total_items,
+        wrong_count=wrong_count,
+        cross_subject_flag=None,
+        warnings=autonomous.warnings or [],
     )
 
 
@@ -693,137 +539,105 @@ def _build_done_grade_response(
 
 
 
-def _apply_visual_risk_fail_closed(grading_result: Any, subject: Subject) -> Any:
-    """
-    Deprecated: fail-closed gating is disabled in stable mode.
-    """
-    return grading_result
-
-
-@trace_span("grade.perform_grading")
-async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse:
-    """执行批改（同步/后台共用）。"""
+async def _perform_autonomous_grading(req: GradeRequest, provider_str: str) -> GradeResponse:
+    """Run the autonomous agent loop and map to GradeResponse."""
     ctx = _init_grading_ctx(req, provider_str)
-    vision_client = VisionClient()
-    vision_fallback_warning: Optional[str] = None
-
-    try:
-        vision_result, vision_fallback_warning = await _run_grade_vision(ctx=ctx, req=req, vision_client=vision_client)
-    except _GradingAbort as abort:
-        return abort.response
-
-    vision_full_text = str(getattr(vision_result, "text", "") or "")
-    vision_raw_text, visual_facts_json, parse_path = _split_vision_output(vision_full_text)
-    visual_facts_map: Dict[str, Any] = {}
-    visual_facts_warn: Optional[str] = None
-    visual_facts_repaired = False
-    if visual_facts_json:
-        visual_facts_map, visual_facts_repaired = parse_visual_facts_map(
-            visual_facts_json, scene_type=SceneType.UNKNOWN
-        )
-        if not visual_facts_map:
-            visual_facts_warn = "视觉事实解析失败，本次判断仅基于识别原文。"
-    else:
-        visual_facts_warn = "视觉事实缺失，本次判断仅基于识别原文。"
-
-    parse_path_final = "repair" if visual_facts_repaired else parse_path
+    save_grade_progress(ctx.session_id, "vision_start", "自主阅卷中（规划→工具→反思）…", None)
     log_event(
         logger,
-        "grade_vision_split",
-        session_id=ctx.session_id,
+        "autonomous_grade_start",
         request_id=ctx.request_id,
-        has_markers=bool(VISION_OCR_START in vision_full_text and VISION_FACTS_START in vision_full_text),
-        has_cn_facts=bool("【图形视觉事实】" in vision_full_text),
-        ocr_len=len(vision_raw_text or ""),
-        facts_len=len(visual_facts_json or ""),
-        parse_path=parse_path_final,
+        session_id=ctx.session_id,
+        provider=provider_str,
+        subject=getattr(req.subject, "value", str(req.subject)),
+        images=len(req.images or []),
     )
 
-    ctx.meta_base["visual_facts_available"] = bool(visual_facts_map)
-    ctx.meta_base["visual_facts_repaired_json"] = bool(visual_facts_repaired)
-    figure_present_map = _extract_figure_present_map(visual_facts_map)
-
-    llm_client = LLMClient()
-    vision_text_for_llm = vision_raw_text
-    if visual_facts_map:
+    async with AUTONOMOUS_AGENT_SEMAPHORE:
         try:
-            vision_text_for_llm = (
-                f"{vision_raw_text}\n\n[visual_facts]\n"
-                + json.dumps(visual_facts_map, ensure_ascii=False)
+            autonomous = await run_autonomous_grade_agent(
+                images=req.images,
+                subject=req.subject,
+                provider=provider_str,
+                session_id=ctx.session_id,
+                request_id=ctx.request_id,
             )
-        except Exception:
-            vision_text_for_llm = vision_raw_text
+        except Exception as e:
+            log_event(
+                logger,
+                "autonomous_grade_failed",
+                level="warning",
+                request_id=ctx.request_id,
+                session_id=ctx.session_id,
+                error_type=e.__class__.__name__,
+                error=str(e),
+            )
+            save_grade_progress(ctx.session_id, "failed", "批改失败", {"error": str(e)})
+            return GradeResponse(
+                wrong_items=[],
+                summary="批改失败",
+                subject=req.subject,
+                job_id=None,
+                session_id=ctx.session_id,
+                status="failed",
+                total_items=None,
+                wrong_count=None,
+                cross_subject_flag=None,
+                warnings=[f"autonomous_agent_error: {e}"],
+                vision_raw_text=None,
+                questions=[],
+            )
 
-    try:
-        grading_result = await _run_grade_llm(
-            ctx=ctx,
-            req=req,
-            llm_client=llm_client,
-            vision_text=vision_text_for_llm,
-        )
-        # Only add visual_facts warning if the map is truly empty after all parsing attempts
-        if visual_facts_warn and not visual_facts_map:
-            grading_result.warnings = list(dict.fromkeys((grading_result.warnings or []) + [visual_facts_warn]))
-
-    except asyncio.TimeoutError as e:
-        _abort_llm_stage_with_vision_only_bank(
-            ctx=ctx,
-            req=req,
-            vision_raw_text=vision_raw_text,
-            visual_facts_map=visual_facts_map,
-            page_image_urls=ctx.page_image_urls,
-            reason_summary="LLM grading timeout",
-            warn_text=f"LLM timeout: {str(e)}",
-        )
-    except Exception as e:
-        _abort_llm_stage_with_vision_only_bank(
-            ctx=ctx,
-            req=req,
-            vision_raw_text=vision_raw_text,
-            visual_facts_map=visual_facts_map,
-            page_image_urls=ctx.page_image_urls,
-            reason_summary=f"LLM grading failed: {str(e)}",
-            warn_text=f"LLM error: {str(e)}",
-        )
-
-    # If parsing still failed after fallbacks, treat grading as failed (avoid "done but empty").
-    if _needs_fallback(grading_result):
-        _abort_parse_failed_after_fallbacks(
-            ctx=ctx,
-            req=req,
-            grading_result=grading_result,
-            vision_raw_text=vision_raw_text,
-            visual_facts_map=visual_facts_map,
-            page_image_urls=ctx.page_image_urls,
-            vision_fallback_warning=vision_fallback_warning,
+    if autonomous.status == "rejected":
+        save_grade_progress(ctx.session_id, "failed", "输入非作业图片，已拒绝批改", None)
+        return GradeResponse(
+            wrong_items=[],
+            summary=autonomous.summary,
+            subject=req.subject,
+            job_id=None,
+            session_id=ctx.session_id,
+            status="rejected",
+            total_items=None,
+            wrong_count=None,
+            cross_subject_flag=None,
+            warnings=[autonomous.reason or "not_homework"],
+            vision_raw_text=autonomous.ocr_text,
+            questions=[],
         )
 
-    # Persist question bank snapshot (full question list) for chat routing.
+    grading_result = _build_grading_result_from_autonomous(autonomous=autonomous, subject=req.subject)
+
     extra_warn = _persist_done_qbank_snapshot(
         ctx=ctx,
         req=req,
         grading_result=grading_result,
-        vision_raw_text=vision_raw_text,
-        visual_facts_map=visual_facts_map,
+        vision_raw_text=autonomous.ocr_text,
+        visual_facts_map=None,
         page_image_urls=ctx.page_image_urls,
-        vision_fallback_warning=vision_fallback_warning,
+        vision_fallback_warning=None,
     )
 
     _ensure_grading_counts(grading_result)
-
     _log_grade_done(ctx=ctx, grading_result=grading_result)
     save_grade_progress(ctx.session_id, "done", "批改结果已生成", {"timings_ms": ctx.timings_ms})
+
     return _build_done_grade_response(
         ctx=ctx,
         req=req,
         grading_result=grading_result,
-        vision_raw_text=vision_raw_text,
-        visual_facts_map=visual_facts_map,
-        figure_present_map=figure_present_map,
-        vision_fallback_warning=vision_fallback_warning,
+        vision_raw_text=autonomous.ocr_text,
+        visual_facts_map=None,
+        figure_present_map=None,
+        vision_fallback_warning=None,
         extra_warn=extra_warn,
-        visual_facts_warn=visual_facts_warn,
+        visual_facts_warn=None,
     )
+
+
+@trace_span("grade.perform_grading")
+async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse:
+    """执行批改（同步/后台共用），统一走 Autonomous Agent。"""
+    return await _perform_autonomous_grading(req, provider_str)
 
 
 async def background_grade(job_id: str, req: GradeRequest, provider_str: str):
@@ -980,6 +794,16 @@ async def grade_homework(
         provider_str = req.llm_provider  # "ark" or "silicon"
     else:
         provider_str = "silicon" if req.vision_provider == VisionProvider.QWEN3 else "ark"
+    log_event(
+        logger,
+        "grade_request_start",
+        request_id=request_id,
+        session_id=session_for_ctx,
+        subject=getattr(req.subject, "value", str(req.subject)),
+        images=len(req.images or []),
+        provider=provider_str,
+        upload_id=upload_id,
+    )
 
     if is_large_batch:
         job_id = generate_job_id()

@@ -19,3 +19,4 @@ opencv-python
 numpy
 jinja2
 pyyaml
+sympy>=1.12

@@ -23,7 +23,7 @@
 #### 1.0.1 核心架构
 - 后端框架：FastAPI 0.100+ (Python 3.10+)；HTTP 直连 LLM/Vision API（OpenAI/Anthropic），不使用 Claude Agent SDK、不依赖 .claude 目录。
 - AI 模型（Reasoning/Chat）：Phase 1 `/grade` 与 `/chat` 当 provider=ark 时均使用 `ARK_REASONING_MODEL` 指定的 Doubao 模型（测试环境可指向 `doubao-seed-1-6-vision-250815`）；`ARK_REASONING_MODEL_THINKING` 不作为必需项。Qwen3 推理仅作为内部调试/备用，不对外暴露或新增其他 LLM 选项。保留 OpenAI/Anthropic 作为内部备用，不向终端暴露。
-- 视觉/OCR：用户可选 `"doubao"`(Ark doubao-seed-1-6-vision-250815) 或 `"qwen3"`(SiliconFlow Qwen/Qwen3-VL-32B-Thinking)，默认 `"doubao"`；不对外提供 OpenAI 视觉选项。`doubao` **优先公网 URL**，但支持 Data-URL(base64) 兜底（绕开 provider-side URL 拉取不稳定）；`qwen3` 支持 URL 或 Data-URL(base64)。备选 Azure Computer Vision；备用 Tesseract（本地）。
+- 视觉模型：用户可选 `"doubao"`(Ark doubao-seed-1-6-vision-250815) 或 `"qwen3"`(SiliconFlow Qwen/Qwen3-VL-32B-Thinking)，默认 `"doubao"`；不对外提供 OpenAI 视觉选项。`doubao` **优先公网 URL**，但支持 Data-URL(base64) 兜底（绕开 provider-side URL 拉取不稳定）；`qwen3` 支持 URL 或 Data-URL(base64)。
 - 数据存储：Supabase（Postgres + Storage）作为持久化主存；Redis 作为缓存/队列（会话、qbank/qindex、异步任务协调）。
 - 队列：Redis list + 独立 worker（qindex 通过 `BRPOP` 消费队列）。
 - 部署：Docker；可选 K8s/云函数。
@@ -66,9 +66,9 @@ homework_agent/
 graph TD
     A[接收GradeRequest] --> B{验证输入}
     B -->|失败| C[返回错误]
-    B -->|成功| D[OCR图像识别]
+    B -->|成功| D[OpenCV预处理 + 统一阅卷Agent]
     D --> E{识别成功？}
-    E -->|失败| F[返回OCR失败错误]
+    E -->|失败| F[返回视觉识别失败错误]
     E -->|成功| G[选择批改策略]
     G --> H{科目？}
     H -->|数学| I[数学批改链]
@@ -79,7 +79,7 @@ graph TD
     L --> M{需要辅导？}
     M -->|否| N[结束]
     M -->|是| O[启动Chat会话（已批改）]
-    O --> P[Chat 页面输出：识别原文 + 视觉事实 + 批改结论]
+    O --> P[Chat 页面输出：识别原文 + 判断依据 + 批改结论]
     P --> Q{继续提问？}
     Q -->|是| R[继续对话/解释]
     Q -->|否| S[结束会话]
@@ -89,7 +89,7 @@ graph TD
 
 | 阶段 | 输入 | 处理 | 输出 |
 |------|------|------|------|
-| **批改** | GradeRequest(images, subject, mode) | OCR → 分析 → 结构化 | GradeResponse(wrong_items, summary) |
+| **批改** | GradeRequest(images, subject, mode) | OpenCV 预处理 → 统一阅卷 Agent | GradeResponse(wrong_items, summary) |
 | **辅导** | ChatRequest(history, question) | 上下文理解 → 引导策略 | ChatResponse(messages) 或 SSE流 |
 | **会话** | session_id | 状态管理 | 持久化上下文 |
 
@@ -156,60 +156,48 @@ graph TD
 
 ✅ 看图策略（稳定优先）:
   - Chat **不实时看图**：只读取 `/grade` 产出的 `judgment_basis + vision_raw_text`。
-  - 若 visual_facts 缺失：仍给出结论，但必须提示“视觉事实缺失，本次判断仅基于识别文本”。
-  - 如用户仍要求看图：提示“切片生成中/请稍后或补充清晰局部图”，不在 chat 中发起 VFE。
+  - 若视觉信息不足：仍给出结论，但必须提示“依据不足，可能误读”，并在 `judgment_basis` 写明依据来源。
+  - 如用户仍要求看图：提示“切片生成中/请稍后或补充清晰局部图”，不在 chat 中发起额外视觉调用。
 ```
 
 ### 2.2 阶段2：图像处理与内容识别
 
-#### SOP-2.1: OCR图像处理
-**工具（MVP 推荐）**: 传统 OCR + 版面分析（路线 3）
+#### SOP-2.1: OpenCV 预处理与切片
+**工具（MVP 推荐）**: OpenCV 预处理 + qindex 切片
 
-- **首选**：百度文档解析 **PaddleOCR-VL**（云端 API）用于获取版面结构、文本块与坐标，用于题块聚类/题号定位与 bbox 生成。
-- **可选**：本地 PaddleOCR / RapidOCR（ONNXRuntime）作为离线替代/降级；或 Azure Computer Vision / Tesseract 作为备用。
-
-> 说明：本阶段的目标不是“读懂题”，而是产出可靠的文本框与版面结构，用于后续生成题目区域 bbox / 切片。
+- **固定前置流水线**：去噪、增强、倾斜矫正、尺寸规范化。
+- **切片策略**：优先 figure + question 双图；必要时回退整页。
 
 **执行方式（重要）**：
-- OCR + 题块 bbox + 切片裁剪/上传属于重任务，**不得在 API 主进程内同步执行**。
+- 题块 bbox + 切片裁剪/上传属于重任务，**不得在 API 主进程内同步执行**。
 - `/grade` 完成后仅负责 **enqueue** 一个 qindex 任务到 Redis 队列（默认 `qindex:queue`）。
 - 独立 worker `python -m homework_agent.workers.qindex_worker` 负责消费队列，生成 bbox/slice 并写回 `qindex:{session_id}`。
-- chat 侧会把该题切片 refs 透传为 `focus_image_urls/focus_image_source`（用于 UI 渲染）；**visual_facts 只在 /grade 生成**，qindex 不再产出视觉事实。
+- chat 侧会把该题切片 refs 透传为 `focus_image_urls/focus_image_source`（用于 UI 渲染）。
 - 当题目无法定位时，SSE 会返回 `question_candidates`（候选题目列表），前端可渲染为快捷按钮引导用户切题。
 
-### 2.1.1.1 视觉事实抽取（MVP）
-- 入口：`homework_agent/services/vision_facts.py`
-- 触发：**/grade 阶段**，与 `vision_raw_text` 同一次 Vision 调用输出（避免二次调用与不一致）。
-- 日志（必须可回放）：
-  - `vfe_start(scene_type,image_source,image_url)`
-  - `vfe_done(scene_type,confidence,unknowns_count,repaired_json)`
+### 2.1.1.1 统一阅卷 Agent（Vision + Grade 合一）
+- 入口：`homework_agent/services/vision_grade_agent.py`
+- 触发：**/grade 阶段**（单次调用完成识别 + 理解 + 批改）
+- 目标：输出 `vision_raw_text + judgment_basis + grading_result`，避免识别与判题拆分导致信息丢失。
 - qbank 持久化字段：
-  - `qbank.questions[q_num].visual_facts`（结构化事实，仅用于审计/复盘）
+  - `qbank.questions[q_num].judgment_basis`（判定依据短句，供 chat 直接展示）
   - `qbank.questions[q_num].question_aliases`（非数字题名别名，用于 chat 路由）
 
 **处理步骤**:
 ```python
-1. 图像预处理:
-   ✅ 规范化图像尺寸（最大2048x2048）
-   ✅ 调整对比度和清晰度（自动）
-   ✅ 检测图像方向并旋转
+1. OpenCV 前置流水线:
+   ✅ 去噪/增强/矫正（固定流程）
+   ✅ figure/question 切片优先（双图输入）
 
-2. 内容识别:
-   ✅ 使用视觉模型 API 分析每张图片（HTTP 直连）
-   ✅ 提取文本内容（手写体/印刷体）
-   ✅ 识别数学公式、几何图形
-   ✅ 检测题目边界和答案区域
-
-3. 结构化输出:
-   ✅ 生成OCR JSON: {page_num, text, bbox, confidence}
-   ✅ 计算归一化坐标 [ymin, xmin, ymax, xmax]
-   ✅ 识别题目分组（基于位置和内容）
+2. 统一阅卷 Agent:
+   ✅ 识别题干与作答（vision_raw_text）
+   ✅ 结合图形理解与规则判定（judgment_basis）
+   ✅ 输出结构化判定（verdict + reason + warnings）
 ```
 
 **质量控制**:
-- confidence < 0.7 → 标记为uncertain
-- 无法识别的区域 → bbox为null，reason说明
-- 跨页内容 → 合并处理
+- 非作业图 → rejected
+- 视觉信息不足 → verdict=uncertain + warnings + judgment_basis 说明依据来源
 
 ### 2.3 阶段3：批改执行
 
@@ -219,7 +207,7 @@ graph TD
 **处理逻辑**:
 ```python
 1. 题目解析:
-   ✅ 从OCR结果中识别数学题目
+   ✅ 从识别结果中识别数学题目
    ✅ 分离题干和学生答案
    ✅ 检测题型（计算/几何/应用题）
 
@@ -293,7 +281,7 @@ graph TD
 ✅ 输出策略:
   - 默认直接给出结论 + 解释（报告式）
   - 必须基于识别文本/judgment_basis，避免凭空补图
-  - 若 visual_facts 缺失：给出结论，但明确标注“基于识别文本，视觉事实缺失”
+  - 若视觉信息不足：给出结论，但明确标注“依据不足，可能误读”
 ```
 
 #### SOP-4.2: 对话循环（报告式输出 + 允许追问）
@@ -304,7 +292,7 @@ graph TD
   - 仅在完成批改后使用（即便全对也可对话），不做纯闲聊。
   - 默认不限轮；用户可持续追问细节与依据。
   - 回答必须引用 vision_raw_text / judgment_basis 的事实描述。
-  - 若 visual_facts 缺失：加“视觉事实缺失，本次判断仅基于识别文本”的明确提示。
+  - 若视觉信息不足：加“依据不足，可能误读”的明确提示。
 ```
 
 > SSE 心跳/断线：心跳建议 30s；若 90s 内无数据可断开；客户端可用 last-event-id 续接。
@@ -421,7 +409,7 @@ graph TD
 #### 4.1.2 处理错误
 | 错误类型 | HTTP状态码 | 处理策略 |
 |----------|-----------|----------|
-| OCR失败 | 422 | 返回部分结果 + warnings |
+| 视觉识别失败 | 422 | 返回部分结果 + warnings |
 | 批改超时 | 408 | 返回中间结果 + status: processing |
 | 会话过期 | 410 | 引导重新开始 |
 | LLM服务错误 | 500 | 重试3次，仍失败返回错误 |
@@ -444,10 +432,10 @@ graph TD
 
 ### 4.2 异常恢复策略
 
-#### OCR异常恢复
+#### 视觉识别异常恢复
 ```python
 1. 第一次失败 → 自动重试（最多3次）
-2. 仍失败 → 使用备用OCR（如果有）
+2. 仍失败 → 降级为不确定结论 + warnings
 3. 完全失败 → 返回 {
    "wrong_items": [],
    "warnings": ["部分图片识别失败"]
@@ -593,7 +581,7 @@ graph TD
 #### 优化策略
 ```python
 ✅ 图像处理:
-  - 并行OCR（最多4张图同时）
+  - 并行视觉调用（最多4张图同时）
   - 图像压缩（减少传输时间）
   - 缓存常用题型识别结果
 
@@ -613,7 +601,7 @@ graph TD
 ✅ 批改性能目标:
   - 小批量(≤3张): <3秒同步返回
   - 大批量(>3张): <60秒异步处理
-  - 单张图片OCR: <1秒
+  - 单张图片视觉处理: <10秒（视模型与分辨率）
 
 ✅ 辅导性能目标:
   - 首次响应: <2秒
@@ -647,7 +635,7 @@ graph TD
 ✅ 批改指标:
   - 批改成功率 (>99%)
   - 平均批改耗时
-  - OCR识别准确率
+  - 视觉识别准确率
   - 批改质量评分（人工反馈）
 
 ✅ 辅导指标:
@@ -661,7 +649,7 @@ graph TD
 ```python
 ✅ 错误分类:
   - 输入验证错误率 (<1%)
-  - OCR失败率 (<5%)
+  - 视觉识别失败率 (<5%)
   - LLM调用失败率 (<0.5%)
   - 超时错误率 (<1%)
 
@@ -685,7 +673,7 @@ graph TD
 ✅ 批改日志:
   - 题目数量、错误数量
   - 使用的模型和prompt版本
-  - OCR置信度分布
+  - 视觉识别置信度分布
   - 知识标签分布
 
 ✅ 辅导日志:
@@ -747,7 +735,7 @@ SUBMISSION_INACTIVITY_PURGE_DAYS=180
 
 | 问题 | 可能原因 | 解决方案 |
 |------|----------|----------|
-| OCR识别失败 | 图片模糊/旋转 | 预处理图像，检查方向 |
+| 视觉识别失败 | 图片模糊/旋转 | 预处理图像，检查方向 |
 | 批改结果不准确 | prompt需要调优 | 收集样本，优化prompt |
 | SSE连接断开 | 网络不稳定 | 重连机制，last-event-id |
 | 批改速度慢 | 模型响应慢 | 优化prompt，并行处理 |

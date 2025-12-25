@@ -5,7 +5,7 @@
 ### 1.1 操作模式 (Input Workflow)
 *   **用户角色**：家长 或 学生（均可操作）。
 *   **上传路径（权威原图）**：前端仅负责把原始文件上传给后端；后端按 `user_id` 将原图落到云端存储（Supabase Storage），并返回 `upload_id`（一次上传=一次 Submission）与稳定的 `page_image_urls`。
-    *   后续所有业务（`/grade`、`/chat`、qindex、视觉事实抽取）只围绕这份“权威原图/切片”展开，避免“URL 不稳定/拉取失败/权限漂移”导致的看图失败。
+    *   后续所有业务（`/grade`、`/chat`、qindex、统一阅卷 Agent）只围绕这份“权威原图/切片”展开，避免“URL 不稳定/拉取失败/权限漂移”导致的看图失败。
 *   **处理模式**：支持同步与异步两种（按图片数量与 SLA 自动选择）。
     *   用户拍摄多张作业照片（支持一次性上传，多页/PDF 拆页）。
     *   系统后台进行识别与批改；必要时转为异步任务（`job_id`）。
@@ -17,7 +17,7 @@
     *   默认直接给出结论与理由（更像“批改报告”），用户可继续追问细节。
     *   仍可保留“提示/引导”的语气，但不再禁止给答案。
     *   结构化反馈：`steps` 中用 `verdict` 标记 correct/incorrect/uncertain，可选 `severity`（计算错误/概念错误/格式）。
-*   **判定透明度**：批改结果需覆盖每道题，返回学生作答/标准答案/判定（选项题注明 student_choice/correct_choice），判定枚举受限（verdict 仅 correct/incorrect/uncertain；severity 仅 calculation/concept/format/unknown/medium/minor）；不确定要标记，禁止编造 bbox。返回 `vision_raw_text` 便于审计。
+*   **判定透明度**：批改结果需覆盖每道题，返回学生作答/标准答案/判定（选项题注明 student_choice/correct_choice），判定枚举受限（verdict 仅 correct/incorrect/uncertain；severity 仅 calculation/concept/format/unknown/medium/minor）；不确定要标记，禁止编造 bbox。返回 `vision_raw_text` 便于审计，并输出 `judgment_basis` 作为用户可读依据。
 *   **题目定位体验**：用户可用数字题号或非数字题名（如“思维与拓展/旋转题”）发起辅导；若无法定位，必须返回候选题目列表，并在 UI 中提供可点击按钮进行切题。
 *   **Chat 首屏信息（产品要求）**：用户上传图片批改成功后，首屏必须在 **同一聊天页面** 展示：
     *   识别原文（vision_raw_text）
@@ -26,13 +26,12 @@
     *   对话历史仅保留 7 天（定期清理）；超过 7 天再次进入仅展示该次 Submission 的批改结果与识别原文，不保证恢复旧对话上下文。
 
 ### 1.2.1 图形题一致性（产品要求：看图要可信）
-*   **目标**：几何/图表/示意图这类题，**答案必须基于 vision 识别结果**；允许“有依据地错”，但必须可复盘、可解释。
+*   **目标**：几何/图表/示意图这类题，**答案必须基于视觉理解**；允许“有依据地错”，但必须可复盘、可解释。
 *   **实现策略（稳定优先，MVP）**：
-    *   **/grade 单次 Vision 调用**：输出 `vision_raw_text`，并生成可审计的 `visual_facts`（用于复盘，不直接展示）。
-    *   qindex 仅负责切片（优先 `figure` 图形区域切片）。
-    *   **Chat 只读 /grade 产出的 `judgment_basis + vision_raw_text`**，不做实时 relook/VFE。
-    *   **不再 fail-closed**：若 `visual_facts` 缺失，仍给出结论，但必须提示“视觉事实缺失，本次判断仅基于识别文本”。
-    *   辅导对话必须引用 `judgment_basis`/`vision_raw_text` 的描述作为依据，避免凭空补图。
+    *   **统一阅卷 Agent**：视觉识别与批改合一，输出 `vision_raw_text + judgment_basis + grading_result`，不再拆分为独立“视觉事实抽取”链路。
+    *   **OpenCV 前置流水线**：去噪/矫正/切片为固定流程；Agent 直接使用高质量切片（figure + question 双图优先）。
+    *   **Chat 只读 /grade 产出**：使用 `judgment_basis + vision_raw_text` 作为对话依据，不做实时 relook。
+    *   **不阻断输出**：若视觉信息不足仍给出结论，但必须在 `warnings` 说明“依据不足/可能误读”，并在 `judgment_basis` 写明依据来源。
 
 ### 1.3 数据闭环 (Data Loop)
 *   **权威事实（不可变）**：每次 Submission 都会长期保存：
@@ -48,7 +47,7 @@
 *   **短期保留（固定）**：
     *   Chat 对话历史：7 天（定期清理）
     *   qindex 切片：7 天（定期清理）
-    *   视觉事实（visual_facts）：随 qbank/Submission 快照保存（结构化 JSON，体积小），用于审计/复盘；若未来对 qbank 做 TTL，随之清理。
+    *   judgment_basis：随 qbank/Submission 快照保存（结构化短句列表），用于审计/复盘；若未来对 qbank 做 TTL，随之清理。
 *   **静默清理（系统策略）**：用户长时间静默后清除其数据，阈值为 **180 天**（以 last_active_at 为准；由后台定时任务执行）。
 
 ## 2. Agent 能力边界 (Agent Capabilities)
@@ -84,7 +83,7 @@
     *   辅导链：默认只读本次 Submission（不读长期画像/历史错题）。
     *   报告链：可读取历史 submissions + 错题排除记录，用于长期分析与报告生成。
 *   **跨学科/混合内容处理**：用户上传前需选择科目（数学/英语），系统按所选科目判题，默认不自动切科。
-    * 轻量科目检测（OCR 特征）仅用于提示：若检测到与所选科目强冲突，可在报告标记“疑似科目不匹配”，不混用另一科模型。
+    * 轻量科目检测（识别特征）仅用于提示：若检测到与所选科目强冲突，可在报告标记“疑似科目不匹配”，不混用另一科模型。
     * 数学题为英文表述：仍按数学链处理；仅在数学特征极低且文本明显为英语阅读时提示可能不匹配。
     * 英语题含算式：仍按英语链处理，算式按文本处理，必要时提示“含算式，当前以英语语义相似度判定，可能影响准确度”。
     * 不做“双判”或自动切换科目，检测只做标记/提示，不中断批改。

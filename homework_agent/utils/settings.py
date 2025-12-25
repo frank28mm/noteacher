@@ -134,6 +134,57 @@ class Settings(BaseSettings):
     max_concurrent_vision: int = Field(default=2, validation_alias="MAX_CONCURRENT_VISION")
     max_concurrent_llm: int = Field(default=4, validation_alias="MAX_CONCURRENT_LLM")
 
+    # Unified Vision-Grade Agent
+    enable_unified_vision_grade: bool = Field(
+        default=False, validation_alias="ENABLE_UNIFIED_VISION_GRADE"
+    )
+    unified_agent_fallback_to_legacy: bool = Field(
+        default=False, validation_alias="UNIFIED_AGENT_FALLBACK_TO_LEGACY"
+    )
+    unified_agent_max_concurrency: int = Field(
+        default=2, validation_alias="UNIFIED_AGENT_MAX_CONCURRENCY"
+    )
+    unified_agent_timeout_seconds: int = Field(
+        default=600, validation_alias="UNIFIED_AGENT_TIMEOUT_SECONDS"
+    )
+    unified_agent_max_tokens: int = Field(
+        default=1600, validation_alias="UNIFIED_AGENT_MAX_TOKENS"
+    )
+    json_repair_max_attempts: int = Field(
+        default=1, validation_alias="JSON_REPAIR_MAX_ATTEMPTS"
+    )
+    judgment_basis_min_length: int = Field(
+        default=2, validation_alias="JUDGMENT_BASIS_MIN_LENGTH"
+    )
+
+    # Autonomous Grade Agent
+    enable_autonomous_grade_agent: bool = Field(
+        default=True, validation_alias="ENABLE_AUTONOMOUS_GRADE_AGENT"
+    )
+    autonomous_agent_max_concurrency: int = Field(
+        default=2, validation_alias="AUTONOMOUS_AGENT_MAX_CONCURRENCY"
+    )
+    autonomous_agent_timeout_seconds: int = Field(
+        default=600, validation_alias="AUTONOMOUS_AGENT_TIMEOUT_SECONDS"
+    )
+    autonomous_agent_max_tokens: int = Field(
+        default=1600, validation_alias="AUTONOMOUS_AGENT_MAX_TOKENS"
+    )
+    autonomous_agent_max_iterations: int = Field(
+        default=3, validation_alias="AUTONOMOUS_AGENT_MAX_ITERATIONS"
+    )
+    autonomous_agent_confidence_threshold: float = Field(
+        default=0.90, validation_alias="AUTONOMOUS_AGENT_CONFIDENCE_THRESHOLD"
+    )
+
+    # OpenCV pipeline
+    opencv_processing_timeout: int = Field(
+        default=30, validation_alias="OPENCV_PROCESSING_TIMEOUT"
+    )
+    opencv_processing_max_bytes: int = Field(
+        default=20 * 1024 * 1024, validation_alias="OPENCV_PROCESSING_MAX_BYTES"
+    )
+
     # Vision/OCR preprocessing (OpenCV-enhanced)
     vision_preprocess_enabled: bool = Field(default=False, validation_alias="VISION_PREPROCESS_ENABLED")
     vision_preprocess_timeout_seconds: int = Field(

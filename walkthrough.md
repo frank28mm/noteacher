@@ -37,4 +37,4 @@
 ## Current E2E (Recommended Path)
 - Upload：`POST /api/v1/uploads`（后端落 Supabase Storage，返回 `upload_id + page_image_urls`）
 - Grade：`POST /api/v1/grade` 使用 `upload_id`（后端反查 images），返回 `session_id + vision_raw_text + 批改结果`
-- Chat：`POST /api/v1/chat` 使用 `session_id`（SSE）；不实时看图，只读取 `/grade` 产出的 `judgment_basis + vision_raw_text`。若 `visual_facts` 缺失，仍给出结论但提示“视觉事实缺失，本次判断仅基于识别文本”；若题目未定位，响应会携带候选题目列表供 UI 快捷选择。
+- Chat：`POST /api/v1/chat` 使用 `session_id`（SSE）；不实时看图，只读取 `/grade` 产出的 `judgment_basis + vision_raw_text`。若视觉信息不足，仍给出结论但提示“依据不足，可能误读”；若题目未定位，响应会携带候选题目列表供 UI 快捷选择。

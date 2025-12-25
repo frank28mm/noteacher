@@ -45,8 +45,8 @@ graph TD
 *   **Framework**: **FastAPI** (高性能异步 Web 框架)。
 *   **Responsibilities**:
     *   `/uploads`: 后端权威上传（将原始文件落到 Storage，返回 `upload_id/page_image_urls`）。
-    *   `/grade`: Vision 识别 + LLM 批改，产出 `vision_raw_text`、结构化批改结果与 `judgment_basis`，并写入 session/qbank（后续会持久化为 submissions）。`visual_facts` 仅用于审计/复盘。
-    *   `/chat`: SSE 辅导；只读取 `/grade` 产出的 `judgment_basis + vision_raw_text`，不做实时看图。若 `visual_facts` 缺失仍给结论，但需提示“视觉事实缺失，本次判断仅基于识别文本”。若题目无法定位，返回候选题目列表供 UI 按钮选择。
+    *   `/grade`: 统一阅卷 Agent（OpenCV 预处理 + 视觉理解 + 判题），产出 `vision_raw_text`、结构化批改结果与 `judgment_basis`，并写入 session/qbank（后续会持久化为 submissions）。
+    *   `/chat`: SSE 辅导；只读取 `/grade` 产出的 `judgment_basis + vision_raw_text`，不做实时看图。若视觉信息不足，仍给结论但需提示“依据不足，可能误读”。若题目无法定位，返回候选题目列表供 UI 按钮选择。
     *   qindex worker: 题目定位(bbox) + 切片裁剪上传（重任务离线化）。
 
 ### 2.3 数据存储 (Storage)
@@ -77,7 +77,7 @@ sequenceDiagram
     API->>API: Vision -> Grade -> Persist qbank/mistakes (Redis; 后续落库为 submissions)
     API-->>App: GradeResponse (summary/wrong_items/warnings/vision_raw_text/session_id)
 
-    alt 视觉风险命中（must-slice）
+    alt 需要切片
         API->>Redis: enqueue qindex job (session_id, page_urls, allowlist)
         Worker->>Redis: BRPOP qindex:queue
         Worker->>Storage: download pages + upload slices
@@ -97,9 +97,9 @@ sequenceDiagram
     Student->>App: "讲讲第9题/你看不到图吗"
     App->>API: POST /api/v1/chat (session_id, question)  (SSE)
 
-    alt visual_facts 缺失
-        API-->>App: 给出结论，但提示“视觉事实缺失，本次判断仅基于识别文本”
-    else visual_facts 可用
+    alt 视觉信息不足
+        API-->>App: 给出结论，但提示“依据不足，可能误读”
+    else 视觉信息充分
         API-->>App: 推理 LLM 参考 judgment_basis 与识别原文
     end
 ```

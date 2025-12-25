@@ -192,7 +192,7 @@ class GradeResponse(BaseModel):
     subject: Subject
     job_id: Optional[str] = Field(None, description="Asynchronous job identifier")
     session_id: Optional[str] = Field(None, description="Session identifier for context continuation")
-    status: Optional[Literal["processing", "done", "failed"]] = None
+    status: Optional[Literal["processing", "done", "failed", "rejected"]] = None
     total_items: Optional[int] = Field(None, description="Total questions detected")
     wrong_count: Optional[int] = Field(None, description="Number of wrong items")
     cross_subject_flag: Optional[bool] = Field(

@@ -2,7 +2,7 @@
 
 本文档描述视觉模型的可选项、配置方式及调用示例。当前仅向用户暴露 `doubao` 和 `qwen3` 两个选项，默认使用 `doubao`。不对外提供 OpenAI 视觉选项。
 
-> 说明：视觉事实（visual_facts）由 `/grade` 的同一次 Vision 调用生成；Chat 不直接调用视觉模型（只读取 `judgment_basis + vision_raw_text`，visual_facts 仅用于审计/复盘）。
+> 说明：统一阅卷 Agent 在 `/grade` 阶段完成视觉理解与批改；Chat 不直接调用视觉模型（只读取 `judgment_basis + vision_raw_text`）。
 
 ## 1. 供应商与白名单
 - `doubao`: 火山方舟平台，模型名 `doubao-seed-1-6-vision-250815`

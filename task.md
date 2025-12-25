@@ -1,37 +1,80 @@
-# Task: Tool-Enabled Agent Architecture & Vision Enhancement (Expanded)
+# Task List (Autonomous Grade Agent)
 
-> 参考 `implementation_plan_v3.md`
+Reference:
+- docs/autonomous_grade_agent_design.md
+- docs/autonomous_agent_implementation.md
+- docs/autonomous_agent_prompts.md
 
-## Checklist
+## Dependencies
+- P0 complete before P1
+- math_verify sandbox ready before Executor integration
+- Aggregator mapping validated before /grade integration
 
-### Phase 1: 工具基础设施 (Tool Infrastructure)
-- [ ] 创建 `homework_agent/core/tools.py` (ToolRegistry & `@tool` 装饰器)
-- [ ] 新增 `homework_agent/tools/math_tools.py` (`verify_calculation`)
-- [ ] 更新 `homework_agent/services/llm.py` 支持 Tool Calling (ReAct Loop)
-- [ ] 支持 Long-Running Tool 进度事件（用于 SSE）
-- [ ] 评估/设计 Agent-as-Tool（主 Agent 保持控制权）
-- [ ] 评估/设计 Action Confirmation（高风险工具确认）
-- [ ] 性能规则：并行调用提示、异步 I/O、CPU 任务线程池、长列表分块 + `await asyncio.sleep(0)`
-- [ ] 验证：辅导能调用计算器并回写结果
+## Rollback Triggers
+- Error rate > 10%
+- P95 latency > 90s
+- JSON repair success rate < 80%
 
-### Phase 2: 视觉增强 (Vision Enhancement)
-- [ ] 创建 `homework_agent/services/image_preprocessor.py` (denoise/enhance/deskew)
-- [ ] 集成 Preprocessor 到 OCR / qindex / vision upstream
-- [ ] 创建 `homework_agent/tools/vision_tools.py` (`correct_ocr_context`)
-- [ ] 并行化多页/多切片处理策略（含重试上限）
-- [ ] 验证：低质量图片识别率提升（前后对比）
+## Success Criteria
+- Error rate < 5%
+- P50 latency < 30s, P95 < 60s
+- JSON repair success rate > 95%
+- judgment_basis 合格率 > 90%（2-5 句中文，包含“依据来源”）
+- Loop 平均迭代次数 < 2
+- Unit test coverage > 80%
 
-### Phase 3: Prompt 管理 (Prompt Management)
-- [ ] 创建 `homework_agent/utils/prompt_manager.py`
-- [ ] 迁移 prompts 至 `homework_agent/prompts/*.yaml`
-- [ ] Prompt 版本化 + 快照测试
+## P0
+- [x] Create `SessionState` skeleton (`services/session_state.py`)
+- [x] Create `AutonomousAgent` skeleton (`services/autonomous_agent.py`)
+- [x] Define `output_key` mapping table in code
+- [x] Add logging: `agent_plan_start`, `agent_tool_call`, `agent_reflect_pass`, `agent_finalize_done`
+- [x] Implement Loop exit logic (pass + confidence + max_iterations)
+- [x] Create Prompt templates (`core/prompts/autonomous_agent_prompts.py`)
 
-### Phase 4: 可观测性与评测 (Observability + Evaluation)
-- [ ] 统一 log_event：`tool_call_start/done/error`, `llm_start/done/error`
-- [ ] 评测基线：幻觉率 / 工具使用质量 / 安全性
-- [ ] 小规模样本集 (20-50) + LLM-as-judge 评测跑通
+## P1
+- [x] Implement `PlannerAgent`
+- [x] Implement `ExecutorAgent` (no LLM call)
+- [x] Implement `ReflectorAgent`
+- [x] Implement `AggregatorAgent`
+- [x] Implement Tool: `diagram_slice`
+- [x] Implement Tool: `qindex_fetch`
+- [x] Implement Tool: `math_verify` (sympy sandbox)
+- [x] Implement Tool: `ocr_fallback`
+- [x] Aggregator: `results -> wrong_items` mapping
+- [x] Planner 输入包含上一轮 `reflection_result`（issues/suggestion）
+- [x] Executor 统一重试（1-2 次 + 简单退避）
+- [x] Aggregator 限制图片数量（figure+question 各 1 张，最多 2 张）
+- [x] diagram_slice 失败自动降级到 ocr_fallback（写死链条）
+- [x] 429/TPM 限流退避策略（1s→2s→4s）
+- [x] SessionState variable naming规范（plan/evidence/tool_results/result）
+- [x] Hierarchical logger names (autonomous.planner/executor/reflector/aggregator)
 
-### Phase 5: Context & Memory
-- [ ] 上下文压缩（滑动窗口 + summarizer）
-- [ ] Session / Memory 双层结构（短期对话 + 长期摘要）
+## P2
+- [x] Replace `/grade` to use `AutonomousAgent.run()`
+- [x] Remove legacy pipeline
+- [x] Add unit tests for each agent
+- [x] Add E2E test (`test_autonomous_agent_e2e.py`)
+- [x] SSE 事件补全 `duration_ms` 字段（全事件）
+- [x] Planner/Reflector 输入字段精简（token 优化）
+- [ ] confidence 阈值校准（采样 telemetry）
+- [x] 异常测试覆盖（超时/坏 JSON/限流）
 
+## QA
+- [x] Prepare local replay dataset (10-20 samples)
+- [x] Record accuracy/uncertain/error metrics (telemetry.py)
+- [x] Record P50/P95 latency (telemetry.py)
+- [x] Test loop exit conditions (pass / max iterations)
+- [x] Smoke test：放宽超时（>=300s）验证 Loop 能完整跑通
+- [ ] confidence 阈值校准（采样 telemetry）- 需要实际运行数据
+
+## QA 测试套件
+- [x] `test_autonomous_agent.py` - 10 passed
+- [x] `test_autonomous_agent_e2e.py` - 1 passed
+- [x] `test_autonomous_smoke.py` - 4 passed (loop exit validation)
+- [x] `test_telemetry.py` - 4 passed (metrics calculation)
+- [ ] `test_replay.py` - 待创建（需要实际图片样本）
+
+## QA 工具
+- [x] `utils/telemetry.py` - 遥测收集与分析
+- [x] `tests/replay_data/` - 回放数据集结构
+- [x] `docs/qa_replay_dataset.md` - 回放数据集文档

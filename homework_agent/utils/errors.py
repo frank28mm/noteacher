@@ -23,6 +23,26 @@ class ErrorCode(str, Enum):
     OCR_DISABLED = "E5005"
 
 
+class HomeworkAgentError(Exception):
+    """Base error for homework agent."""
+
+
+class VisionGradeAgentError(HomeworkAgentError):
+    """Unified vision-grade agent error."""
+
+
+class OpenCVProcessingError(VisionGradeAgentError):
+    """OpenCV pipeline failure."""
+
+
+class JSONRepairError(VisionGradeAgentError):
+    """Structured output repair failure."""
+
+
+class ToolExecutionError(VisionGradeAgentError):
+    """Tool call execution failure."""
+
+
 def error_code_for_http_status(status_code: int) -> ErrorCode:
     if status_code == 401:
         return ErrorCode.UNAUTHORIZED
@@ -65,4 +85,3 @@ def build_error_payload(
     if session_id:
         payload["session_id"] = str(session_id)
     return payload
-

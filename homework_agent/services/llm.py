@@ -33,7 +33,7 @@ from homework_agent.core.prompts import (
     ENGLISH_GRADER_SYSTEM_PROMPT,
     SOCRATIC_TUTOR_SYSTEM_PROMPT,
 )
-from homework_agent.models.schemas import Subject, SimilarityMode, Severity
+from homework_agent.models.schemas import Subject, SimilarityMode, Severity, ImageRef
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.observability import log_event, trace_span
 from homework_agent.core.tools import get_default_tool_registry, load_default_tools
@@ -258,6 +258,7 @@ class LLMClient:
         self.silicon_base_url = settings.silicon_base_url
         # 使用专用配置，若未设置则回退到 generic model_reasoning (需确保兼容) 或默认值
         self.silicon_model = settings.silicon_reasoning_model or settings.model_reasoning
+        self.silicon_vision_model = settings.silicon_vision_model or self.silicon_model
 
         # Ark配置 (doubao)
         self.ark_api_key = settings.ark_api_key
@@ -265,6 +266,7 @@ class LLMClient:
         # Doubao 文本模型（Ark）
         self.ark_model = settings.ark_reasoning_model
         self.ark_model_thinking = settings.ark_reasoning_model_thinking
+        self.ark_vision_model = settings.ark_vision_model
         # Ensure lower-level client timeout is never smaller than grade LLM budget
         self.timeout_seconds = max(
             int(settings.llm_client_timeout_seconds),
@@ -273,6 +275,26 @@ class LLMClient:
         self.tool_calling_enabled = bool(getattr(settings, "tool_calling_enabled", True))
         self.max_tool_calls = int(getattr(settings, "max_tool_calls", 3))
         self.tool_choice = getattr(settings, "tool_choice", "auto") or "auto"
+
+    def _image_blocks_from_refs(
+        self, images: List["ImageRef"], provider: str
+    ) -> List[Dict[str, Any]]:
+        blocks: List[Dict[str, Any]] = []
+        for ref in images or []:
+            url = getattr(ref, "url", None)
+            b64 = getattr(ref, "base64", None)
+            if url:
+                if provider == "ark":
+                    blocks.append({"type": "input_image", "image_url": str(url)})
+                else:
+                    blocks.append({"type": "image_url", "image_url": {"url": str(url)}})
+            elif b64:
+                # keep data-uri prefix if present
+                if provider == "ark":
+                    blocks.append({"type": "input_image", "image_url": str(b64)})
+                else:
+                    blocks.append({"type": "image_url", "image_url": {"url": str(b64)}})
+        return blocks
 
     def _normalize_math_wrong_items(self, wrong_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """将 math_steps 中非白名单的 severity 归一化，避免后续 Pydantic 校验报错。"""
@@ -1224,3 +1246,74 @@ class LLMClient:
                 text=f"生成失败: {str(e)}",
                 raw={"error": str(e)},
             )
+
+    def generate_with_images(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        images: List["ImageRef"],
+        provider: str = "silicon",
+        max_tokens: int = 1600,
+        temperature: float = 0.2,
+        use_tools: bool = False,
+    ) -> LLMResult:
+        """
+        Multimodal generation with images + text prompt.
+        Uses chat.completions for SiliconFlow; Ark uses responses API when tools are off.
+        """
+        client = self._get_client(provider)
+        use_tools = bool(use_tools and provider != "ark")
+
+        if provider == "silicon":
+            model = self.silicon_vision_model or self.silicon_model
+            content_blocks = [{"type": "text", "text": user_prompt}] + self._image_blocks_from_refs(images, provider)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content_blocks},
+            ]
+            if use_tools:
+                messages, tool_content = self._run_tool_loop(
+                    client=client,
+                    messages=messages,
+                    provider=provider,
+                    model=model,
+                )
+                if tool_content is not None:
+                    return LLMResult(text=tool_content, raw={})
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return LLMResult(
+                text=response.choices[0].message.content,
+                raw=response.to_dict(),
+                usage={
+                    "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
+                    "completion_tokens": getattr(response.usage, "completion_tokens", 0),
+                    "total_tokens": getattr(response.usage, "total_tokens", 0),
+                },
+            )
+
+        if provider == "ark":
+            model = self.ark_vision_model or self.ark_model
+            content_blocks: List[Dict[str, Any]] = [{"type": "input_text", "text": user_prompt}]
+            content_blocks += self._image_blocks_from_refs(images, provider)
+            # responses API does not support tool calls; use direct call.
+            resp = client.responses.create(
+                model=model,
+                input=[
+                    {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+                    {"role": "user", "content": content_blocks},
+                ],
+            )
+            text_parts: List[str] = []
+            for item in getattr(resp, "output", []) or []:
+                for c in getattr(item, "content", []) or []:
+                    if getattr(c, "type", None) == "output_text":
+                        text_parts.append(getattr(c, "text", ""))
+            return LLMResult(text="\n".join(text_parts), raw=resp.to_dict())
+
+        raise ValueError(f"Unsupported provider for generate_with_images: {provider}")

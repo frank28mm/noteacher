@@ -26,7 +26,7 @@
 ## 2) Grade
 
 ### `POST /api/v1/grade`
-对作业图片进行识别与批改（同一次 Vision 调用输出 `vision_raw_text`，并产出可审计的 `visual_facts`；批改 LLM 输出 `judgment_basis` 作为判定依据）。支持两种输入：
+对作业图片进行识别与批改（统一阅卷 Agent 单次调用完成“识别 + 理解 + 判题”，输出 `vision_raw_text` 与 `judgment_basis` 作为判定依据）。支持两种输入：
 - 直接给 `images[].url`（公网 URL）
 - 给 `upload_id`（推荐）：后端按 `X-User-Id/DEV_USER_ID + upload_id` 反查并补齐图片列表
 
@@ -46,9 +46,8 @@
     - 每题包含 `verdict` 与 `judgment_basis?: string[]`
   - `warnings`: string[]
   - `vision_raw_text`: string|null
-  - `visual_facts`: object|null（结构化视觉事实，仅用于审计/复盘）
   - `job_id`: string|null（当异步时）
-  - 说明：`visual_facts` 写入 qbank（`GET /session/{session_id}/qbank`），用于审计/复盘；前端默认展示 `judgment_basis` 而非 raw facts。
+  - 说明：前端默认展示 `judgment_basis` 与 `vision_raw_text`；如视觉信息不足，需在 `warnings` 明确提示。
 
 ### `GET /api/v1/jobs/{job_id}`
 异步批改任务查询（当 `/grade` 返回 `status="processing"` 时使用）。
@@ -82,7 +81,7 @@
 #### 行为约束（产品要求）
 - chat 必须基于 `/grade` 交付的 qbank/错题上下文对话；缺失则明确提示用户先批改，禁止编造。
 - **chat 不实时看图**：只使用 `/grade` 产出的 `judgment_basis` 与 `vision_raw_text`。
-- 若 `visual_facts` 缺失：仍给出结论，但必须提示“视觉事实缺失，本次判断仅基于识别文本”。
+- 若视觉信息不足：仍给出结论，但必须提示“依据不足，可能误读”。
 
 #### ChatResponse（SSE `event: chat`）
 除 `messages/session_id/retry_after_ms` 外，SSE 增量消息还会携带 UI 辅助字段：

@@ -204,6 +204,49 @@ def _render_stage_lines(stage: str, elapsed_s: int) -> str:
     )
 
 
+def _render_process_summary(lines: List[str]) -> str:
+    if not lines:
+        return "[过程] 正在分析题目结构…"
+    return "\n".join([f"[过程] {line}" for line in lines if line])
+
+
+def _update_process_summary(stage: str, elapsed_s: int, lines: List[str], message: Optional[str] = None) -> List[str]:
+    stage = (stage or "").strip().lower()
+    msg = (message or "").strip()
+
+    def ensure(line: str) -> None:
+        if line not in lines:
+            lines.append(line)
+
+    # Always start with a visible planning line
+    ensure("正在分析题目结构…")
+
+    if msg:
+        # Map known progress messages to user-friendly steps.
+        if "规划" in msg or "自主阅卷" in msg or "准备" in msg:
+            ensure("正在分析题目结构…")
+        if "切片" in msg or "工具" in msg or "Vision" in msg or "识别" in msg:
+            ensure("正在调用切片工具…")
+        if "批改" in msg or "核验" in msg:
+            ensure("正在核验计算…")
+        if "批改结果已生成" in msg or "完成" in msg:
+            ensure("已完成汇总")
+        # Also keep the latest backend message for transparency (deduped).
+        ensure(msg)
+    else:
+        if stage in {"vision_start"}:
+            ensure("正在调用切片工具…")
+            if elapsed_s >= 8:
+                ensure("正在核验计算…")
+        elif stage in {"done"}:
+            ensure("正在核验计算…")
+            ensure("已完成汇总")
+        elif stage in {"failed"}:
+            ensure("流程异常，尝试输出结果…")
+
+    return lines
+
+
 def upload_to_backend(file_path: str, *, session_id: Optional[str], auth_token: Optional[str]) -> Dict[str, Any]:
     """上传文件到后端 /uploads，并返回 {upload_id, page_image_urls, ...}。"""
     if not file_path or not os.path.exists(file_path):
@@ -556,7 +599,10 @@ def build_grade_report_sections(result: Dict[str, Any]) -> List[str]:
         wrong_count = len(wrong_items)
 
     if status and status != "done":
-        md = "❌ 批改失败\n"
+        if status == "rejected":
+            md = "❌ 输入非作业图片，已拒绝批改\n"
+        else:
+            md = "❌ 批改失败\n"
         if result.get("warnings"):
             md += "原因（warnings）：\n"
             for w in result.get("warnings") or []:
@@ -592,14 +638,30 @@ def build_grade_report_sections(result: Dict[str, Any]) -> List[str]:
         if m:
             has_subquestions.add(m.group(1))
 
-    correct_qns = [
-        q
-        for q in all_qns
-        if q not in wrong_qn_set
-        and q.lower() not in internal_qn_patterns
-        and not (q.replace("_", "").isalpha() and len(q) > 10)
-        and not (str(q).isdigit() and str(q) in has_subquestions)
-    ]
+    incorrect_qns: List[str] = []
+    uncertain_qns: List[str] = []
+    correct_qns: List[str] = []
+    if questions_map:
+        for qn, q_data in questions_map.items():
+            verdict = str(q_data.get("verdict") or "").strip().lower()
+            if verdict == "incorrect":
+                incorrect_qns.append(str(qn))
+            elif verdict == "uncertain":
+                uncertain_qns.append(str(qn))
+            elif verdict == "correct":
+                correct_qns.append(str(qn))
+        incorrect_qns = _order_qnums(list(set(incorrect_qns)))
+        uncertain_qns = _order_qnums(list(set(uncertain_qns)))
+        correct_qns = _order_qnums(list(set(correct_qns)))
+    else:
+        correct_qns = [
+            q
+            for q in all_qns
+            if q not in wrong_qn_set
+            and q.lower() not in internal_qn_patterns
+            and not (q.replace("_", "").isalpha() and len(q) > 10)
+            and not (str(q).isdigit() and str(q) in has_subquestions)
+        ]
 
     header = "✅ 批改完成，以下是识别与批改结果：\n\n"
     header += "⚠️ 批改依据说明\n"
@@ -607,23 +669,42 @@ def build_grade_report_sections(result: Dict[str, Any]) -> List[str]:
     header += "建议核对下方“识别原文”和“AI 识别依据”后再参考批改结论。\n\n"
     header += "📊 批改结果\n"
 
-    if correct_qns:
+    uncertain_total = len(uncertain_qns)
+    if questions_map:
         correct_count = len(correct_qns)
+        wrong_total = len(incorrect_qns) if incorrect_qns else (wrong_count or len(wrong_items))
     elif result.get("total_items") is not None and wrong_count is not None:
         correct_count = max(0, int(result.get("total_items") or 0) - int(wrong_count or 0))
+        wrong_total = int(wrong_count or 0)
     else:
         correct_count = None
+        wrong_total = wrong_count if wrong_count is not None else len(wrong_items)
 
-    wrong_total = wrong_count if wrong_count is not None else len(wrong_items)
     if correct_count is None:
-        header += f"✅ 正确：待确认 | ❌ 错误：{wrong_total} 道\n"
+        header += f"✅ 正确：待确认 | ❌ 错误：{wrong_total} 道 | ⚠️ 待确认：{uncertain_total} 道\n"
     else:
-        header += f"✅ 正确：{correct_count} 道 | ❌ 错误：{wrong_total} 道\n"
+        header += f"✅ 正确：{correct_count} 道 | ❌ 错误：{wrong_total} 道 | ⚠️ 待确认：{uncertain_total} 道\n"
     sections.append(header)
 
+    # Wrong items (incorrect)
+    incorrect_items: List[Dict[str, Any]] = []
     if wrong_items:
+        incorrect_items = list(wrong_items)
+    elif questions_map:
+        for qn in incorrect_qns:
+            q_data = questions_map.get(str(qn)) or {}
+            incorrect_items.append(
+                {
+                    "question_number": qn,
+                    "question_content": q_data.get("question_content") or q_data.get("question"),
+                    "reason": q_data.get("reason") or "判定为错误",
+                    "judgment_basis": q_data.get("judgment_basis") or [],
+                }
+            )
+
+    if incorrect_items:
         md = "---\n"
-        for item in wrong_items:
+        for item in incorrect_items:
             qnum = item.get("question_number") or item.get("question_index") or "N/A"
             qtext = _repair_latex_escapes(item.get("question_content") or item.get("question") or "N/A")
             reason = _repair_latex_escapes(item.get("reason", "N/A"))
@@ -644,19 +725,30 @@ def build_grade_report_sections(result: Dict[str, Any]) -> List[str]:
             md += "\n"
         sections.append(md)
 
-    if correct_qns:
+    # Uncertain items (待确认)
+    if uncertain_qns:
         md = "---\n"
-        for qn in correct_qns:
+        for qn in uncertain_qns:
             q_data = questions_map.get(str(qn)) or {}
+            qtext = _repair_latex_escapes(q_data.get("question_content") or q_data.get("question") or "N/A")
+            reason = _repair_latex_escapes(q_data.get("reason") or "暂无法确认")
+            md += f"⚠️ 题 {qn}（展开） {qtext}\n"
+            md += f"  - 无法确认原因：{reason}\n"
             basis = q_data.get("judgment_basis") or []
             if basis and isinstance(basis, list):
-                md += f"<details><summary>✅ 题 {qn} ▶ 点击查看 AI 识别依据</summary>\n\n"
+                md += "  - AI 识别依据：\n"
                 for b in basis:
                     if isinstance(b, str) and b.strip():
-                        md += f"- {_repair_latex_escapes(b.strip())}\n"
-                md += "</details>\n\n"
+                        md += f"    - {_repair_latex_escapes(b.strip())}\n"
             else:
-                md += f"✅ 题 {qn}\n\n"
+                md += "  - AI 识别依据：未返回\n"
+            md += "\n"
+        sections.append(md)
+
+    # Correct items (only list numbers)
+    if correct_qns:
+        md = "---\n"
+        md += "✅ 正确题目：" + "，".join([str(q) for q in correct_qns]) + "\n\n"
         sections.append(md)
 
     if result.get("warnings"):
@@ -891,6 +983,18 @@ async def grade_homework_logic(img_path, subject, provider, llm_provider, auth_t
             "accepted", int(time.monotonic() - started)
         )
 
+        # Step 1.5: 过程摘要（紧跟在用户上传消息后，流式更新）
+        process_lines: List[str] = []
+        process_msg = {"role": "assistant", "content": ""}
+        history.append(process_msg)
+        process_lines = _update_process_summary(
+            "grade_start", int(time.monotonic() - started), process_lines, "已开始处理…"
+        )
+        process_msg["content"] = _render_process_summary(process_lines)
+        yield history, session_id, page_url, _render_stage_lines(
+            "accepted", int(time.monotonic() - started)
+        )
+
         # Step 2: 调用后端 /grade（upload_id -> 后端反查 images）
         grade_task = asyncio.create_task(
             call_grade_api(
@@ -907,16 +1011,26 @@ async def grade_homework_logic(img_path, subject, provider, llm_provider, auth_t
         while not grade_task.done():
             await asyncio.sleep(0.4)
             p = await call_grade_progress(session_id, auth_token=auth_token)
+            message = ""
             if isinstance(p, dict):
                 stage = str(p.get("stage") or "").strip() or last_progress_stage
+                message = str(p.get("message") or "").strip()
                 last_progress_stage = stage
             else:
                 stage = last_progress_stage
+            process_lines = _update_process_summary(
+                stage, int(time.monotonic() - started), process_lines, message
+            )
+            process_msg["content"] = _render_process_summary(process_lines)
             yield history, session_id, page_url, _render_stage_lines(
                 stage, int(time.monotonic() - started)
             )
 
         result = await grade_task
+        process_lines = _update_process_summary(
+            "done", int(time.monotonic() - started), process_lines, "批改结果已生成"
+        )
+        process_msg["content"] = _render_process_summary(process_lines)
         if page_url and not image_added:
             history.append(
                 {
