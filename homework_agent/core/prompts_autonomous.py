@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 
+PROMPT_VERSION = "autonomous_v1"
+
 PLANNER_SYSTEM_PROMPT = r"""
 <identity>
 You are the Planning Agent for an autonomous homework grading system. Your role is to analyze assignment images and create execution plans for the grading workflow.

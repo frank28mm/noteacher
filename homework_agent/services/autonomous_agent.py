@@ -20,13 +20,14 @@ from homework_agent.core.prompts_autonomous import (
 )
 from homework_agent.models.schemas import ImageRef, Subject
 from homework_agent.services.llm import LLMClient, _repair_json_text
-from homework_agent.services.opencv_pipeline import run_opencv_pipeline, upload_slices
+from homework_agent.services.preprocessing import PreprocessingPipeline
 from homework_agent.services.session_state import SessionState, get_session_store
 from homework_agent.services.autonomous_tools import (
     diagram_slice,
     qindex_fetch,
     math_verify,
     ocr_fallback,
+    _compress_image_if_needed,
 )
 from homework_agent.utils.observability import log_event, trace_span
 from homework_agent.utils.settings import get_settings
@@ -175,6 +176,22 @@ class PlannerAgent:
             return PlannerPayload(thoughts="planner_parse_failed", plan=[], action="execute_tools")
         if not parsed.action:
             parsed.action = "execute_tools"
+
+        # P1.2: OpenCV parameter grading - skip diagram_slice on iteration 3 if it failed before
+        iteration = state.reflection_count + 1
+        if iteration >= 3:
+            prev_failed = any(
+                "diagram" in str(v).lower() and "roi_not_found" in str(v).lower()
+                for v in state.tool_results.values()
+            )
+            if prev_failed:
+                logger.info(f"Planner: Iteration {iteration}, skipping diagram_slice due to previous failures")
+                # Replace diagram_slice with ocr_fallback in the plan
+                for step in parsed.plan:
+                    if step.get("step") == "diagram_slice":
+                        step["step"] = "ocr_fallback"
+                        step["args"] = {"image": state.image_urls[0] if state.image_urls else ""}
+
         return parsed
 
 
@@ -300,6 +317,23 @@ class ReflectorAgent:
         parsed = _parse_json(text.text if hasattr(text, "text") else str(text), ReflectorPayload)
         if not parsed:
             return ReflectorPayload(pass_=False, issues=["reflector_parse_failed"], confidence=0.0, suggestion="replan")
+
+        # P1.1: Figure exemption logic
+        # If OCR is complete but diagram failed, boost confidence to avoid unnecessary iterations
+        if (not parsed.pass_
+            and 0.70 <= parsed.confidence < 0.90
+            and len(state.ocr_text or "") > 100):
+            # Check if diagram_slice failed
+            has_diagram_failure = any(
+                "diagram" in str(v).lower() and ("roi_not_found" in str(v).lower() or "failed" in str(v).lower())
+                for v in state.tool_results.values()
+            )
+            if has_diagram_failure:
+                logger.info(f"Reflector: Figure exemption triggered, boosting confidence from {parsed.confidence:.2f} to 0.90")
+                parsed.pass_ = True
+                parsed.confidence = 0.90
+                parsed.suggestion = "图示不足，基于完整文本推断"
+
         return parsed
 
 
@@ -329,20 +363,33 @@ class AggregatorAgent:
         question_urls = state.slice_urls.get("question") or []
         figure_urls = figure_urls[:1]
         question_urls = question_urls[:1]
+
+        # Determine image source and apply P0.2 compression
+        image_source = "unknown"
         if figure_urls or question_urls:
             image_urls = _dedupe_images(figure_urls + question_urls)
             image_source = "slices"
         else:
-            image_urls = _dedupe_images(state.image_urls or [])[:1]
+            # P0.2: Compress original images if needed
+            original_urls = _dedupe_images(state.image_urls or [])[:1]
+            image_urls = []
+            for url in original_urls:
+                compressed_url = _compress_image_if_needed(url, max_side=1280)
+                image_urls.append(compressed_url)
             image_source = "original"
+
         image_refs = [ImageRef(url=u) if not u.startswith("data:image/") else ImageRef(base64=u) for u in image_urls]
 
+        # P0.4: Enhanced logging with image_source
         log_event(
             aggregator_logger,
             "agent_aggregate_start",
             session_id=state.session_id,
             image_source=image_source,
             image_count=len(image_refs),
+            original_image_count=len(state.image_urls or []),
+            figure_count=len(figure_urls),
+            question_count=len(question_urls),
         )
         start = time.monotonic()
         text = await _call_llm_with_backoff(
@@ -406,17 +453,17 @@ async def run_autonomous_grade_agent(
         request_id=request_id,
         images=len(images or []),
     )
+
+    # P2.2: Use unified preprocessing pipeline
+    pipeline = PreprocessingPipeline(session_id=session_id)
     for ref in images or []:
-        slices = await asyncio.to_thread(run_opencv_pipeline, ref)
-        if not slices:
-            continue
-        urls = await asyncio.to_thread(upload_slices, slices=slices, prefix=f"autonomous/prep/{session_id}/")
-        if urls.get("figure_url"):
-            state.slice_urls.setdefault("figure", []).append(urls["figure_url"])
-        if urls.get("question_url"):
-            state.slice_urls.setdefault("question", []).append(urls["question_url"])
-        if slices.warnings:
-            state.warnings.extend(slices.warnings)
+        result = await pipeline.process_image(ref, prefix=f"autonomous/prep/{session_id}/", use_cache=True)
+        if result.figure_url:
+            state.slice_urls.setdefault("figure", []).append(result.figure_url)
+        if result.question_url:
+            state.slice_urls.setdefault("question", []).append(result.question_url)
+        if result.warnings:
+            state.warnings.extend(result.warnings)
 
     log_event(
         logger,
@@ -517,6 +564,10 @@ async def run_autonomous_grade_agent(
 
     warnings = list(payload.warnings or [])
     warnings.extend(state.warnings)
+
+    # P1.3: Add explicit warning for missing figures
+    if any("diagram_roi_not_found" in str(w) for w in state.warnings):
+        warnings.append("⚠️ 图示识别失败，批改结果基于文本推断，建议人工复核")
 
     log_event(
         aggregator_logger,
