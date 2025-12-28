@@ -23,7 +23,7 @@
 ```typescript
 {
   "url": "https://cdn.example.com/image.jpg",  // 可选，推荐。需公网 HTTP/HTTPS，禁止 localhost/127
-  "base64": "data:image/jpeg;base64,/9j/4AAQ..."  // 可选，兜底。请去掉 data: 前缀；大图建议改用 URL
+  "base64": "data:image/jpeg;base64,/9j/4AAQ..."  // 可选，兜底。必须是 Data URL（保留 data:image/...;base64, 前缀）；大图建议改用 URL
 }
 ```
 
@@ -110,7 +110,7 @@ X-Request-Id: req-123456
 
 **字段说明**:
 - `images` (必需): 1-20 张图片，每项为 `ImageRef`（url 或 base64 二选一），支持 jpg/png/webp
-- 上传要求：单文件不超过 20 MB；**强烈推荐公网 URL**（禁止 127/localhost/内网）；**Doubao 仅支持 URL（Base64 报错）**；Qwen3 支持 URL（推荐）或 base64（兜底，去掉 data: 前缀，超限直接 400）。为减少无效调用，建议入口预检 URL/大小/格式，不合规直接返回 400。
+- 上传要求：单文件不超过 20 MB；**强烈推荐公网 URL**（禁止 127/localhost/内网）；若使用 `base64`，必须是 **Data URL**（`data:image/...;base64,...`），且超限直接 400。为减少无效调用，建议入口预检 URL/大小/格式，不合规直接返回 400。
 - `subject` (必需): "math" | "english"
 - `batch_id` (可选): 客户端批次标识，用于日志追踪
 - `session_id` (推荐): 会话/批次 ID，24h 生命周期，便于上下文续接
@@ -227,6 +227,15 @@ Cache-Control: no-cache
 - `context_item_ids` (可选): 关联的错题项，支持“索引 (int)”或“item_id (string)”两种写法；若缓存有错题则注入详情，无数据或缺失项将在上下文 note 中标记；last-event-id 断线续接会重放最近助手消息。
 - 幂等键使用 Header `X-Idempotency-Key`，Body 不支持。
 
+#### 视觉信息策略（重要）
+本服务的“chat 是否有视觉”分为三层：
+1) **默认（稳定优先，当前实现）**：chat 不会把图片作为多模态输入传给 LLM；只基于 `/grade` 写入的 qbank 快照（题干/作答/judgment_basis/warnings/vision_raw_text 摘要等）进行辅导。
+2) **切片辅助（UI 体验）**：当 qindex 切片存在时，SSE 的 `chat` 事件可能携带 `focus_image_urls/focus_image_source`（供前端显示“我参考的图”）。注意：这不代表 LLM 真的“看见了图”，只是 UI 展示。
+3) **VFE relook（可选兜底，按需开启）**：当用户明确要求看图/发生图形位置关系争议/题目被标记为 visual_risk 时，可对焦点题目做一次“视觉事实抽取”（VFE），将结构化 `visual_facts` 注入上下文后再继续辅导；若 VFE 失败需 fail-closed（避免“贴图但乱讲”）。
+
+#### qindex/slice TTL（默认值）
+- qindex 切片与切片索引属于短期数据，**默认 TTL=24 小时**（由配置 `SLICE_TTL_SECONDS` 控制）；过期后可重新生成。
+
 #### SSE响应格式
 ```http
 HTTP/1.1 200 OK
@@ -237,12 +246,6 @@ X-Accel-Buffering: no
 
 event: heartbeat
 data: {"timestamp": "2025-01-06T10:31:00Z"}
-
-event: thinking
-data: {"status": "analyzing", "progress": 20}
-
-event: thinking
-data: {"status": "generating_hint", "progress": 60}
 
 event: chat
 id: 1
@@ -256,7 +259,7 @@ event: done
 data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"}
 ```
 
-> 心跳间隔建议 30s；若 90s 内无数据/心跳，服务器可主动断开，客户端需重连。客户端重连时可携带 `Last-Event-Id`，服务端会恢复 session 并按时间顺序重放最近最多 3 条 assistant 消息（仅当前 session）。\n*** End Patch
+> 心跳间隔建议 30s；若 90s 内无任何数据（含 heartbeat），服务器或反向代理可主动断开，客户端需重连。另：可用 `CHAT_IDLE_DISCONNECT_SECONDS` 配置“LLM 长时间无输出时主动关闭 SSE”（安全兜底，默认关闭；生产建议先取 120s，上线后按 `chat_llm_first_output` 日志的 p99 再回调）。客户端重连时可携带 `Last-Event-Id`，服务端会恢复 session 并按时间顺序重放最近最多 3 条 assistant 消息（仅当前 session）。
 
 **SSE事件类型**:
 1. `heartbeat`: 心跳事件，每30秒发送一次，保持连接
@@ -488,14 +491,14 @@ X-Batch-Id: batch-20250106-001
 ## 9. 版本管理 (Versioning)
 
 ### 9.1 版本策略
-- **URI版本**: `/v1/grade`, `/v1/chat`
+- **URI版本**: `/api/v1/grade`, `/api/v1/chat`
 - **弃用通知**: 提前90天通知
 - **兼容期**: 旧版本保留6个月
 
 ### 9.2 版本迁移示例
 ```http
 # v1.x
-POST /v1/grade
+POST /api/v1/grade
 
 # 未来 v2.x
 POST /v2/grade  // 新增字段或行为改变
@@ -510,7 +513,8 @@ POST /v2/grade  // 新增字段或行为改变
 - **证书**: 使用Let's Encrypt或企业CA
 
 ### 10.2 数据保护
-- **敏感数据**: 作业图片7天后自动删除
+- **短期数据**: qindex 切片/切片索引默认 24 小时 TTL（`SLICE_TTL_SECONDS`）
+- **长期数据**: 原始图片/批改结果/识别原文的生命周期由上层“用户与数据管理”策略决定（本服务仅 best-effort 写入并回查）
 - **日志**: 不记录完整图片内容
 - **缓存**: 加密存储
 
@@ -530,7 +534,7 @@ const corsOptions = {
 ### A.1 完整批改流程
 ```bash
 # 1. 创建批改任务
-curl -X POST /v1/grade \\
+curl -X POST /api/v1/grade \\
   -H "Content-Type: application/json" \\
   -H "X-Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \\
   -d '{
@@ -547,17 +551,17 @@ curl -X POST /v1/grade \\
 }
 
 # 2. 查询任务状态
-curl /v1/jobs/job-789xyz
+curl /api/v1/jobs/job-789xyz
 
 # 3. 获取结果
-curl /v1/jobs/job-789xyz
+curl /api/v1/jobs/job-789xyz
 # 返回完整批改结果
 ```
 
 ### A.2 聊天辅导流程
 ```javascript
 // SSE连接
-const eventSource = new EventSource('/v1/chat', {
+const eventSource = new EventSource('/api/v1/chat', {
   withCredentials: true
 });
 
@@ -568,7 +572,7 @@ eventSource.addEventListener('chat', (event) => {
 });
 
 // 发送消息
-fetch('/v1/chat', {
+fetch('/api/v1/chat', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',

@@ -19,5 +19,6 @@ def test_prod_env_accepts_explicit_allowlist(monkeypatch) -> None:
     get_settings.cache_clear()
     monkeypatch.setenv("APP_ENV", "prod")
     monkeypatch.setenv("ALLOW_ORIGINS", '["https://example.com"]')
+    monkeypatch.setenv("AUTH_REQUIRED", "1")
     app = create_app()
     assert app is not None

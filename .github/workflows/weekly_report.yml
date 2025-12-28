@@ -1,0 +1,40 @@
+name: weekly_report
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Monday 00:00 UTC
+    - cron: "0 0 * * 1"
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Offline Replay Metrics
+        run: |
+          python3 scripts/collect_replay_metrics.py --output qa_metrics/metrics.json
+          python3 scripts/generate_metrics_report.py --input qa_metrics/metrics_summary.json --output qa_metrics/report.html
+          python3 scripts/generate_weekly_report.py \
+            --inputs .github/baselines/metrics_baseline.json qa_metrics/metrics_summary.json \
+            --metrics qa_metrics/metrics.json \
+            --output qa_metrics/weekly.html
+      - name: Regression Check
+        run: |
+          python3 scripts/check_baseline.py \
+            --current qa_metrics/metrics_summary.json \
+            --baseline .github/baselines/metrics_baseline.json \
+            --threshold 0.05
+      - name: Upload Weekly Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly_qa_metrics
+          path: qa_metrics/
+

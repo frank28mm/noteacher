@@ -1,0 +1,101 @@
+name: live_quality_gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "LLM provider to use"
+        required: true
+        default: "ark"
+        type: choice
+        options:
+          - ark
+          - silicon
+      samples_dir:
+        description: "Replay samples directory (can point to a private dataset path)"
+        required: true
+        default: "private_live_replay/samples"
+        type: string
+      update_baseline:
+        description: "Overwrite live baseline with current summary (manual refresh)"
+        required: true
+        default: false
+        type: boolean
+  # Also declare as a reusable workflow so IDE linters can validate `secrets.*` usages.
+  workflow_call:
+    inputs:
+      provider:
+        required: false
+        type: string
+        default: "ark"
+      samples_dir:
+        required: false
+        type: string
+        default: "private_live_replay/samples"
+      update_baseline:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      ARK_API_KEY:
+        required: false
+      ARK_BASE_URL:
+        required: false
+      SILICON_API_KEY:
+        required: false
+      SILICON_BASE_URL:
+        required: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    env:
+      ARK_API_KEY: ${{ secrets.ARK_API_KEY }}
+      ARK_BASE_URL: ${{ secrets.ARK_BASE_URL }}
+      SILICON_API_KEY: ${{ secrets.SILICON_API_KEY }}
+      SILICON_BASE_URL: ${{ secrets.SILICON_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Validate provider secrets (skip if missing)
+        run: |
+          set -euo pipefail
+          provider="${{ inputs.provider }}"
+          if [ "$provider" = "ark" ] && [ -z "${ARK_API_KEY:-}" ]; then
+            echo "[SKIP] ARK_API_KEY is not configured; skipping live run."
+            exit 0
+          fi
+          if [ "$provider" = "silicon" ] && [ -z "${SILICON_API_KEY:-}" ]; then
+            echo "[SKIP] SILICON_API_KEY is not configured; skipping live run."
+            exit 0
+          fi
+      - name: Collect live replay metrics
+        run: |
+          python3 scripts/collect_live_replay_metrics.py \
+            --samples-dir "${{ inputs.samples_dir }}" \
+            --provider "${{ inputs.provider }}" \
+            --output qa_metrics/live_metrics.json \
+            --fail-on-error
+      - name: Regression check (live baseline)
+        run: |
+          EXTRA=""
+          if [ "${{ inputs.update_baseline }}" = "true" ]; then
+            EXTRA="--update-baseline"
+          fi
+          python3 scripts/check_baseline.py \
+            --current qa_metrics/live_metrics_summary.json \
+            --baseline .github/baselines/live_metrics_baseline.json \
+            --threshold 0.05 \
+            $EXTRA
+      - name: Upload QA Metrics Artifact
+        if: ${{ hashFiles('qa_metrics/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa_metrics_live
+          path: qa_metrics/

@@ -55,6 +55,9 @@ async def new_feature(*, session_id: str, request_id: str):
 ## PR提交前5分钟自检
 
 ```bash
+# 0. 单元/契约测试（快）
+python3 -m pytest -q
+
 # 1. 运行replay测试
 python3 -m pytest homework_agent/tests/test_replay.py -v
 
@@ -89,10 +92,29 @@ python3 scripts/check_observability.py
 python3 -m bandit -r homework_agent -c bandit.yaml -x homework_agent/demo_ui.py -q
 python3 -m pylint --disable=all --enable=E0602 homework_agent/
 
+# 4.5 Baseline 更新（仅在合理变化时）
+# 允许更新：新功能/bug修复提升/模型或Prompt升级带来预期变化
+# 要求：PR 附 qa_metrics/report.html；PR 描述说明原因；按 PR 模板 baseline checklist
+# 更新：
+# cp qa_metrics/metrics_summary.json .github/baselines/metrics_baseline.json
+
 # 5. 代码格式化
 python3 -m black --check homework_agent/
 python3 -m ruff check homework_agent/
+
+# 6. E2E 冒烟（可选，本地优先；需要已启动后端 + provider secrets）
+# python3 scripts/e2e_grade_chat.py --image-url https://example.com/image.jpg
+# python3 scripts/e2e_grade_chat.py --image-file /abs/path/to/image.jpg
 ```
+
+---
+
+## 测试分层（规则2.4）
+
+- Unit：不依赖网络/外部服务，必须快、可重复
+- Contract：路由/schema/SSE 序列等最小不变量（TestClient + stub/mocks）
+- Integration：Redis/队列/worker 等依赖（CI service 或本地 docker）
+- E2E：`/uploads → /grade → /chat` 冒烟（本地优先，CI 可选）
 
 ---
 

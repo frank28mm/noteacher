@@ -16,3 +16,8 @@ logs/
 *.log
 .DS_Store
 qa_metrics/
+
+# Private live replay inventory (local absolute paths; never commit)
+homework_agent/tests/replay_data/samples_inventory.csv
+homework_agent/tests/replay_data/samples_inventory.md
+private_live_replay/

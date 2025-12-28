@@ -22,8 +22,9 @@
   - 报告链可读取历史 submissions + 错题排除记录用于长期分析。
 - 题目路由（产品要求）：支持非数字题名（如“思维与拓展/旋转题”）；若无法定位，SSE 必须返回 `question_candidates` 供 UI 按钮选择，禁止继续沿用旧焦点乱讲。
 - 同步/异步：小批量尽量同步；预估超时/大批量返回 202+`job_id`，`/jobs/{job_id}` 查询状态。
+- Grade 异步任务：大批量/长耗时批改必须走 Redis 队列 + 独立 `grade_worker`（`python3 -m homework_agent.workers.grade_worker`）；生产建议 `REQUIRE_REDIS=1`，当 Redis 不可用时返回 503（避免退回进程内 BackgroundTasks 导致任务丢失/不可扩展）。
 - 严格模式：英语 strict 模式需关键词提炼+阈值（~0.91）；回退策略按要求执行。
-- SSE：心跳 30s，90s 无数据可断开，支持 last-event-id 续接。
+- SSE：心跳默认 30s；若 90s 内无任何数据（含 heartbeat），服务端/代理可断开；可选启用 `CHAT_IDLE_DISCONNECT_SECONDS` 作为“LLM 长时间无输出时主动断开”的安全兜底（B 方案：生产建议先取 120s，上线后按日志 `chat_llm_first_output` 的 p99 再回调）；支持 last-event-id 续接。
 - 视觉模型选择：仅允许用户选择白名单值 `doubao`(Ark) / `qwen3`(SiliconFlow)，默认 `doubao`；不向外暴露 OpenAI 视觉选项；后端需验证白名单避免任意 base_url/model 注入。`doubao` 优先公网 URL，但允许 Data-URL(base64) 兜底（绕开 provider-side URL 拉取不稳定）；`qwen3` 支持 URL 或 Data-URL(base64) 兜底。
 - LLM/Chat 选择：Phase 1 `/grade` 与 `/chat` 当 provider=ark 时均使用 `ARK_REASONING_MODEL`（当前测试环境可指向 `doubao-seed-1-6-vision-250815`）；`ARK_REASONING_MODEL_THINKING` 不作为必需项。允许在白名单内通过 `llm_model` 做调试切换；不对外新增其他 LLM 选项，避免适配面膨胀。
 - MVP 验证策略：当前所有开发以本地测试跑通为先决条件，优先确保在本机环境（含本地存储/缓存）端到端可用，再考虑上线和云端替换。
@@ -34,6 +35,7 @@
 - Autonomous Grade Agent（当前实现口径）：/grade 以 `homework_agent/services/autonomous_agent.py` 为主（规划→工具→反思→汇总），在成本/时延护栏内尽量产出可审计的结构化结果；当证据不足或触发护栏时，必须通过 `warnings/needs_review` 明确降级原因，禁止“硬编”。
   - 预处理/切片：作为可选增强（best-effort），不可用时允许跳过，但必须在 `warnings` 说明风险。
   - 可观测性：保留 `agent_plan_start/agent_tool_call/agent_reflect_* /agent_finalize_done` 等日志点位，并把 prompt/model/thresholds/experiment variant 写入 `run_versions` 以便回放与回归。
+- Prompt A/B：通过 `FEATURE_FLAGS_JSON` 配置 `prompt.socratic_tutor_system` 的 `variants`；如需新 prompt 变体，按约定新增 `homework_agent/prompts/<name>__B.yaml` 并更新版本号。
 - 数据保留（产品要求）：
   - 原始图片 + 批改结果 + 识别原文长期保留（除非用户删除或静默 180 天清理）；
   - chat_history 与切片默认 7 天 TTL（需有定时清理策略）。

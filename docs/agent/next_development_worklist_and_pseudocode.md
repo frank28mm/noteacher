@@ -9,7 +9,7 @@
 本计划以仓库的“真源/基准文档”为决策依据（优先级从高到低）：
 
 1. `product_requirements.md`：产品需求边界（科目范围、苏格拉底模式、坐标规范、严格模式等）。
-2. `API_CONTRACT.md`：对外契约（字段、错误码、幂等、超时/重试、SSE 事件等）。
+2. `homework_agent/API_CONTRACT.md`：对外契约（字段、错误码、幂等、超时/重试、SSE 事件等）。
 3. `agent_sop.md`：执行流程与落地约束（FastAPI + 直连 LLM/Vision；会话/记忆边界；降级策略等）。
 4. `docs/engineering_guidelines.md`：工程约束与“唯一真源”入口。
 5. `docs/development_rules.md` + `docs/development_rules_quickref.md`：工程化规则（门禁/日志/回滚/安全/可观测性）。
@@ -374,6 +374,103 @@ class SessionMemory:
     def build_context(self, session_id: str) -> dict:
         return {"summary": store.load_summary(session_id),
                 "recent_turns": store.load_recent(session_id, limit=10)}
+```
+
+---
+
+#### WL‑P1‑004：Grade 异步任务 Worker 化（路线 B）
+
+**为什么**：当前大批量异步批改使用 FastAPI `BackgroundTasks`，在多实例/滚动发布/重启场景下不可恢复；`/jobs/{job_id}` 也需要跨实例一致。
+
+**交付物**：
+- 新增 `grade_queue`：Redis 队列 + job 状态存储（沿用 cache_store 口径），包含 enqueue/store/get
+- 新增 `grade_worker`：BRPOP 消费 `grade:queue`，执行 `perform_grading()`，写回 `job:{job_id}`
+- `/api/v1/grade`：大批量分支改为 enqueue（不再使用 BackgroundTasks）
+- `/api/v1/jobs/{job_id}`：读取同一份 job 状态（任意实例一致）
+
+**验收标准**：
+- API 多实例下：任意实例都能查询同一 `job_id` 状态
+- worker 重启后可继续消费队列；API 重启不丢任务状态
+- 幂等键命中时不重复 enqueue；参数不一致仍返回 409
+
+**伪代码（最小闭环）**：
+```python
+# services/grade_queue.py
+@dataclass(frozen=True)
+class GradeJob:
+    job_id: str
+    request_id: str
+    session_id: str
+    user_id: str
+    provider: str
+    enqueued_at: float
+
+def enqueue(job: GradeJob, *, req_payload: dict) -> None:
+    cache.set(
+        f"job:{job.job_id}",
+        {"status": "processing", "created_at": iso_now(), "result": None},
+        ttl_seconds=24 * 3600,
+    )
+    cache.set(f"jobreq:{job.job_id}", req_payload, ttl_seconds=24 * 3600)
+    redis.lpush("grade:queue", job.job_id)
+
+def get_job(job_id: str) -> dict | None:
+    return cache.get(f"job:{job_id}")
+```
+```python
+# workers/grade_worker.py
+while True:
+    job_id = redis.brpop("grade:queue")
+    payload = cache.get(f"jobreq:{job_id}")
+    if not payload:
+        continue
+    try:
+        cache.set(f"job:{job_id}", {**cache.get(f"job:{job_id}"), "status": "running"})
+        result = await perform_grading(
+            GradeRequest(**payload["grade_request"]), payload["provider"]
+        )
+        cache.set(
+            f"job:{job_id}",
+            {"status": "done", "result": result.model_dump(), "finished_at": iso_now()},
+            ttl_seconds=24 * 3600,
+        )
+    except Exception as e:
+        cache.set(
+            f"job:{job_id}",
+            {"status": "failed", "error": str(e), "finished_at": iso_now()},
+            ttl_seconds=24 * 3600,
+        )
+```
+
+---
+
+#### WL‑P1‑005：模型 B（FastAPI 唯一入口）与生产安全开关
+
+**为什么**：产品方向是“前端只调用本服务 API”；开发期 Supabase 只是临时实现，后续要可替换到国内云 DB/OSS。需要先固化安全边界与配置护栏，避免 dev 配置误上公网。
+
+**交付物**：
+- 文档明确：模型 B = 前端不直连 DB/Storage；所有访问都走 FastAPI
+- 生产配置护栏（fail-fast）：
+  - `APP_ENV=prod` 时强制 `AUTH_REQUIRED=1`
+  - 生产 CORS 必须显式 allowlist（不允许 `*`）
+- 存储策略抽象（为未来替换供应商做准备）：
+  - `StorageBackend.upload(...) -> object_key`
+  - `StorageBackend.sign_url(object_key, expires_s) -> signed_url`
+
+**验收标准**：
+- 前端不需要 Supabase key（或未来云厂商 key）
+- API 层可通过 `Authorization` 唯一确定 `user_id`，所有读写按 `user_id` 隔离
+
+**伪代码（存储抽象）**：
+```python
+class StorageBackend(Protocol):
+    def upload_file(self, *, user_id: str, upload_id: str, local_path: str) -> list[str]: ...
+    def sign_url(self, *, object_key: str, expires_s: int) -> str: ...
+
+def upload_endpoint(file):
+    keys = storage.upload_file(user_id=user_id, upload_id=upload_id, local_path=tmp_path)
+    urls = [storage.sign_url(object_key=k, expires_s=900) for k in keys]
+    return {"upload_id": upload_id, "page_keys": keys, "page_image_urls": urls}
 ```
 
 ---

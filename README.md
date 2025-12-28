@@ -87,6 +87,15 @@ python -m homework_agent.workers.qindex_worker
 ./.venv/bin/pytest -q
 ```
 
+### 🚀 发布前检查清单 (Pre-release Checklist)
+
+> ⚠️ **重要**：发布前务必完成以下验证！
+
+- [ ] **E2E 冒烟测试**：运行 `python3 scripts/e2e_grade_chat.py` 验证 `/upload→/grade→/chat` 完整链路
+- [ ] **Live Inventory 验收**（可选）：`python3 scripts/collect_inventory_live_metrics.py --limit 5` 验证真实样本
+- [ ] **CI 全绿**：确认 GitHub Actions 所有 job 通过
+- [ ] **SSE 兜底断线（B 方案）**：生产建议设置 `CHAT_IDLE_DISCONNECT_SECONDS=120`，上线后按日志事件 `chat_llm_first_output` 的 p99 回调（如调到 90/120/180）
+
 ---
 
 ## 📚 API 使用指南

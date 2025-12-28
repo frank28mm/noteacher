@@ -157,6 +157,28 @@ class Settings(BaseSettings):
         default=600,
         validation_alias="GRADE_LLM_TIMEOUT_SECONDS",
     )
+    # Chat (SSE)
+    chat_heartbeat_interval_seconds: float = Field(
+        # SSE heartbeat cadence when LLM is "thinking" / no tokens are produced.
+        default=30.0,
+        validation_alias="CHAT_HEARTBEAT_INTERVAL_SECONDS",
+    )
+    chat_idle_disconnect_seconds: float = Field(
+        # Optional: if the LLM produces no stream chunks for too long, close the SSE connection.
+        # This is a safety valve for stuck upstream streams; set to 0 to disable.
+        default=0.0,
+        validation_alias="CHAT_IDLE_DISCONNECT_SECONDS",
+    )
+    chat_producer_join_timeout_seconds: float = Field(
+        # When the SSE consumer finishes early, don't block forever waiting for the producer thread.
+        default=1.0,
+        validation_alias="CHAT_PRODUCER_JOIN_TIMEOUT_SECONDS",
+    )
+    chat_relook_enabled: bool = Field(
+        # Optional: enable best-effort VFE relook in /chat for visually risky disputes.
+        default=False,
+        validation_alias="CHAT_RELOOK_ENABLED",
+    )
     vision_client_timeout_seconds: int = Field(
         # Low-level client timeout should not undercut grade vision budget.
         default=240,
@@ -301,6 +323,9 @@ class Settings(BaseSettings):
     # QIndex worker queue (Redis required)
     qindex_queue_name: str = Field(
         default="qindex:queue", validation_alias="QINDEX_QUEUE_NAME"
+    )
+    grade_queue_name: str = Field(
+        default="grade:queue", validation_alias="GRADE_QUEUE_NAME"
     )
 
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")

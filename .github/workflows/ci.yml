@@ -36,6 +36,7 @@ jobs:
             --inputs .github/baselines/metrics_baseline.json qa_metrics/metrics_summary.json \
             --metrics qa_metrics/metrics.json \
             --output qa_metrics/weekly.html
+          python3 scripts/check_weekly_report_artifact.py --path qa_metrics/weekly.html
       - name: Regression Check (If Metrics Present)
         if: ${{ hashFiles('qa_metrics/metrics_summary.json') != '' }}
         run: |
@@ -75,4 +76,6 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Redis integration tests
         run: |
-          pytest -q homework_agent/tests/test_review_queue_redis_integration.py
+          pytest -q \
+            homework_agent/tests/test_review_queue_redis_integration.py \
+            homework_agent/tests/test_grade_queue_redis_integration.py

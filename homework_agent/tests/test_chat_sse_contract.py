@@ -60,6 +60,58 @@ def test_chat_sse_sequence_contract():
     assert any(e == "done" for e, _ in events)
 
 
+def test_chat_heartbeat_payload_contains_timestamp(monkeypatch: pytest.MonkeyPatch):
+    """
+    Contract: heartbeat event payload must be JSON and include a timestamp so clients can
+    detect liveness without parsing SSE meta.
+    """
+    monkeypatch.setenv("CHAT_HEARTBEAT_INTERVAL_SECONDS", "0.05")
+    monkeypatch.setenv("CHAT_PRODUCER_JOIN_TIMEOUT_SECONDS", "0.2")
+
+    def slow_stream(*args, **kwargs):
+        import time
+
+        time.sleep(0.15)
+        yield "stub response"
+
+    monkeypatch.setattr(
+        "homework_agent.services.llm.LLMClient.socratic_tutor_stream",
+        slow_stream,
+    )
+
+    session_id = "sess_sse_heartbeat_contract"
+    save_session(
+        session_id,
+        {"history": [], "focus_question_number": "1", "interaction_count": 0},
+    )
+    save_question_bank(
+        session_id,
+        {
+            "session_id": session_id,
+            "subject": "math",
+            "page_image_urls": [],
+            "questions": {"1": {"question_content": "1+1=?"}},
+        },
+    )
+
+    payload = {
+        "history": [],
+        "question": "讲讲第1题",
+        "subject": "math",
+        "session_id": session_id,
+    }
+    resp = client.post("/api/v1/chat", json=payload)
+    assert resp.status_code == 200
+
+    events = _parse_sse_events(resp.text)
+    hb_payloads = [d for e, d in events if e == "heartbeat" and d]
+    assert hb_payloads, "expected at least one heartbeat event"
+
+    obj = json.loads(hb_payloads[0])
+    assert isinstance(obj.get("timestamp"), str)
+    assert obj.get("timestamp")
+
+
 def test_chat_allows_response_without_slices(monkeypatch: pytest.MonkeyPatch):
     """
     Canary: when user explicitly asks to "看图" but qindex is unavailable/unconfigured,
