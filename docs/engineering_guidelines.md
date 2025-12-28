@@ -24,7 +24,7 @@
 - 同步/异步：小批量尽量同步；预估超时/大批量返回 202+`job_id`，`/jobs/{job_id}` 查询状态。
 - Grade 异步任务：大批量/长耗时批改必须走 Redis 队列 + 独立 `grade_worker`（`python3 -m homework_agent.workers.grade_worker`）；生产建议 `REQUIRE_REDIS=1`，当 Redis 不可用时返回 503（避免退回进程内 BackgroundTasks 导致任务丢失/不可扩展）。
 - 严格模式：英语 strict 模式需关键词提炼+阈值（~0.91）；回退策略按要求执行。
-- SSE：心跳默认 30s；若 90s 内无任何数据（含 heartbeat），服务端/代理可断开；可选启用 `CHAT_IDLE_DISCONNECT_SECONDS` 作为“LLM 长时间无输出时主动断开”的安全兜底；支持 last-event-id 续接。
+- SSE：心跳默认 30s；若 90s 内无任何数据（含 heartbeat），服务端/代理可断开；可选启用 `CHAT_IDLE_DISCONNECT_SECONDS` 作为“LLM 长时间无输出时主动断开”的安全兜底（B 方案：生产建议先取 120s，上线后按日志 `chat_llm_first_output` 的 p99 再回调）；支持 last-event-id 续接。
 - 视觉模型选择：仅允许用户选择白名单值 `doubao`(Ark) / `qwen3`(SiliconFlow)，默认 `doubao`；不向外暴露 OpenAI 视觉选项；后端需验证白名单避免任意 base_url/model 注入。`doubao` 优先公网 URL，但允许 Data-URL(base64) 兜底（绕开 provider-side URL 拉取不稳定）；`qwen3` 支持 URL 或 Data-URL(base64) 兜底。
 - LLM/Chat 选择：Phase 1 `/grade` 与 `/chat` 当 provider=ark 时均使用 `ARK_REASONING_MODEL`（当前测试环境可指向 `doubao-seed-1-6-vision-250815`）；`ARK_REASONING_MODEL_THINKING` 不作为必需项。允许在白名单内通过 `llm_model` 做调试切换；不对外新增其他 LLM 选项，避免适配面膨胀。
 - MVP 验证策略：当前所有开发以本地测试跑通为先决条件，优先确保在本机环境（含本地存储/缓存）端到端可用，再考虑上线和云端替换。

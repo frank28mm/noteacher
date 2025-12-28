@@ -654,6 +654,7 @@ async def _stream_socratic_llm_to_sse(
             logger.error(f"LLM streaming failed: {ex}")
             asyncio.run_coroutine_threadsafe(q.put({"error": str(ex)}), loop)
 
+    llm_stream_started_m = time.monotonic()
     producer_task = asyncio.create_task(asyncio.to_thread(_producer))
 
     # Add placeholder assistant message for streaming updates
@@ -683,7 +684,9 @@ async def _stream_socratic_llm_to_sse(
     producer_join_timeout_seconds = float(
         getattr(settings, "chat_producer_join_timeout_seconds", 1.0) or 1.0
     )
+    # "Idle" means: no LLM-produced chunks/events (heartbeat does NOT count).
     last_llm_item_m = time.monotonic()
+    first_llm_output_logged = False
     idle_disconnected = False
     while True:
         try:
@@ -711,6 +714,22 @@ async def _stream_socratic_llm_to_sse(
 
         if item is DONE:
             break
+        if not first_llm_output_logged:
+            kind = "text"
+            if isinstance(item, dict) and item.get("event"):
+                kind = "event"
+            elif isinstance(item, dict) and item.get("error"):
+                kind = "error"
+            log_event(
+                logger,
+                "chat_llm_first_output",
+                request_id=request_id,
+                session_id=session_id,
+                kind=kind,
+                first_output_ms=int((time.monotonic() - llm_stream_started_m) * 1000),
+                first_output_total_ms=int((time.monotonic() - started_m) * 1000),
+            )
+            first_llm_output_logged = True
         last_llm_item_m = time.monotonic()
         if isinstance(item, dict) and item.get("event"):
             evt = item.get("event")

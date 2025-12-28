@@ -220,11 +220,11 @@
 - **现状**: baseline 文件存在；`docs/development_rules.md` 已固化 baseline 更新规则（允许更新场景/PR 要求/更新方式）。
 - **进展**: 已增加 PR 模板 `.github/pull_request_template.md`（含 baseline 更新理由/影响面/回归产物 checklist）。
 
-#### 3. 周报自动化 (WL-P1-002)
+#### 3. 周报自动化 (WL-P1-002) ✅ 已验证通过
 - **现状**: `generate_weekly_report.py` 脚本已存在
-- **补充**: CI 也会生成 `qa_metrics/weekly.html` 并作为 artifact 上传
-- **进展**: CI 增加了 `scripts/check_weekly_report_artifact.py` 对 `qa_metrics/weekly.html` 做最小有效性校验（避免产物空文件/结构损坏）。
-- **待验证**: 仍需在 GitHub Actions 实际跑一次，确认 artifact 产物可下载/可阅读（这属于运行环境验收，非代码缺口）。
+- **补充**: CI 生成 `qa_metrics/weekly.html` 并作为 artifact 上传
+- **进展**: CI 增加了 `scripts/check_weekly_report_artifact.py` 对 `qa_metrics/weekly.html` 做最小有效性校验
+- **验证结果**: ✅ GitHub Actions artifact 已下载并解压，`report.html` 和 `weekly.html` 可正常打开阅读
 
 #### 4. 数据库 Migration
 - **现状**: 已新增 `migrations/` 目录（`*.up.sql` / `*.down.sql` 成对），并提供 `scripts/migrate.py check` 校验脚本
@@ -241,6 +241,7 @@
 - **文档口径**: 心跳建议 30s；90s 内无数据可断开（`agent_sop.md` / `engineering_guidelines.md`）
 - **实现现状**: heartbeat 间隔已配置化（`CHAT_HEARTBEAT_INTERVAL_SECONDS`，默认 30s），以保持连接；可选 `CHAT_IDLE_DISCONNECT_SECONDS` 作为“LLM 长时间无输出时主动关闭 SSE”的安全兜底（默认关闭）。
 - **影响**: 若团队/前端按“90s 自动断开”设计重连策略，可能与后端实际行为不一致。
+ - **推荐口径（已选 B）**: 生产启用 `CHAT_IDLE_DISCONNECT_SECONDS`（建议初始 120s），上线后根据日志 `chat_llm_first_output` 的 p99 调整阈值。
 
 #### 2) Chat 是否允许“实时看图”
 - **SOP 口径**: Chat 不实时看图，只消费 `/grade` 的 `judgment_basis + vision_raw_text`（`agent_sop.md`）
@@ -345,9 +346,7 @@
 
 ### ❌ 尚未验证的部分
 
-- E2E 冒烟口径（/uploads→/grade→/chat）与其在 CI 的放置策略
 - Live Replay（真实 provider）运行口径与开关策略（建议本地/手工触发）
-- 周报自动归档（需 GitHub Actions 实际跑一次）
 - 生产环境 CORS 配置验证
 
 ---

@@ -9,6 +9,10 @@
 - [ ] `python3 scripts/check_observability.py`
 - [ ] `python3 -m bandit -r homework_agent -c bandit.yaml -x homework_agent/demo_ui.py -q`
 
+## E2E 冒烟测试 (Pre-release / Major changes)
+
+- [ ] `python3 scripts/e2e_grade_chat.py` (验证 /upload→/grade→/chat 完整链路)
+
 ## Replay / Metrics (When behavior changes)
 
 - [ ] Replay cases updated/added (if prompt/agent/tool/threshold behavior changed)

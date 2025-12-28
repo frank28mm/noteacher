@@ -259,7 +259,7 @@ event: done
 data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"}
 ```
 
-> 心跳间隔建议 30s；若 90s 内无任何数据（含 heartbeat），服务器或反向代理可主动断开，客户端需重连。另：可用 `CHAT_IDLE_DISCONNECT_SECONDS` 配置“LLM 长时间无输出时主动关闭 SSE”（安全兜底，默认关闭）。客户端重连时可携带 `Last-Event-Id`，服务端会恢复 session 并按时间顺序重放最近最多 3 条 assistant 消息（仅当前 session）。
+> 心跳间隔建议 30s；若 90s 内无任何数据（含 heartbeat），服务器或反向代理可主动断开，客户端需重连。另：可用 `CHAT_IDLE_DISCONNECT_SECONDS` 配置“LLM 长时间无输出时主动关闭 SSE”（安全兜底，默认关闭；生产建议先取 120s，上线后按 `chat_llm_first_output` 日志的 p99 再回调）。客户端重连时可携带 `Last-Event-Id`，服务端会恢复 session 并按时间顺序重放最近最多 3 条 assistant 消息（仅当前 session）。
 
 **SSE事件类型**:
 1. `heartbeat`: 心跳事件，每30秒发送一次，保持连接
