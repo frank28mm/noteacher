@@ -3,7 +3,6 @@ Unit tests for session.py functions.
 Tests session management, caching, and timestamp handling.
 """
 
-import pytest
 from datetime import datetime
 
 from homework_agent.api.session import (

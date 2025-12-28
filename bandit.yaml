@@ -1,0 +1,16 @@
+exclude_dirs:
+  - homework_agent/tests
+  - homework_agent/.venv
+  - .venv
+  - node_modules
+  - logs
+  - qa_metrics
+  - supabase
+
+skips:
+  # Assert in dependencies / defensive checks
+  - B101
+  # Many best-effort blocks use pass/continue intentionally
+  - B110
+  - B112
+

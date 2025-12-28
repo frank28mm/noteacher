@@ -2,19 +2,22 @@
 用于处理文件上传到 Supabase Storage 并获取公开访问 URL。
 支持图片上传（含 HEIC/HEIF 转 JPEG），支持 PDF 拆页为 JPEG（最多 8 页）。
 """
+
+import logging
 import mimetypes
 import os
-import uuid
 import tempfile
+import uuid
 from pathlib import Path
+from typing import List, Optional, Tuple
 
-from supabase import create_client, Client
-from typing import Optional, Tuple, List
+from supabase import Client, create_client
 
 from PIL import Image
 
 try:
     import fitz  # PyMuPDF
+
     FITZ_AVAILABLE = True
 except Exception:
     FITZ_AVAILABLE = False
@@ -26,6 +29,8 @@ try:
     pillow_heif.register_heif_opener()
 except Exception:
     pillow_heif = None
+
+logger = logging.getLogger(__name__)
 
 
 class SupabaseStorageClient:
@@ -42,7 +47,9 @@ class SupabaseStorageClient:
 
         self.client: Client = create_client(self.url, self.key)
 
-    def _prepare_image_for_upload(self, file_path: str) -> Tuple[str, str, Optional[str], Optional[Tuple[int, int]]]:
+    def _prepare_image_for_upload(
+        self, file_path: str
+    ) -> Tuple[str, str, Optional[str], Optional[Tuple[int, int]]]:
         """
         确认并标准化图片文件：
         - 仅接受 image/*
@@ -59,7 +66,9 @@ class SupabaseStorageClient:
                 fmt = (img.format or "").upper()
                 if fmt in {"HEIC", "HEIF", "AVIF"}:
                     if pillow_heif is None:
-                        raise ValueError("检测到 HEIC/HEIF 图片，当前环境缺少 pillow-heif 依赖")
+                        raise ValueError(
+                            "检测到 HEIC/HEIF 图片，当前环境缺少 pillow-heif 依赖"
+                        )
                     tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
                     img.convert("RGB").save(tmp.name, format="JPEG", quality=95)
                     temp_path = tmp.name
@@ -76,10 +85,14 @@ class SupabaseStorageClient:
                 return file_path, mime_guess, temp_path, size
             raise ValueError("无法识别图片文件，请使用 JPG/PNG 上传")
 
-    def _convert_pdf_to_images(self, file_path: str, max_pages: int = 8) -> List[Tuple[str, Tuple[int, int]]]:
+    def _convert_pdf_to_images(
+        self, file_path: str, max_pages: int = 8
+    ) -> List[Tuple[str, Tuple[int, int]]]:
         """将 PDF 前 max_pages 页转为 JPEG 临时文件，返回 (path,(w,h)) 列表"""
         if not FITZ_AVAILABLE:
-            raise ValueError("当前环境缺少 PyMuPDF（fitz），无法处理 PDF，请先安装依赖或上传图片格式")
+            raise ValueError(
+                "当前环境缺少 PyMuPDF（fitz），无法处理 PDF，请先安装依赖或上传图片格式"
+            )
         temp_paths: List[Tuple[str, Tuple[int, int]]] = []
         try:
             doc = fitz.open(file_path)
@@ -94,12 +107,14 @@ class SupabaseStorageClient:
             page = doc.load_page(i)
             pix = page.get_pixmap(dpi=200)
             tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-            pix.save(tmp.name, output='jpeg')
+            pix.save(tmp.name, output="jpeg")
             temp_paths.append((tmp.name, (pix.width, pix.height)))
         doc.close()
         return temp_paths
 
-    def upload_files(self, file_path: str, prefix: str = "demo/", min_side: int = 0) -> List[str]:
+    def upload_files(
+        self, file_path: str, prefix: str = "demo/", min_side: int = 0
+    ) -> List[str]:
         """上传文件到 Supabase Storage 并返回公开访问 URL 列表
 
         - 图片：1 张 -> 1 个 URL
@@ -135,7 +150,9 @@ class SupabaseStorageClient:
             pdf_images = self._convert_pdf_to_images(file_path, max_pages=8)
             for img_path, size in pdf_images:
                 temp_paths.append(img_path)
-                up_path, mime_type, tmp, detected_size = self._prepare_image_for_upload(img_path)
+                up_path, mime_type, tmp, detected_size = self._prepare_image_for_upload(
+                    img_path
+                )
                 final_size = detected_size or size
                 upload_targets.append((up_path, mime_type, tmp, final_size))
                 if tmp and tmp not in temp_paths:
@@ -151,7 +168,9 @@ class SupabaseStorageClient:
                 if size:
                     w, h = size
                     if w < min_side or h < min_side:
-                        raise ValueError(f"图片尺寸过小：{w}x{h}，最小边需 >= {min_side}px")
+                        raise ValueError(
+                            f"图片尺寸过小：{w}x{h}，最小边需 >= {min_side}px"
+                        )
 
         urls: List[str] = []
         try:
@@ -163,9 +182,11 @@ class SupabaseStorageClient:
                 self.client.storage.from_(self.bucket).upload(
                     path=unique_filename,
                     file=file_content,
-                    file_options={"content-type": mime_type}
+                    file_options={"content-type": mime_type},
                 )
-                public_url = self.client.storage.from_(self.bucket).get_public_url(unique_filename)
+                public_url = self.client.storage.from_(self.bucket).get_public_url(
+                    unique_filename
+                )
                 # Supabase Python SDK 2.x 会返回末尾带 "?" 的直链，这里清理掉避免下游 URL 校验/超时问题
                 public_url = public_url.rstrip("?")
                 urls.append(public_url)
@@ -180,7 +201,9 @@ class SupabaseStorageClient:
                     except Exception:
                         pass
 
-    def upload_image(self, file_path: str, prefix: str = "demo/", min_side: int = 0) -> str:
+    def upload_image(
+        self, file_path: str, prefix: str = "demo/", min_side: int = 0
+    ) -> str:
         """兼容旧接口，返回首个 URL"""
         urls = self.upload_files(file_path, prefix=prefix, min_side=min_side)
         if not urls:
@@ -203,7 +226,9 @@ class SupabaseStorageClient:
             file=file_content,
             file_options={"content-type": mime_type},
         )
-        public_url = self.client.storage.from_(self.bucket).get_public_url(unique_filename)
+        public_url = self.client.storage.from_(self.bucket).get_public_url(
+            unique_filename
+        )
         return str(public_url).rstrip("?")
 
     def download_bytes(

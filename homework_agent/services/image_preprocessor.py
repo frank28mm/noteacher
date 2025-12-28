@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import base64
-import io
 import logging
 from typing import Optional
 
 import httpx
+
 try:
     import numpy as np
     import cv2
+
     _CV_AVAILABLE = True
 except Exception:
     np = None  # type: ignore
@@ -65,7 +66,9 @@ def preprocess_image_url(
     if not url:
         return None
     try:
-        with httpx.Client(timeout=timeout_seconds, follow_redirects=True, trust_env=False) as client:
+        with httpx.Client(
+            timeout=timeout_seconds, follow_redirects=True, trust_env=False
+        ) as client:
             r = client.get(url)
         if r.status_code != 200:
             return None
@@ -94,7 +97,9 @@ def preprocess_image_url_to_data_uri(
     if not url:
         return None
     try:
-        with httpx.Client(timeout=timeout_seconds, follow_redirects=True, trust_env=False) as client:
+        with httpx.Client(
+            timeout=timeout_seconds, follow_redirects=True, trust_env=False
+        ) as client:
             r = client.get(url)
         if r.status_code != 200:
             return None
@@ -114,8 +119,12 @@ def maybe_preprocess_for_vision(url: str) -> Optional[str]:
         return None
     return preprocess_image_url_to_data_uri(
         url,
-        timeout_seconds=float(getattr(settings, "vision_preprocess_timeout_seconds", 20.0)),
-        max_bytes=int(getattr(settings, "vision_preprocess_max_bytes", 20 * 1024 * 1024)),
+        timeout_seconds=float(
+            getattr(settings, "vision_preprocess_timeout_seconds", 20.0)
+        ),
+        max_bytes=int(
+            getattr(settings, "vision_preprocess_max_bytes", 20 * 1024 * 1024)
+        ),
     )
 
 
@@ -127,6 +136,8 @@ def maybe_preprocess_for_ocr(url: str) -> Optional[str]:
     return preprocess_image_url(
         url,
         prefix=prefix,
-        timeout_seconds=float(getattr(settings, "ocr_preprocess_timeout_seconds", 20.0)),
+        timeout_seconds=float(
+            getattr(settings, "ocr_preprocess_timeout_seconds", 20.0)
+        ),
         max_bytes=int(getattr(settings, "ocr_preprocess_max_bytes", 20 * 1024 * 1024)),
     )

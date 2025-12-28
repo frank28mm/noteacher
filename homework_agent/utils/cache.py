@@ -4,6 +4,8 @@ Cache abstraction with optional Redis support.
 - Otherwise fallback to in-memory cache (process-local, not for production).
 """
 
+from __future__ import annotations
+
 import json
 import os
 from datetime import datetime, timedelta
@@ -14,6 +16,9 @@ try:
     import redis  # type: ignore
 except ImportError:
     redis = None  # Redis optional
+
+_CACHED_STORE: BaseCache | None = None
+_CACHED_STORE_CONFIG: tuple[str | None, str, bool, bool] | None = None
 
 
 def _json_default(obj: Any):
@@ -62,7 +67,9 @@ class InMemoryCache(BaseCache):
         return value
 
     def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
-        expires_at = datetime.now() + timedelta(seconds=ttl_seconds) if ttl_seconds else None
+        expires_at = (
+            datetime.now() + timedelta(seconds=ttl_seconds) if ttl_seconds else None
+        )
         self.store[key] = (value, expires_at)
 
     def delete(self, key: str) -> None:
@@ -97,23 +104,44 @@ class RedisCache(BaseCache):
 
 
 def get_cache_store() -> BaseCache:
+    global _CACHED_STORE, _CACHED_STORE_CONFIG
     redis_url = os.getenv("REDIS_URL")
     prefix = os.getenv("CACHE_PREFIX", "")
-    require_redis = os.getenv("REQUIRE_REDIS", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
+    require_redis = os.getenv("REQUIRE_REDIS", "").strip() in {
+        "1",
+        "true",
+        "TRUE",
+        "yes",
+        "YES",
+    }
+    config = (redis_url, prefix, require_redis, bool(redis))
+    if _CACHED_STORE is not None and _CACHED_STORE_CONFIG == config:
+        return _CACHED_STORE
     if redis_url and redis:
         try:
             cache = RedisCache(redis_url, prefix=prefix)
             cache.client.ping()  # Verify connection immediately
+            _CACHED_STORE = cache
+            _CACHED_STORE_CONFIG = config
             return cache
         except Exception as e:
             if require_redis:
                 raise RuntimeError(f"REQUIRE_REDIS=1 but Redis ping failed: {e}")
-            logging.warning("Redis configured but unavailable (ping failed), falling back to in-memory cache: %s", e)
-            return InMemoryCache()
+            logging.warning(
+                "Redis configured but unavailable (ping failed), falling back to in-memory cache: %s",
+                e,
+            )
+            _CACHED_STORE = InMemoryCache()
+            _CACHED_STORE_CONFIG = config
+            return _CACHED_STORE
     if redis_url and not redis:
         if require_redis:
             raise RuntimeError("REQUIRE_REDIS=1 but redis package not installed")
-        logging.warning("REDIS_URL set but redis package not installed; using in-memory cache")
+        logging.warning(
+            "REDIS_URL set but redis package not installed; using in-memory cache"
+        )
     if require_redis and not redis_url:
         raise RuntimeError("REQUIRE_REDIS=1 but REDIS_URL is not set")
-    return InMemoryCache()
+    _CACHED_STORE = InMemoryCache()
+    _CACHED_STORE_CONFIG = config
+    return _CACHED_STORE

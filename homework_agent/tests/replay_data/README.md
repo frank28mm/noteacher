@@ -13,8 +13,17 @@ replay_data/
 
 ## Adding Samples
 
-1. Place test images in `images/` directory
-2. Create corresponding JSON in `samples/` following format in `docs/qa_replay_dataset.md`
+Two supported approaches:
+
+1) **Local images** (preferred when you can commit images):
+   - Place test images in `images/`
+   - Reference them via `input.local_images` in each sample JSON
+
+2) **Embedded base64** (repo-friendly / text-only):
+   - Put a `data:image/...;base64,...` string in `input.or_base64`
+   - This allows the dataset to exist without committing binary files
+
+Create the JSON in `samples/` following the format in `docs/qa_replay_dataset.md`.
 
 ## Recommended Sample Coverage
 
@@ -30,10 +39,10 @@ Total: 10-20 samples
 
 ```bash
 # Run all replay samples
-python -m pytest homework_agent/tests/test_replay.py -v
+python3 -m pytest homework_agent/tests/test_replay.py -v
 
 # Run specific sample category
-python -m pytest homework_agent/tests/test_replay.py::test_simple_arithmetic -v
+python3 -m pytest homework_agent/tests/test_replay.py -v
 ```
 
 ## Documentation

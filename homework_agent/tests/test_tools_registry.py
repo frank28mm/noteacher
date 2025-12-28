@@ -12,6 +12,7 @@ def test_verify_calculation_tool_registered():
 def test_verify_calculation_tool_works():
     load_default_tools()
     registry = get_default_tool_registry()
-    result = registry.call("verify_calculation", {"expression": "(2+3)^2", "expected": "25"})
+    result = registry.call(
+        "verify_calculation", {"expression": "(2+3)^2", "expected": "25"}
+    )
     assert result.get("status") == "valid"
-

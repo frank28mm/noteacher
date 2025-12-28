@@ -25,6 +25,9 @@ You will receive the following fields from SessionState:
 - ocr_text: text extracted from images (may be null)
 - plan_history: list of previous plans (may be empty for first iteration)
 - reflection_result: previous iteration issues/suggestion (may be null)
+- slice_failed_cache: dict mapping image_hash -> bool (diagram slice failed)
+- attempted_tools: dict mapping tool_name -> {status, reason}
+- preprocess_meta: dict containing preprocessing metadata (source, figure_too_small)
 </input_schema>
 
 <output_schema>
@@ -66,13 +69,15 @@ You MUST output a valid JSON object with this exact structure:
 
 6. **Reflection Feedback**: If reflection_result indicates missing evidence or tool failure:
    - Incorporate reflection_result.issues and reflection_result.suggestion into the next plan
-   - Example: if issues include "figure slice missing", re-run diagram_slice or ocr_fallback
+   - Example: if issues include "diagram_roi_not_found", avoid diagram_slice if slice_failed_cache is true
+   - Prefer qindex_fetch or vision_roi_detect as next action
 </planning_rules>
 
 <tool_descriptions>
 Available tools you can plan to call:
 - diagram_slice: Separates figures/diagrams from question text. Use when visual and textual elements are mixed.
 - qindex_fetch: Retrieves question-level slices from a previous session. Use when processing multi-question pages.
+- vision_roi_detect: Uses VLM to locate figure/question regions and returns slice URLs.
 - math_verify: Validates mathematical expressions using a safe sandbox. Use for complex calculations or when uncertainty exists.
 - ocr_fallback: Performs additional OCR when vision-based understanding fails. Use when text extraction is incomplete.
 </tool_descriptions>
@@ -155,14 +160,15 @@ Input:
 - image_urls: ["http://example.com/geometry.jpg"]
 - slice_urls: {"figure": [], "question": ["..."]}
 - ocr_text: "∠2 and ∠BCD ..."
-- reflection_result: {"pass": false, "issues": ["Figure slice missing"], "suggestion": "Re-run diagram_slice"}
+- reflection_result: {"pass": false, "issues": ["diagram_roi_not_found"], "suggestion": "Use vision_roi_detect or qindex_fetch"}
+- slice_failed_cache: {"hash123": true}
 
 Output:
 ```json
 {
-  "thoughts": "Reflection indicates missing figure slice for a geometry problem. I will re-run diagram_slice to obtain a clear figure and proceed.",
+  "thoughts": "Reflection indicates missing figure slice and diagram_slice already failed. I will try vision_roi_detect to locate the figure, or qindex_fetch if available.",
   "plan": [
-    {"step": "diagram_slice", "args": {"image": "http://example.com/geometry.jpg"}}
+    {"step": "vision_roi_detect", "args": {"image": "http://example.com/geometry.jpg"}}
   ],
   "action": "execute_tools"
 }
@@ -185,8 +191,9 @@ def build_planner_user_prompt(*, state_payload: str) -> str:
         "请基于以下 SessionState 输出执行计划。\n"
         "要求：\n"
         "- 只输出 JSON\n"
-        "- 字段结构：{\"thoughts\": \"...\", \"plan\": [{\"step\": \"tool_name\", \"args\": {...}}], \"action\": \"execute_tools\"}\n"
+        '- 字段结构：{"thoughts": "...", "plan": [{"step": "tool_name", "args": {...}}], "action": "execute_tools"}\n'
         "- 如无需工具，plan 为空数组\n"
+        "- 必须根据 reflection_result / slice_failed_cache / attempted_tools 调整下一步（避免重复失败路径）\n"
         f"\nSessionState:\n{state_payload}\n"
     )
 
@@ -354,7 +361,7 @@ def build_reflector_user_prompt(*, payload: str) -> str:
         "请检查证据一致性并给出 pass/confidence/issues。\n"
         "要求：\n"
         "- 只输出 JSON\n"
-        "- 结构：{\"pass\": true|false, \"issues\": [\"...\"], \"confidence\": 0.0-1.0, \"suggestion\": \"...\"}\n"
+        '- 结构：{"pass": true|false, "issues": ["..."], "confidence": 0.0-1.0, "suggestion": "..."}\n'
         f"\nEvidence:\n{payload}\n"
     )
 

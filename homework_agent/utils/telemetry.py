@@ -4,14 +4,12 @@ Telemetry collection for Autonomous Agent calibration.
 Collects confidence distribution, loop iterations, and latency metrics
 for threshold calibration and performance monitoring.
 """
+
 from __future__ import annotations
 
-import json
 import logging
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from homework_agent.utils.cache import get_cache_store
@@ -25,6 +23,7 @@ TELEMETRY_KEY_PREFIX = "telemetry:autonomous:"
 @dataclass
 class LoopIterationTelemetry:
     """Telemetry data for a single Loop iteration."""
+
     session_id: str
     request_id: Optional[str]
     iteration: int
@@ -42,6 +41,7 @@ class LoopIterationTelemetry:
 @dataclass
 class AutonomousAgentTelemetry:
     """Complete telemetry data for an Autonomous Agent run."""
+
     session_id: str
     request_id: Optional[str]
     subject: str
@@ -70,7 +70,9 @@ class AutonomousAgentTelemetry:
             "total_duration_ms": self.total_duration_ms,
             "total_iterations": self.total_iterations,
             "exit_reason": self.exit_reason,
-            "iterations": [it.to_dict() if hasattr(it, "to_dict") else it for it in self.iterations],
+            "iterations": [
+                it.to_dict() if hasattr(it, "to_dict") else it for it in self.iterations
+            ],
             "aggregator_duration_ms": self.aggregator_duration_ms,
             "result_count": self.result_count,
             "correct_count": self.correct_count,
@@ -103,20 +105,22 @@ class TelemetryCollector:
         iter_objs = []
         for it in iterations:
             if isinstance(it, dict):
-                iter_objs.append(LoopIterationTelemetry(
-                    session_id=it.get("session_id", ""),
-                    request_id=it.get("request_id"),
-                    iteration=it.get("iteration", 0),
-                    timestamp=it.get("timestamp", 0),
-                    planner_duration_ms=it.get("planner_duration_ms", 0),
-                    executor_duration_ms=it.get("executor_duration_ms", 0),
-                    reflector_duration_ms=it.get("reflector_duration_ms", 0),
-                    reflection_pass=it.get("reflection_pass", False),
-                    reflection_confidence=it.get("reflection_confidence", 0.0),
-                    reflection_issues=it.get("reflection_issues") or [],
-                    plan_steps=it.get("plan_steps", 0),
-                    tools_called=it.get("tools_called") or [],
-                ))
+                iter_objs.append(
+                    LoopIterationTelemetry(
+                        session_id=it.get("session_id", ""),
+                        request_id=it.get("request_id"),
+                        iteration=it.get("iteration", 0),
+                        timestamp=it.get("timestamp", 0),
+                        planner_duration_ms=it.get("planner_duration_ms", 0),
+                        executor_duration_ms=it.get("executor_duration_ms", 0),
+                        reflector_duration_ms=it.get("reflector_duration_ms", 0),
+                        reflection_pass=it.get("reflection_pass", False),
+                        reflection_confidence=it.get("reflection_confidence", 0.0),
+                        reflection_issues=it.get("reflection_issues") or [],
+                        plan_steps=it.get("plan_steps", 0),
+                        tools_called=it.get("tools_called") or [],
+                    )
+                )
         return AutonomousAgentTelemetry(
             session_id=data.get("session_id", ""),
             request_id=data.get("request_id"),
@@ -153,7 +157,9 @@ class TelemetryAnalyzer:
     """Analyzes telemetry data for calibration insights."""
 
     @staticmethod
-    def calculate_confidence_distribution(telemetries: List[AutonomousAgentTelemetry]) -> Dict[str, Any]:
+    def calculate_confidence_distribution(
+        telemetries: List[AutonomousAgentTelemetry],
+    ) -> Dict[str, Any]:
         """Calculate confidence distribution across all iterations."""
         all_confidences = []
         pass_confidences = []
@@ -190,18 +196,28 @@ class TelemetryAnalyzer:
             },
             "pass": {
                 "count": len(pass_confidences),
-                "mean": sum(pass_confidences) / len(pass_confidences) if pass_confidences else 0.0,
+                "mean": (
+                    sum(pass_confidences) / len(pass_confidences)
+                    if pass_confidences
+                    else 0.0
+                ),
                 "p50": pct(pass_confidences, 50) if pass_confidences else 0.0,
             },
             "fail": {
                 "count": len(fail_confidences),
-                "mean": sum(fail_confidences) / len(fail_confidences) if fail_confidences else 0.0,
+                "mean": (
+                    sum(fail_confidences) / len(fail_confidences)
+                    if fail_confidences
+                    else 0.0
+                ),
                 "p50": pct(fail_confidences, 50) if fail_confidences else 0.0,
             },
         }
 
     @staticmethod
-    def calculate_iteration_distribution(telemetries: List[AutonomousAgentTelemetry]) -> Dict[str, Any]:
+    def calculate_iteration_distribution(
+        telemetries: List[AutonomousAgentTelemetry],
+    ) -> Dict[str, Any]:
         """Calculate Loop iteration distribution."""
         iterations = [t.total_iterations for t in telemetries]
         if not iterations:
@@ -225,7 +241,9 @@ class TelemetryAnalyzer:
         }
 
     @staticmethod
-    def calculate_latency_percentiles(telemetries: List[AutonomousAgentTelemetry]) -> Dict[str, Any]:
+    def calculate_latency_percentiles(
+        telemetries: List[AutonomousAgentTelemetry],
+    ) -> Dict[str, Any]:
         """Calculate P50/P95 latency metrics."""
         total_durations = [t.total_duration_ms for t in telemetries]
         if not total_durations:
@@ -249,19 +267,29 @@ class TelemetryAnalyzer:
         }
 
     @staticmethod
-    def generate_calibration_report(telemetries: List[AutonomousAgentTelemetry]) -> Dict[str, Any]:
+    def generate_calibration_report(
+        telemetries: List[AutonomousAgentTelemetry],
+    ) -> Dict[str, Any]:
         """Generate comprehensive calibration report."""
         return {
             "generated_at": datetime.now().isoformat(),
             "total_runs": len(telemetries),
-            "confidence_distribution": TelemetryAnalyzer.calculate_confidence_distribution(telemetries),
-            "iteration_distribution": TelemetryAnalyzer.calculate_iteration_distribution(telemetries),
-            "latency_percentiles": TelemetryAnalyzer.calculate_latency_percentiles(telemetries),
+            "confidence_distribution": TelemetryAnalyzer.calculate_confidence_distribution(
+                telemetries
+            ),
+            "iteration_distribution": TelemetryAnalyzer.calculate_iteration_distribution(
+                telemetries
+            ),
+            "latency_percentiles": TelemetryAnalyzer.calculate_latency_percentiles(
+                telemetries
+            ),
             "threshold_suggestions": TelemetryAnalyzer._suggest_thresholds(telemetries),
         }
 
     @staticmethod
-    def _suggest_thresholds(telemetries: List[AutonomousAgentTelemetry]) -> Dict[str, Any]:
+    def _suggest_thresholds(
+        telemetries: List[AutonomousAgentTelemetry],
+    ) -> Dict[str, Any]:
         """Suggest confidence threshold based on data."""
         all_confidences = []
         for t in telemetries:

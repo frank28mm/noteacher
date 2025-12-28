@@ -4,7 +4,6 @@ Tests image validation, URL parsing, and grading utilities.
 """
 
 import pytest
-from unittest.mock import MagicMock
 
 from homework_agent.api.grade import (
     _is_public_url,
@@ -14,8 +13,7 @@ from homework_agent.api.grade import (
     generate_job_id,
     _bank_has_visual_risk,
 )
-from homework_agent.models.schemas import VisionProvider, ImageRef
-
+from homework_agent.models.schemas import VisionProvider
 
 
 class TestIsPublicUrl:
@@ -86,6 +84,7 @@ class TestValidateImagesPayload:
     def test_empty_images_raises(self):
         """Should raise for empty images list."""
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as exc_info:
             validate_images_payload([], VisionProvider.QWEN3)
         assert exc_info.value.status_code == 400
@@ -98,6 +97,7 @@ class TestValidateImagesPayload:
     def test_doubao_rejects_raw_base64(self):
         """Doubao should reject raw base64 (without data: prefix)."""
         from fastapi import HTTPException
+
         images = [{"base64": "ABC123notdataurl"}]
         with pytest.raises(HTTPException) as exc_info:
             validate_images_payload(images, VisionProvider.DOUBAO)

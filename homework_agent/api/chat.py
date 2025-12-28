@@ -14,31 +14,33 @@ from fastapi import APIRouter, HTTPException, status, Request, Header
 from fastapi.responses import StreamingResponse
 
 from homework_agent.models.schemas import (
-    ChatRequest, ChatResponse, VisionProvider, ImageRef
+    ChatRequest,
+    ChatResponse,
+    Subject,
+    VisionProvider,
 )
 from homework_agent.services.llm import LLMClient
-from homework_agent.services.vision import VisionClient
-from homework_agent.services.qindex_queue import enqueue_qindex_job
 from homework_agent.utils.settings import get_settings
-from homework_agent.core.qbank import _normalize_question_number, build_question_bank_from_vision_raw_text
-from homework_agent.core.slice_policy import analyze_visual_risk
-from homework_agent.core.qindex import qindex_is_configured
+from homework_agent.core.qbank import _normalize_question_number
+from homework_agent.core.qindex import qindex_is_configured  # noqa: F401
 from homework_agent.api.session import (
     SESSION_TTL_SECONDS,
-    get_session, save_session, delete_session,
-    get_question_bank, save_question_bank, get_question_index,
-    save_question_index,
-    save_qindex_placeholder,
+    get_session,
+    save_session,
+    delete_session,
+    get_question_bank,
+    save_question_bank,
     _merge_bank_meta,
-    _now_ts, _coerce_ts,
+    _now_ts,
+    _coerce_ts,
 )
+from homework_agent.services.qindex_queue import enqueue_qindex_job  # noqa: F401
 from homework_agent.utils.observability import get_request_id_from_headers, log_event
 from homework_agent.utils.user_context import require_user_id
 from homework_agent.utils.errors import build_error_payload, ErrorCode
 from homework_agent.utils.submission_store import (
     touch_submission,
 )
-from homework_agent.utils.url_image_helpers import _download_as_data_uri
 from homework_agent.utils.supabase_image_proxy import _create_proxy_image_urls
 
 from homework_agent.models.vision_facts import GateResult, SceneType, VisualFacts
@@ -57,7 +59,9 @@ router = APIRouter()
 
 # 并发保护：防止线程池堆积导致“越跑越慢/无响应”
 _settings_for_limits = get_settings()
-VISION_SEMAPHORE = asyncio.Semaphore(max(1, int(_settings_for_limits.max_concurrent_vision)))
+VISION_SEMAPHORE = asyncio.Semaphore(
+    max(1, int(_settings_for_limits.max_concurrent_vision))
+)
 LLM_SEMAPHORE = asyncio.Semaphore(max(1, int(_settings_for_limits.max_concurrent_llm)))
 
 
@@ -120,12 +124,7 @@ def _select_question_number_from_text(
         return re.fullmatch(r"\d+(?:\(\d+\))?", s) is not None
 
     def _normalize_text(value: str) -> str:
-        return (
-            str(value or "")
-            .strip()
-            .replace("（", "(")
-            .replace("）", ")")
-        )
+        return str(value or "").strip().replace("（", "(").replace("）", ")")
 
     def _find_mentions(term: str, numeric: bool) -> List[tuple[int, int]]:
         if not term:
@@ -195,11 +194,19 @@ def _select_question_number_from_text(
     if not mentions or not allow_numeric_fallback:
         if mentions and not allow_numeric_fallback:
             # Only allow non-numeric matches when numeric fallback is disabled.
-            non_numeric = [m for m in mentions if not _is_numeric_question_number(m.get("q"))]
+            non_numeric = [
+                m for m in mentions if not _is_numeric_question_number(m.get("q"))
+            ]
             if non_numeric:
                 # Prefer exact > prefix > contains > keyword, then latest mention.
                 priority = {"exact": 0, "prefix": 1, "contains": 2, "keyword": 3}
-                non_numeric.sort(key=lambda m: (priority.get(m["match_type"], 99), -m["start"], -len(m["alias"])))
+                non_numeric.sort(
+                    key=lambda m: (
+                        priority.get(m["match_type"], 99),
+                        -m["start"],
+                        -len(m["alias"]),
+                    )
+                )
                 chosen = non_numeric[0]
                 return chosen["q"], chosen["match_type"]
             return None, "none"
@@ -265,7 +272,7 @@ def _select_question_number_from_text(
 
     best = None
     best_match_type = "none"
-    best_score = -10**18
+    best_score = -(10**18)
     weights = {"exact": 4000, "prefix": 3000, "contains": 2000, "keyword": 1000}
     for m in mentions:
         q = m["q"]
@@ -400,7 +407,9 @@ def _extract_requested_question_number(message: str) -> Optional[str]:
         m = re.search(rf"(?:题\s*|题号\s*){qtoken}", msg_num)
         if m and not re.search(r"[-+*/^=]\s*$", msg_num[: m.start(1)]):
             return _normalize_question_number(m.group(1))
-        m = re.search(rf"(?:讲|聊|解释|辅导|说说|再讲|再聊)\s*第?\s*{qtoken}\s*题?", msg_num)
+        m = re.search(
+            rf"(?:讲|聊|解释|辅导|说说|再讲|再聊)\s*第?\s*{qtoken}\s*题?", msg_num
+        )
         if m:
             return _normalize_question_number(m.group(1))
 
@@ -461,7 +470,9 @@ def _pick_relook_image_url(focus_question: Dict[str, Any]) -> Optional[str]:
                     for r in regions:
                         if not isinstance(r, dict):
                             continue
-                        if (r.get("kind") or "").lower() == "figure" and r.get("slice_image_url"):
+                        if (r.get("kind") or "").lower() == "figure" and r.get(
+                            "slice_image_url"
+                        ):
                             return str(r.get("slice_image_url"))
                 slice_urls = p.get("slice_image_urls") or p.get("slice_image_url") or []
                 if isinstance(slice_urls, str) and slice_urls:
@@ -481,7 +492,9 @@ def _pick_relook_image_url(focus_question: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _qindex_has_slices_for_question(qindex: Dict[str, Any], question_number: str) -> bool:
+def _qindex_has_slices_for_question(
+    qindex: Dict[str, Any], question_number: str
+) -> bool:
     if not isinstance(qindex, dict) or not question_number:
         return False
     qs = qindex.get("questions")
@@ -502,7 +515,9 @@ def _qindex_has_slices_for_question(qindex: Dict[str, Any], question_number: str
         if isinstance(su, list) and any(str(u).strip() for u in su if u):
             return True
         regions = p.get("regions")
-        if isinstance(regions, list) and any(isinstance(r, dict) and r.get("slice_image_url") for r in regions):
+        if isinstance(regions, list) and any(
+            isinstance(r, dict) and r.get("slice_image_url") for r in regions
+        ):
             return True
     return False
 
@@ -549,15 +564,23 @@ def _user_requests_visual_check(message: str) -> bool:
     )
 
 
-def _should_relook_focus_question(user_msg: str, focus_question: Dict[str, Any]) -> bool:
+def _should_relook_focus_question(
+    user_msg: str, focus_question: Dict[str, Any]
+) -> bool:
     """Heuristic: decide whether to re-run Vision for a focused question (diagram/pattern issues)."""
     msg = (user_msg or "").strip()
     qcontent = str((focus_question or {}).get("question_content") or "")
     warnings = focus_question.get("warnings") or []
-    warnings_s = " ".join([str(w) for w in warnings]) if isinstance(warnings, list) else str(warnings)
+    warnings_s = (
+        " ".join([str(w) for w in warnings])
+        if isinstance(warnings, list)
+        else str(warnings)
+    )
 
     # Avoid repeated re-looks unless the user explicitly challenges recognition again.
-    already_relooked = bool((focus_question or {}).get("vision_recheck_text")) or bool((focus_question or {}).get("relook_error"))
+    already_relooked = bool((focus_question or {}).get("vision_recheck_text")) or bool(
+        (focus_question or {}).get("relook_error")
+    )
 
     # User explicitly challenges recognition / asks to see the exact problem.
     if any(
@@ -603,7 +626,7 @@ def _should_relook_focus_question(user_msg: str, focus_question: Dict[str, Any])
             "矩形",
             "正方体",
             "长方体",
-            "圆锥", 
+            "圆锥",
         )
     ):
         return True
@@ -627,7 +650,9 @@ def _should_relook_focus_question(user_msg: str, focus_question: Dict[str, Any])
                     continue
                 regions = p.get("regions")
                 if isinstance(regions, list) and any(
-                    isinstance(r, dict) and (r.get("kind") or "").lower() == "figure" and r.get("slice_image_url")
+                    isinstance(r, dict)
+                    and (r.get("kind") or "").lower() == "figure"
+                    and r.get("slice_image_url")
                     for r in regions
                 ):
                     has_figure_slice = True
@@ -636,20 +661,41 @@ def _should_relook_focus_question(user_msg: str, focus_question: Dict[str, Any])
         has_figure_slice = False
 
     if (focus_question or {}).get("visual_risk") is True or has_figure_slice:
-        if _extract_requested_question_number(msg) or _has_explicit_question_switch_intent(msg):
+        if _extract_requested_question_number(
+            msg
+        ) or _has_explicit_question_switch_intent(msg):
             return True
 
     # Pattern/diagram questions often need the visual example; if missing, relook.
     if "可能误读规律" in warnings_s or "可能误读公式" in warnings_s:
-        if ("→" not in qcontent) and ("顺序" not in qcontent) and ("规律" in qcontent or "出现" in qcontent):
+        if (
+            ("→" not in qcontent)
+            and ("顺序" not in qcontent)
+            and ("规律" in qcontent or "出现" in qcontent)
+        ):
             return True
 
     # Very short stems are suspicious for multi-part questions.
-    if len(qcontent) < 18 and any(k in qcontent for k in ("出现", "规律", "图", "示意")):
+    if len(qcontent) < 18 and any(
+        k in qcontent for k in ("出现", "规律", "图", "示意")
+    ):
         return True
 
     # Geometry/diagram disputes: if the user argues about angle/position relations, relook once.
-    if any(k in msg for k in ("同位角", "内错角", "位置关系", "像F", "像Z", "左侧", "右侧", "上方", "下方")):
+    if any(
+        k in msg
+        for k in (
+            "同位角",
+            "内错角",
+            "位置关系",
+            "像F",
+            "像Z",
+            "左侧",
+            "右侧",
+            "上方",
+            "下方",
+        )
+    ):
         if ("图" in qcontent) or ((focus_question or {}).get("visual_risk") is True):
             return True
 
@@ -684,7 +730,9 @@ async def _relook_focus_question_via_vision(
 
     # For large page images, proactively generate a lightweight proxy to reduce VFE timeouts.
     if image_source == "page":
-        proxy_urls = _create_proxy_image_urls(image_urls, session_id=session_id, prefix="vfe_proxy/")
+        proxy_urls = _create_proxy_image_urls(
+            image_urls, session_id=session_id, prefix="vfe_proxy/"
+        )
         if proxy_urls:
             image_urls = proxy_urls
             image_source = "page_proxy"
@@ -722,7 +770,9 @@ async def _relook_focus_question_via_vision(
     except asyncio.TimeoutError:
         # Retry once with proxy-sized images (helps provider-side timeouts on large slices).
         if image_source != "page_proxy":
-            proxy_urls = _create_proxy_image_urls(image_urls, session_id=session_id, prefix="vfe_proxy/")
+            proxy_urls = _create_proxy_image_urls(
+                image_urls, session_id=session_id, prefix="vfe_proxy/"
+            )
             if proxy_urls:
                 retry_budget = min(40.0, budget)
                 try:
@@ -764,7 +814,10 @@ async def _relook_focus_question_via_vision(
                     image_source=image_source,
                     critical_unknowns_hit=[],
                 )
-            return {"relook_error": f"VFE fail-closed: {gate.trigger}", "vfe_gate": gate.model_dump()}
+            return {
+                "relook_error": f"VFE fail-closed: {gate.trigger}",
+                "vfe_gate": gate.model_dump(),
+            }
     except Exception as e:
         gate = GateResult(
             passed=False,
@@ -778,16 +831,20 @@ async def _relook_focus_question_via_vision(
                 logger,
                 "vfe_gate",
                 request_id=request_id,
-                    session_id=session_id,
-                    focus_qn=str(question_number),
-                    scene_type=scene_type.value,
-                    trigger=gate.trigger,
-                    image_source=image_source,
-                    critical_unknowns_hit=[],
-                    error=str(e),
-                    level="warning",
-                )
-        return {"relook_error": f"VFE fail-closed: {gate.trigger}", "vfe_gate": gate.model_dump()}
+                session_id=session_id,
+                focus_qn=str(question_number),
+                scene_type=scene_type.value,
+                trigger=gate.trigger,
+                image_source=image_source,
+                critical_unknowns_hit=[],
+                error_type=e.__class__.__name__,
+                error=str(e),
+                level="warning",
+            )
+        return {
+            "relook_error": f"VFE fail-closed: {gate.trigger}",
+            "vfe_gate": gate.model_dump(),
+        }
 
     if not isinstance(facts, VisualFacts):
         gate = GateResult(
@@ -811,7 +868,10 @@ async def _relook_focus_question_via_vision(
                 repaired_json=bool(repaired_json),
                 level="warning",
             )
-        return {"relook_error": f"VFE fail-closed: {gate.trigger}", "vfe_gate": gate.model_dump()}
+        return {
+            "relook_error": f"VFE fail-closed: {gate.trigger}",
+            "vfe_gate": gate.model_dump(),
+        }
 
     gate = gate_visual_facts(
         facts=facts,
@@ -866,15 +926,25 @@ async def _relook_focus_question_via_vision(
         try:
             bundle = facts.facts
             for line in (bundle.lines or [])[:6]:
-                parts = [getattr(line, "name", None), getattr(line, "direction", None), getattr(line, "relative", None)]
+                parts = [
+                    getattr(line, "name", None),
+                    getattr(line, "direction", None),
+                    getattr(line, "relative", None),
+                ]
                 preview_lines.append("- " + " ".join([str(p) for p in parts if p]))
             for ang in (bundle.angles or [])[:6]:
                 parts = [
                     getattr(ang, "name", None),
-                    f"at {getattr(ang, 'at', None)}" if getattr(ang, "at", None) else None,
-                    f"between {','.join(getattr(ang, 'between', None) or [])}"
-                    if getattr(ang, "between", None)
-                    else None,
+                    (
+                        f"at {getattr(ang, 'at', None)}"
+                        if getattr(ang, "at", None)
+                        else None
+                    ),
+                    (
+                        f"between {','.join(getattr(ang, 'between', None) or [])}"
+                        if getattr(ang, "between", None)
+                        else None
+                    ),
                     f"side={getattr(ang, 'transversal_side', None)}",
                     f"between_lines={getattr(ang, 'between_lines', None)}",
                 ]
@@ -894,7 +964,11 @@ async def _relook_focus_question_via_vision(
         else VFE_CONF_MIN
     )
     if float(getattr(facts, "confidence", 0.0) or 0.0) < float(conf_threshold):
-        ws = focus_question.get("warnings") if isinstance(focus_question.get("warnings"), list) else []
+        ws = (
+            focus_question.get("warnings")
+            if isinstance(focus_question.get("warnings"), list)
+            else []
+        )
         payload["warnings"] = list(dict.fromkeys((ws or []) + ["VFE: low confidence"]))
 
     return payload
@@ -983,7 +1057,6 @@ def _format_math_for_display(text: str) -> str:
     return s
 
 
-
 def normalize_context_ids(raw_ids: Iterable[Any]) -> List[str | int]:
     """Normalize context ids: strip strings, cast digit strings to int, drop empties."""
     normalized: List[str | int] = []
@@ -1040,7 +1113,9 @@ def compact_wrong_items_for_chat(items: List[Dict[str, Any]]) -> List[Dict[str, 
     compacted: List[Dict[str, Any]] = []
     for item in items or []:
         ci: Dict[str, Any] = {
-            "question_number": item.get("question_number") or item.get("question_index") or item.get("id"),
+            "question_number": item.get("question_number")
+            or item.get("question_index")
+            or item.get("id"),
             "question_content": item.get("question_content") or item.get("question"),
             "student_answer": item.get("student_answer") or item.get("answer"),
             "reason": item.get("reason"),
@@ -1056,7 +1131,14 @@ def compact_wrong_items_for_chat(items: List[Dict[str, Any]]) -> List[Dict[str, 
             if isinstance(first_bad, dict):
                 ci["key_step"] = {
                     k: first_bad.get(k)
-                    for k in ["index", "verdict", "expected", "observed", "hint", "severity"]
+                    for k in [
+                        "index",
+                        "verdict",
+                        "expected",
+                        "observed",
+                        "hint",
+                        "severity",
+                    ]
                     if k in first_bad
                 }
         geom = item.get("geometry_check")
@@ -1066,7 +1148,9 @@ def compact_wrong_items_for_chat(items: List[Dict[str, Any]]) -> List[Dict[str, 
     return compacted
 
 
-def assistant_tail(history: List[Dict[str, Any]], max_messages: int = 3) -> List[Dict[str, Any]]:
+def assistant_tail(
+    history: List[Dict[str, Any]], max_messages: int = 3
+) -> List[Dict[str, Any]]:
     """Return last N assistant messages in chronological order for replay."""
     assistants = [m for m in history if m.get("role") == "assistant"]
     if not assistants:
@@ -1080,6 +1164,7 @@ def _init_chat_request(
     req: ChatRequest,
     headers: Any,
     last_event_id: Optional[str],
+    request_id_override: Optional[str] = None,
 ) -> tuple[str, str, str, float, float, Optional[Dict[str, Any]]]:
     """
     Initialize per-request identifiers and load session data (best-effort).
@@ -1087,9 +1172,15 @@ def _init_chat_request(
     """
     # Session restore or create; last_event_id is only used to recover session_id.
     session_id = req.session_id or last_event_id or f"session_{uuid.uuid4().hex[:8]}"
-    request_id = get_request_id_from_headers(headers) or f"req_{uuid.uuid4().hex[:12]}"
+    request_id = (
+        str(request_id_override).strip() if request_id_override else None
+    ) or get_request_id_from_headers(headers)
+    if not request_id:
+        request_id = f"req_{uuid.uuid4().hex[:12]}"
     user_id = require_user_id(
-        authorization=(headers.get("Authorization") if hasattr(headers, "get") else None),
+        authorization=(
+            headers.get("Authorization") if hasattr(headers, "get") else None
+        ),
         x_user_id=(headers.get("X-User-Id") if hasattr(headers, "get") else None),
     )
     started_m = time.monotonic()
@@ -1103,7 +1194,11 @@ def _format_session_history_for_display(session_data: Dict[str, Any]) -> None:
     hist = session_data.get("history") or []
     if isinstance(hist, list):
         for m in hist:
-            if isinstance(m, dict) and m.get("role") == "assistant" and isinstance(m.get("content"), str):
+            if (
+                isinstance(m, dict)
+                and m.get("role") == "assistant"
+                and isinstance(m.get("content"), str)
+            ):
                 m["content"] = _format_math_for_display(m.get("content") or "")
         session_data["history"] = hist
 
@@ -1139,6 +1234,12 @@ def _abort_with_assistant_message(
     question_candidates: Optional[List[str]] = None,
 ) -> None:
     session_data["history"].append({"role": "assistant", "content": message})
+    try:
+        from homework_agent.security.safety import sanitize_session_data_for_persistence
+
+        sanitize_session_data_for_persistence(session_data)
+    except Exception as e:
+        logger.debug(f"Sanitizing session for persistence failed (best-effort): {e}")
     save_session(session_id, session_data)
     payload = ChatResponse(
         messages=[{"role": "assistant", "content": message}],
@@ -1149,7 +1250,9 @@ def _abort_with_assistant_message(
     )
     chunks = [
         _sse_event("chat", payload.model_dump_json()),
-        _sse_event("done", json.dumps({"status": done_status, "session_id": session_id})),
+        _sse_event(
+            "done", json.dumps({"status": done_status, "session_id": session_id})
+        ),
     ]
     raise _ChatAbort(chunks=chunks)
 
@@ -1166,6 +1269,12 @@ def _abort_with_user_and_assistant_message(
 ) -> None:
     session_data["history"].append({"role": "user", "content": user_message})
     session_data["history"].append({"role": "assistant", "content": assistant_message})
+    try:
+        from homework_agent.security.safety import sanitize_session_data_for_persistence
+
+        sanitize_session_data_for_persistence(session_data)
+    except Exception as e:
+        logger.debug(f"Sanitizing session for persistence failed (best-effort): {e}")
     save_session(session_id, session_data)
     payload = ChatResponse(
         messages=[{"role": "assistant", "content": assistant_message}],
@@ -1176,7 +1285,9 @@ def _abort_with_user_and_assistant_message(
     )
     chunks = [
         _sse_event("chat", payload.model_dump_json()),
-        _sse_event("done", json.dumps({"status": done_status, "session_id": session_id})),
+        _sse_event(
+            "done", json.dumps({"status": done_status, "session_id": session_id})
+        ),
     ]
     raise _ChatAbort(chunks=chunks)
 
@@ -1214,6 +1325,16 @@ def _ensure_chat_session_or_abort(
             "updated_at": now_ts,
             "context_item_ids": normalize_context_ids(req.context_item_ids or []),
         }
+        try:
+            from homework_agent.security.safety import (
+                sanitize_session_data_for_persistence,
+            )
+
+            sanitize_session_data_for_persistence(session_data)
+        except Exception as e:
+            logger.debug(
+                f"Sanitizing new session for persistence failed (best-effort): {e}"
+            )
         save_session(session_id, session_data)
 
     return session_data
@@ -1233,7 +1354,11 @@ def _emit_initial_events(
         logger.debug(f"History formatting failed (best-effort): {e}")
 
     chunks: List[bytes] = [_sse_event("heartbeat", "{}")]
-    if last_event_id and (not has_explicit_session_id) and (session_data.get("history") or []):
+    if (
+        last_event_id
+        and (not has_explicit_session_id)
+        and (session_data.get("history") or [])
+    ):
         replay_msgs = assistant_tail(session_data.get("history") or [], max_messages=3)
         for msg in replay_msgs:
             payload = ChatResponse(
@@ -1289,10 +1414,9 @@ def _apply_user_corrections(
     wrong_item_context: Dict[str, Any],
     user_message: str,
 ) -> None:
-    focus_q_for_corr = (
-        wrong_item_context.get("focus_question_number")
-        or session_data.get("focus_question_number")
-    )
+    focus_q_for_corr = wrong_item_context.get(
+        "focus_question_number"
+    ) or session_data.get("focus_question_number")
     corr = _extract_user_correction(user_message)
     if not (focus_q_for_corr and corr):
         return
@@ -1333,7 +1457,15 @@ async def _best_effort_relook_if_needed(
             )
             if isinstance(patch, dict) and patch:
                 # Mark that VFE/relook was attempted in this turn (used for fail-closed gating).
-                if any(k in patch for k in ("vfe_gate", "visual_facts", "relook_error", "vision_recheck_text")):
+                if any(
+                    k in patch
+                    for k in (
+                        "vfe_gate",
+                        "visual_facts",
+                        "relook_error",
+                        "vision_recheck_text",
+                    )
+                ):
                     wrong_item_context["_vfe_attempted_this_turn"] = True
                 log_event(
                     logger,
@@ -1355,12 +1487,20 @@ async def _best_effort_relook_if_needed(
                     qbank_now = get_question_bank(session_id)
                     if isinstance(qbank_now, dict):
                         qs = qbank_now.get("questions")
-                        if isinstance(qs, dict) and str(fqnum) in qs and isinstance(qs.get(str(fqnum)), dict):
-                            qs[str(fqnum)].update({k: v for k, v in patch.items() if v is not None})
+                        if (
+                            isinstance(qs, dict)
+                            and str(fqnum) in qs
+                            and isinstance(qs.get(str(fqnum)), dict)
+                        ):
+                            qs[str(fqnum)].update(
+                                {k: v for k, v in patch.items() if v is not None}
+                            )
                             if patch.get("vision_recheck_text"):
                                 qs[str(fqnum)].pop("relook_error", None)
                             qbank_now["questions"] = qs
-                            qbank_now = _merge_bank_meta(qbank_now, {"updated_at": datetime.now().isoformat()})
+                            qbank_now = _merge_bank_meta(
+                                qbank_now, {"updated_at": datetime.now().isoformat()}
+                            )
                             save_question_bank(session_id, qbank_now)
                 except Exception as e:
                     logger.debug(f"Persisting relook patch to qbank failed: {e}")
@@ -1419,13 +1559,34 @@ def _diagram_guardrail_abort_if_needed(
     """Guardrail: prevent text-only hallucination for diagram disputes."""
     focus_obj = wrong_item_context.get("focus_question")
     msg = (req.question or "").strip()
-    asking_diagram = any(k in msg for k in ("看不到图", "没看到图", "同位角", "内错角", "位置关系", "像F", "像Z", "如图", "看图"))
+    asking_diagram = any(
+        k in msg
+        for k in (
+            "看不到图",
+            "没看到图",
+            "同位角",
+            "内错角",
+            "位置关系",
+            "像F",
+            "像Z",
+            "如图",
+            "看图",
+        )
+    )
     if not (asking_diagram and isinstance(focus_obj, dict)):
         return
     qcontent = str(focus_obj.get("question_content") or "")
-    likely_needs_image = (focus_obj.get("visual_risk") is True) or ("如图" in qcontent) or ("图" in qcontent)
+    likely_needs_image = (
+        (focus_obj.get("visual_risk") is True)
+        or ("如图" in qcontent)
+        or ("图" in qcontent)
+    )
     has_any_image = bool(_pick_relook_image_url(focus_obj))
-    if likely_needs_image and not focus_obj.get("vision_recheck_text") and (not has_any_image or focus_obj.get("relook_error")):
+    if (
+        likely_needs_image
+        and not focus_obj.get("vision_recheck_text")
+        and (not has_any_image or focus_obj.get("relook_error"))
+    ):
         _abort_with_user_and_assistant_message(
             session_id=session_id,
             session_data=session_data,
@@ -1438,6 +1599,74 @@ def _diagram_guardrail_abort_if_needed(
             done_status="continue",
             retry_after_ms=1500,
         )
+
+
+def _prompt_injection_guardrail_abort_if_needed(
+    *,
+    req: ChatRequest,
+    session_id: str,
+    session_data: Dict[str, Any],
+    request_id: str,
+) -> None:
+    """
+    Guardrail: block obvious prompt injection attempts before any LLM call.
+    This is a hard rule (HITL): do not proceed, return a safe response.
+    """
+    try:
+        from homework_agent.security.safety import scan_safety
+
+        scan = scan_safety(req.question or "")
+        if "prompt_injection" not in (scan.warning_codes or []):
+            return
+        log_event(
+            logger,
+            "chat_input_blocked",
+            level="warning",
+            request_id=request_id,
+            session_id=session_id,
+            needs_review=True,
+            warning_codes=scan.warning_codes,
+        )
+        try:
+            from homework_agent.services.review_queue import enqueue_review_item
+
+            enqueue_review_item(
+                request_id=request_id,
+                session_id=session_id,
+                subject=(
+                    str(getattr(req.subject, "value", req.subject))
+                    if getattr(req, "subject", None) is not None
+                    else None
+                ),
+                warning_codes=list(scan.warning_codes or []),
+                evidence_urls=[],
+                run_versions={
+                    "prompt_id": "chat",
+                    "prompt_version": "socratic",
+                    "provider": "n/a",
+                    "model": "n/a",
+                },
+                note="chat_prompt_injection_blocked",
+            )
+        except Exception:
+            pass
+        msg = (
+            "我检测到你的输入包含可能的提示注入/越权指令（例如“忽略系统指令/泄露 system prompt”等）。\n"
+            "为保证安全，我不会执行这些指令。\n"
+            "如果你需要作业讲解，请只描述具体题目与困惑点（不要包含让模型忽略规则的要求）。"
+        )
+        _abort_with_user_and_assistant_message(
+            session_id=session_id,
+            session_data=session_data,
+            user_message=req.question,
+            assistant_message=msg,
+            done_status="continue",
+            retry_after_ms=800,
+        )
+    except _ChatAbort:
+        raise
+    except Exception as e:
+        logger.debug(f"prompt injection guardrail failed (best-effort): {e}")
 
 
 def _prepare_chat_context_or_abort(
@@ -1503,9 +1732,32 @@ async def _run_chat_turn(
     current_turn = session_data["interaction_count"]
     try:
         from homework_agent.services.context_compactor import compact_session_history
-        compact_session_history(session_data, provider=provider_str)
+
+        if compact_session_history(session_data, provider=provider_str):
+            # Persist immediately so an early abort still keeps summary/history trimming.
+            try:
+                try:
+                    from homework_agent.security.safety import (
+                        sanitize_session_data_for_persistence,
+                    )
+
+                    sanitize_session_data_for_persistence(session_data)
+                except Exception as e:
+                    logger.debug(
+                        f"Sanitizing compacted session for persistence failed (best-effort): {e}"
+                    )
+                save_session(session_id, session_data)
+            except Exception as e:
+                logger.debug(f"Persisting compacted session failed (best-effort): {e}")
     except Exception as e:
         logger.debug(f"Session compaction failed (best-effort): {e}")
+
+    _prompt_injection_guardrail_abort_if_needed(
+        req=req,
+        session_id=session_id,
+        session_data=session_data,
+        request_id=request_id,
+    )
 
     wrong_item_context = _prepare_chat_context_or_abort(
         req=req,
@@ -1525,7 +1777,11 @@ async def _run_chat_turn(
     ):
         yield chunk
 
-    _apply_user_corrections(session_data=session_data, wrong_item_context=wrong_item_context, user_message=req.question)
+    _apply_user_corrections(
+        session_data=session_data,
+        wrong_item_context=wrong_item_context,
+        user_message=req.question,
+    )
 
     if "focus_question" not in wrong_item_context:
         _abort_with_assistant_message(
@@ -1566,10 +1822,14 @@ async def chat_stream(
     """
     llm_client = LLMClient()
 
-    session_id, request_id, user_id, started_m, now_ts, session_data = _init_chat_request(
-        req=req,
-        headers=request.headers,
-        last_event_id=last_event_id,
+    request_id_override = getattr(getattr(request, "state", None), "request_id", None)
+    session_id, request_id, user_id, started_m, now_ts, session_data = (
+        _init_chat_request(
+            req=req,
+            headers=request.headers,
+            last_event_id=last_event_id,
+            request_id_override=request_id_override,
+        )
     )
     log_event(
         logger,
@@ -1636,7 +1896,7 @@ async def chat_stream(
             )
         )
         yield f"event: error\ndata: {error_msg}\n\n".encode("utf-8")
-        yield b"event: done\ndata: {\"status\":\"error\"}\n\n"
+        yield b'event: done\ndata: {"status":"error"}\n\n'
 
 
 @router.post("/chat")

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -126,4 +125,3 @@ def load_default_tools() -> None:
         import homework_agent.tools  # noqa: F401
     except Exception as e:
         logger.debug(f"Loading default tools failed: {e}")
-

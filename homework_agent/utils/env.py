@@ -31,4 +31,3 @@ def load_project_dotenv() -> bool:
         if p.exists():
             loaded = bool(load_dotenv(p, override=False)) or loaded
     return loaded
-

@@ -1,0 +1,15 @@
+{
+  "note": "Live baseline placeholder. Refresh via workflow_dispatch: live_quality_gate (update_baseline=true) using your private live replay dataset.",
+  "metrics_mode": "live",
+  "total_samples": 0,
+  "success_count": 0,
+  "error_count": 0,
+  "success_rate": 0.0,
+  "needs_review_rate": 0.0,
+  "latency": { "p50_ms": 0, "p95_ms": 0, "min_ms": 0, "max_ms": 0, "avg_ms": 0 },
+  "confidence": { "p50": 0, "p95": 0, "min": 0, "max": 0, "avg": 0 },
+  "iterations": { "avg": 0, "max": 0 },
+  "tokens": { "total": 0, "p50": 0, "p95": 0, "max": 0, "avg": 0 },
+  "verdicts": { "correct_total": 0, "incorrect_total": 0, "uncertain_total": 0 }
+}
+

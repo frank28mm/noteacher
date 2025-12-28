@@ -1,0 +1,20 @@
+{
+  "sample_id": "sample_005_multi_question",
+  "description": "Minimal offline replay sample (multi-question page). Embedded 1x1 PNG placeholder.",
+  "subject": "math",
+  "input": {
+    "or_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6nP0UAAAAASUVORK5CYII=",
+    "mode": "embedded_base64"
+  },
+  "expected_output": {
+    "must_have_fields": ["results", "summary", "warnings"],
+    "allow_uncertain": true
+  },
+  "metadata": {
+    "difficulty": "medium",
+    "category": "multi_question",
+    "question_count": 4,
+    "allow_uncertain": true
+  },
+  "tags": ["offline", "multi_question"]
+}

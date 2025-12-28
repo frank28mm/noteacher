@@ -4,12 +4,16 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from homework_agent.models.schemas import ImageRef, Subject, VisionProvider
 from homework_agent.models.vision_facts import GateResult, SceneType, VisualFacts
 from homework_agent.services.vision import VisionClient
-from homework_agent.services.vision_prompts import BASE_VFE_PROMPT, PLUGIN_PROMPTS, STUB_SCENES
+from homework_agent.services.vision_prompts import (
+    BASE_VFE_PROMPT,
+    PLUGIN_PROMPTS,
+    STUB_SCENES,
+)
 from homework_agent.utils.url_image_helpers import _download_as_data_uri
 
 logger = logging.getLogger(__name__)
@@ -44,7 +48,14 @@ def _coerce_list_str(v: Any) -> List[str]:
                 continue
             if isinstance(it, dict):
                 parts: List[str] = []
-                for key in ("name", "text", "label", "position", "relative", "description"):
+                for key in (
+                    "name",
+                    "text",
+                    "label",
+                    "position",
+                    "relative",
+                    "description",
+                ):
                     val = it.get(key)
                     if val:
                         parts.append(str(val).strip())
@@ -117,7 +128,9 @@ def _looks_like_visual_facts(obj: Dict[str, Any]) -> bool:
     return any(k in obj for k in ("facts", "scene_type", "confidence"))
 
 
-def _normalize_visual_facts_obj(obj: Any, scene_type: SceneType) -> Optional[VisualFacts]:
+def _normalize_visual_facts_obj(
+    obj: Any, scene_type: SceneType
+) -> Optional[VisualFacts]:
     if not isinstance(obj, dict):
         return None
 
@@ -138,9 +151,15 @@ def _normalize_visual_facts_obj(obj: Any, scene_type: SceneType) -> Optional[Vis
         if "spatial_facts" in facts_obj and "spatial" not in facts_obj:
             facts_obj["spatial"] = facts_obj.get("spatial_facts")
 
-        facts_obj["lines"] = _coerce_list_dict(facts_obj.get("lines"), _coerce_line_fact)
-        facts_obj["points"] = _coerce_list_dict(facts_obj.get("points"), _coerce_point_fact)
-        facts_obj["angles"] = _coerce_list_dict(facts_obj.get("angles"), _coerce_angle_fact)
+        facts_obj["lines"] = _coerce_list_dict(
+            facts_obj.get("lines"), _coerce_line_fact
+        )
+        facts_obj["points"] = _coerce_list_dict(
+            facts_obj.get("points"), _coerce_point_fact
+        )
+        facts_obj["angles"] = _coerce_list_dict(
+            facts_obj.get("angles"), _coerce_angle_fact
+        )
         facts_obj["labels"] = _coerce_list_str(facts_obj.get("labels"))
         facts_obj["spatial"] = _coerce_list_str(facts_obj.get("spatial"))
 
@@ -167,7 +186,9 @@ def _normalize_visual_facts_obj(obj: Any, scene_type: SceneType) -> Optional[Vis
         pass
 
     if scene_type in STUB_SCENES:
-        facts.warnings = list(dict.fromkeys((facts.warnings or []) + ["plugin_is_stub"]))
+        facts.warnings = list(
+            dict.fromkeys((facts.warnings or []) + ["plugin_is_stub"])
+        )
         if facts.confidence <= 0.0:
             facts.confidence = 0.5
 
@@ -190,15 +211,33 @@ def detect_scene_type(
     msg = msg.replace("（", "(").replace("）", ")")
 
     if subject == Subject.MATH:
-        if any(k in msg for k in ("∠", "角", "平行", "垂直", "几何", "同位角", "内错角", "同旁内角", "位置关系", "如图")):
+        if any(
+            k in msg
+            for k in (
+                "∠",
+                "角",
+                "平行",
+                "垂直",
+                "几何",
+                "同位角",
+                "内错角",
+                "同旁内角",
+                "位置关系",
+                "如图",
+            )
+        ):
             return SceneType.MATH_GEOMETRY_2D
-        if any(k in msg for k in ("函数图像", "二次函数", "坐标系", "坐标轴", "抛物线")):
+        if any(
+            k in msg for k in ("函数图像", "二次函数", "坐标系", "坐标轴", "抛物线")
+        ):
             return SceneType.MATH_FUNCTION_GRAPH
         if any(k in msg for k in ("表格", "统计图", "折线图", "柱状图", "扇形图")):
             return SceneType.MATH_CHART_OR_TABLE
         if any(k in msg for k in ("规律", "数列", "图形拼接", "箭头", "→")):
             return SceneType.MATH_SEQUENCE_OR_PATTERN
-        if any(k in msg for k in ("立体", "长方体", "正方体", "圆锥", "圆柱", "棱", "面")):
+        if any(
+            k in msg for k in ("立体", "长方体", "正方体", "圆锥", "圆柱", "棱", "面")
+        ):
             return SceneType.MATH_GEOMETRY_3D
 
         if visual_risk or has_figure_slice:
@@ -206,9 +245,10 @@ def detect_scene_type(
         return SceneType.UNKNOWN
 
     # English
-    if any(k.lower() in msg.lower() for k in ("map", "route", "north", "south", "east", "west")) or any(
-        k in msg for k in ("地图", "路线", "方向", "路标", "N", "S", "E", "W")
-    ):
+    if any(
+        k.lower() in msg.lower()
+        for k in ("map", "route", "north", "south", "east", "west")
+    ) or any(k in msg for k in ("地图", "路线", "方向", "路标", "N", "S", "E", "W")):
         return SceneType.EN_MAP_OR_ROUTE
     if any(k.lower() in msg.lower() for k in ("flow", "diagram", "process")) or any(
         k in msg for k in ("流程图", "示意图", "箭头", "步骤")
@@ -218,7 +258,9 @@ def detect_scene_type(
         k in msg for k in ("表格", "统计图", "柱状图", "折线图")
     ):
         return SceneType.EN_CHART_OR_TABLE
-    if any(k.lower() in msg.lower() for k in ("label", "picture")) or any(k in msg for k in ("看图", "图片", "标注")):
+    if any(k.lower() in msg.lower() for k in ("label", "picture")) or any(
+        k in msg for k in ("看图", "图片", "标注")
+    ):
         return SceneType.EN_LABELLED_PICTURE
 
     return SceneType.UNKNOWN
@@ -243,7 +285,9 @@ def select_vfe_images(*, focus_question: Dict[str, Any]) -> VFEImageSelection:
                 for r in regions:
                     if not isinstance(r, dict):
                         continue
-                    if (r.get("kind") or "").lower() == "figure" and r.get("slice_image_url"):
+                    if (r.get("kind") or "").lower() == "figure" and r.get(
+                        "slice_image_url"
+                    ):
                         return str(r.get("slice_image_url")), "slice_figure"
             su = p.get("slice_image_urls") or p.get("slice_image_url")
             if isinstance(su, str) and su.strip():
@@ -327,14 +371,20 @@ def _facts_look_like_reasoning(facts: VisualFacts) -> bool:
     blobs: List[str] = []
 
     def add(*parts: Optional[str]) -> None:
-        chunk = " ".join([str(p).strip() for p in parts if p is not None and str(p).strip()])
+        chunk = " ".join(
+            [str(p).strip() for p in parts if p is not None and str(p).strip()]
+        )
         if chunk:
             blobs.append(chunk)
 
     try:
         bundle = facts.facts
         for line in bundle.lines or []:
-            add(getattr(line, "name", None), getattr(line, "direction", None), getattr(line, "relative", None))
+            add(
+                getattr(line, "name", None),
+                getattr(line, "direction", None),
+                getattr(line, "relative", None),
+            )
         for point in bundle.points or []:
             add(getattr(point, "name", None), getattr(point, "relative", None))
         for ang in bundle.angles or []:
@@ -420,7 +470,9 @@ def _critical_unknown_tokens(*, scene_type: SceneType, user_text: str) -> List[s
     tokens = set(_normalize_tokens(msg))
 
     if scene_type == SceneType.MATH_GEOMETRY_2D:
-        asking_position = any(k in msg for k in ("位置关系", "上方", "下方", "左侧", "右侧", "像F", "像Z"))
+        asking_position = any(
+            k in msg for k in ("位置关系", "上方", "下方", "左侧", "右侧", "像F", "像Z")
+        )
         asking_angle_type = any(k in msg for k in ("同位角", "内错角", "同旁内角"))
         asking_parallel = any(k in msg for k in ("平行", "垂直", "截线", "被截线"))
         if asking_position or asking_angle_type or asking_parallel:
@@ -436,7 +488,19 @@ def _critical_unknown_tokens(*, scene_type: SceneType, user_text: str) -> List[s
 
     if scene_type in (SceneType.MATH_CHART_OR_TABLE, SceneType.EN_CHART_OR_TABLE):
         # For charts, we mainly require headers/units/legend when interpreting.
-        if any(k in msg for k in ("读图", "表格", "统计图", "比较", "变化", "趋势", "increase", "decrease")):
+        if any(
+            k in msg
+            for k in (
+                "读图",
+                "表格",
+                "统计图",
+                "比较",
+                "变化",
+                "趋势",
+                "increase",
+                "decrease",
+            )
+        ):
             return ["CHART_HEADERS_OR_UNITS"]
         return []
 
@@ -446,9 +510,9 @@ def _critical_unknown_tokens(*, scene_type: SceneType, user_text: str) -> List[s
         return []
 
     if scene_type == SceneType.EN_MAP_OR_ROUTE:
-        if any(k in msg.lower() for k in ("route", "direction", "north", "south")) or any(
-            k in msg for k in ("路线", "方向")
-        ):
+        if any(
+            k in msg.lower() for k in ("route", "direction", "north", "south")
+        ) or any(k in msg for k in ("路线", "方向")):
             return ["ROUTE_OR_DIRECTIONS"]
         return []
 
@@ -480,7 +544,9 @@ def gate_visual_facts(
         )
 
     # Stub scenes are treated as low-confidence until fully implemented.
-    is_stub = bool(scene_type in STUB_SCENES or "plugin_is_stub" in (facts.warnings or []))
+    is_stub = bool(
+        scene_type in STUB_SCENES or "plugin_is_stub" in (facts.warnings or [])
+    )
     if is_stub and visual_risk:
         return GateResult(
             passed=False,
@@ -494,7 +560,9 @@ def gate_visual_facts(
     threshold = _confidence_threshold(scene_type)
     if float(getattr(facts, "confidence", 0.0) or 0.0) < float(threshold):
         # For unknown scenes, allow pass only when confidence is strong.
-        if scene_type == SceneType.UNKNOWN and float(getattr(facts, "confidence", 0.0) or 0.0) >= float(VFE_CONF_STRONG):
+        if scene_type == SceneType.UNKNOWN and float(
+            getattr(facts, "confidence", 0.0) or 0.0
+        ) >= float(VFE_CONF_STRONG):
             return GateResult(passed=True, repaired_json=repaired_json)
         return GateResult(
             passed=False,
@@ -505,7 +573,11 @@ def gate_visual_facts(
         )
 
     # figure missing in risky case
-    if visual_risk and scene_type != SceneType.UNKNOWN and image_source not in {"slice_figure", "slice_question"}:
+    if (
+        visual_risk
+        and scene_type != SceneType.UNKNOWN
+        and image_source not in {"slice_figure", "slice_question"}
+    ):
         return GateResult(
             passed=False,
             trigger="figure_missing",
@@ -517,7 +589,7 @@ def gate_visual_facts(
     # Critical unknown hits
     critical = _critical_unknown_tokens(scene_type=scene_type, user_text=user_text)
     unknown_tokens: List[str] = []
-    for u in (facts.unknowns or []):
+    for u in facts.unknowns or []:
         unknown_tokens.extend(_normalize_tokens(str(u)))
     unknown_tokens = list(dict.fromkeys(unknown_tokens))
 
@@ -527,7 +599,7 @@ def gate_visual_facts(
     if scene_type == SceneType.MATH_GEOMETRY_2D and visual_risk:
         try:
             angle_map: Dict[str, Any] = {}
-            for ang in (facts.facts.angles or []):
+            for ang in facts.facts.angles or []:
                 token = _angle_token_for_name(getattr(ang, "name", None))
                 if token and token not in angle_map:
                     angle_map[token] = ang

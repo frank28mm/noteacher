@@ -1,12 +1,12 @@
 """
 Test telemetry collection and analysis.
 """
+
 from __future__ import annotations
 
 from homework_agent.utils.telemetry import (
     LoopIterationTelemetry,
     AutonomousAgentTelemetry,
-    TelemetryCollector,
     TelemetryAnalyzer,
 )
 
@@ -125,7 +125,9 @@ def test_latency_percentiles_calculation():
             incorrect_count=0,
             uncertain_count=0,
         )
-        for i, ms in enumerate([5000, 10000, 15000, 20000, 25000, 30000, 35000, 40000, 45000, 50000])
+        for i, ms in enumerate(
+            [5000, 10000, 15000, 20000, 25000, 30000, 35000, 40000, 45000, 50000]
+        )
     ]
 
     percentiles = TelemetryAnalyzer.calculate_latency_percentiles(telemetries)

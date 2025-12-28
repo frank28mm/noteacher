@@ -32,4 +32,3 @@ class PromptManager:
 def get_prompt_manager() -> PromptManager:
     base_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts")
     return PromptManager(base_dir)
-

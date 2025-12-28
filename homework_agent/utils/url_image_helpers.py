@@ -37,7 +37,9 @@ def _strip_base64_prefix(data: str) -> str:
 
 def _first_public_image_url(images: List[Any]) -> Optional[str]:
     for img in images or []:
-        url = getattr(img, "url", None) or (img.get("url") if isinstance(img, dict) else None)
+        url = getattr(img, "url", None) or (
+            img.get("url") if isinstance(img, dict) else None
+        )
         if url:
             return str(url)
     return None
@@ -51,7 +53,9 @@ def _probe_url_head(url: str) -> Optional[str]:
         import httpx
 
         # Don't inherit local proxy env for public URL probes.
-        with httpx.Client(timeout=5.0, follow_redirects=True, trust_env=False) as client:
+        with httpx.Client(
+            timeout=5.0, follow_redirects=True, trust_env=False
+        ) as client:
             r = client.head(url)
         ct = r.headers.get("content-type")
         cl = r.headers.get("content-length")
@@ -70,12 +74,19 @@ def _download_as_data_uri(url: str) -> Optional[str]:
         import httpx
 
         # Avoid local proxy interference when downloading public object URLs.
-        with httpx.Client(timeout=20.0, follow_redirects=True, trust_env=False) as client:
+        with httpx.Client(
+            timeout=20.0, follow_redirects=True, trust_env=False
+        ) as client:
             r = client.get(url)
         if r.status_code != 200:
-            raise httpx.HTTPStatusError(f"HTTP {r.status_code}", request=r.request, response=r)
+            raise httpx.HTTPStatusError(
+                f"HTTP {r.status_code}", request=r.request, response=r
+            )
 
-        content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip() or "image/jpeg"
+        content_type = (
+            r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+            or "image/jpeg"
+        )
         data = r.content or b""
         if not data:
             return None
@@ -89,6 +100,7 @@ def _download_as_data_uri(url: str) -> Optional[str]:
     # Try using Supabase SDK for private URLs (e.g., Supabase storage URLs)
     try:
         from homework_agent.utils.supabase_client import get_storage_client
+
         storage = get_storage_client()
 
         # Extract bucket and path from Supabase URL
@@ -130,4 +142,3 @@ def _is_provider_image_fetch_issue(err: Exception) -> bool:
             "20040",
         )
     )
-

@@ -108,7 +108,11 @@ def should_create_slices_for_bank(bank: Dict[str, Any]) -> bool:
         return False
     subject_raw = bank.get("subject")
     try:
-        subject = subject_raw if isinstance(subject_raw, Subject) else Subject(str(subject_raw))
+        subject = (
+            subject_raw
+            if isinstance(subject_raw, Subject)
+            else Subject(str(subject_raw))
+        )
     except Exception:
         return False
 
@@ -142,7 +146,11 @@ def pick_question_numbers_for_slices(bank: Dict[str, Any]) -> List[str]:
         return []
     subject_raw = bank.get("subject")
     try:
-        subject = subject_raw if isinstance(subject_raw, Subject) else Subject(str(subject_raw))
+        subject = (
+            subject_raw
+            if isinstance(subject_raw, Subject)
+            else Subject(str(subject_raw))
+        )
     except Exception:
         return []
 

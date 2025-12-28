@@ -66,17 +66,13 @@ homework_agent/
 graph TD
     A[接收GradeRequest] --> B{验证输入}
     B -->|失败| C[返回错误]
-    B -->|成功| D[OpenCV预处理 + 统一阅卷Agent]
-    D --> E{识别成功？}
-    E -->|失败| F[返回视觉识别失败错误]
-    E -->|成功| G[选择批改策略]
-    G --> H{科目？}
-    H -->|数学| I[数学批改链]
-    H -->|英语| J[英语批改链]
-    I --> K[生成结构化结果]
-    J --> K
-    K --> L[返回GradeResponse]
-    L --> M{需要辅导？}
+    B -->|成功| D[预处理/切片(可选)] 
+    D --> E[Autonomous Grade Agent: 规划→工具→反思→汇总]
+    E --> F{判定完成？}
+    F -->|失败| G[返回批改失败/needs_review]
+    F -->|成功| H[生成结构化结果]
+    H --> I[返回GradeResponse]
+    I --> M{需要辅导？}
     M -->|否| N[结束]
     M -->|是| O[启动Chat会话（已批改）]
     O --> P[Chat 页面输出：识别原文 + 判断依据 + 批改结论]
@@ -89,7 +85,7 @@ graph TD
 
 | 阶段 | 输入 | 处理 | 输出 |
 |------|------|------|------|
-| **批改** | GradeRequest(images, subject, mode) | OpenCV 预处理 → 统一阅卷 Agent | GradeResponse(wrong_items, summary) |
+| **批改** | GradeRequest(images, subject, mode) | 预处理/切片（可选）→ Autonomous Grade Agent | GradeResponse(wrong_items, summary) |
 | **辅导** | ChatRequest(history, question) | 上下文理解 → 引导策略 | ChatResponse(messages) 或 SSE流 |
 | **会话** | session_id | 状态管理 | 持久化上下文 |
 
@@ -162,42 +158,43 @@ graph TD
 
 ### 2.2 阶段2：图像处理与内容识别
 
-#### SOP-2.1: OpenCV 预处理与切片
-**工具（MVP 推荐）**: OpenCV 预处理 + qindex 切片
+#### SOP-2.1: 预处理与切片（可选）
+**工具（可选增强）**: 预处理流水线（qindex cache / VLM locator / OpenCV fallback） + qindex 切片
 
-- **固定前置流水线**：去噪、增强、倾斜矫正、尺寸规范化。
-- **切片策略**：优先 figure + question 双图；必要时回退整页。
+- **默认策略**：best-effort 预处理与切片；不可用时允许跳过，必须通过 `warnings` 解释降级原因。
+- **切片策略**：优先 figure + question 双图；必要时回退整页（并写入风险提示）。
 
 **执行方式（重要）**：
 - 题块 bbox + 切片裁剪/上传属于重任务，**不得在 API 主进程内同步执行**。
 - `/grade` 完成后仅负责 **enqueue** 一个 qindex 任务到 Redis 队列（默认 `qindex:queue`）。
-- 独立 worker `python -m homework_agent.workers.qindex_worker` 负责消费队列，生成 bbox/slice 并写回 `qindex:{session_id}`。
+- 独立 worker `python3 -m homework_agent.workers.qindex_worker` 负责消费队列，生成 bbox/slice 并写回 `qindex:{session_id}`。
 - chat 侧会把该题切片 refs 透传为 `focus_image_urls/focus_image_source`（用于 UI 渲染）。
 - 当题目无法定位时，SSE 会返回 `question_candidates`（候选题目列表），前端可渲染为快捷按钮引导用户切题。
 
-### 2.1.1.1 统一阅卷 Agent（Vision + Grade 合一）
-- 入口：`homework_agent/services/vision_grade_agent.py`
-- 触发：**/grade 阶段**（单次调用完成识别 + 理解 + 批改）
-- 目标：输出 `vision_raw_text + judgment_basis + grading_result`，避免识别与判题拆分导致信息丢失。
-- qbank 持久化字段：
+### 2.1.1.1 Autonomous Grade Agent（规划→工具→反思→汇总）
+- 入口：`homework_agent/services/autonomous_agent.py`
+- 触发：**/grade 阶段**（单次调用完成识别/工具编排/判题汇总）
+- 目标：通过“规划→工具→反思→汇总”的闭环，在成本/时延护栏内尽量产出可审计的结构化结果；当证据不足或触发安全/预算护栏时，走 `needs_review` 降级。
+- qbank 持久化字段（用于 chat 复盘/路由）：
   - `qbank.questions[q_num].judgment_basis`（判定依据短句，供 chat 直接展示）
   - `qbank.questions[q_num].question_aliases`（非数字题名别名，用于 chat 路由）
 
 **处理步骤**:
 ```python
-1. OpenCV 前置流水线:
-   ✅ 去噪/增强/矫正（固定流程）
-   ✅ figure/question 切片优先（双图输入）
+1. 预处理/切片（可选增强）:
+   ✅ 优先使用已有 qindex/切片缓存（若可用）
+   ✅ 必要时用 VLM locator / OpenCV fallback 生成 ROI（best-effort）
 
-2. 统一阅卷 Agent:
-   ✅ 识别题干与作答（vision_raw_text）
-   ✅ 结合图形理解与规则判定（judgment_basis）
-   ✅ 输出结构化判定（verdict + reason + warnings）
+2. Autonomous Grade Agent:
+   ✅ Planner 规划：选择需要的工具（qindex_fetch/vision_roi_detect/ocr_fallback/math_verify…）
+   ✅ Tools 执行：获得 OCR/ROI/校验证据（工具输出需带 ToolResult 统一字段）
+   ✅ Reflect 反思：评估证据是否足够；不足则重规划，直到达标或触发护栏
+   ✅ Aggregate 汇总：输出结构化判定（verdict + reason + judgment_basis + warnings）
 ```
 
 **质量控制**:
 - 非作业图 → rejected
-- 视觉信息不足 → verdict=uncertain + warnings + judgment_basis 说明依据来源
+- 证据不足/触发护栏 → verdict=uncertain + warnings + judgment_basis 说明依据来源，并触发 needs_review
 
 ### 2.3 阶段3：批改执行
 
@@ -712,14 +709,19 @@ graph TD
 uvicorn homework_agent.main:app --host 127.0.0.1 --port 8000 --reload
 
 # 运行测试
-python -m pytest -q
+python3 -m pytest -q
 
 # 启动 qindex worker（需要 Redis）
-python -m homework_agent.workers.qindex_worker
+python3 -m homework_agent.workers.qindex_worker
 
 # 验证脚本（按需）
 ./.venv/bin/pytest -q
 ```
+
+### A.4 开发规则（团队约束）
+
+- 工程级开发规则（P0→P2：评估门禁 / CI 分阶段 / Observe→Act→Evolve）以 `docs/development_rules.md` 为准。
+- 可执行速查卡（命令 + checklist）以 `docs/development_rules_quickref.md` 为准。
 
 ### A.2 配置参数
 

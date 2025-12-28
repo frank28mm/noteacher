@@ -4,11 +4,14 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from homework_agent.core.qbank import _normalize_question_number
-from homework_agent.core.slice_policy import analyze_visual_risk, pick_question_numbers_for_slices, should_create_slices_for_bank
+from homework_agent.core.slice_policy import (
+    analyze_visual_risk,
+    pick_question_numbers_for_slices,
+    should_create_slices_for_bank,
+)
 from homework_agent.models.schemas import ChatRequest, ChatResponse
 from homework_agent.services.llm import LLMClient
 from homework_agent.api.session import (
@@ -18,22 +21,22 @@ from homework_agent.api.session import (
     save_question_bank,
     save_question_index,
     save_session,
-    _merge_bank_meta,
     _now_ts,
 )
 from homework_agent.utils.observability import log_event, trace_span
-from homework_agent.utils.submission_store import load_qindex_image_refs, resolve_submission_for_session
+from homework_agent.utils.submission_store import (
+    load_qindex_image_refs,
+    resolve_submission_for_session,
+)
 
 # Keep abort type + small helpers in chat.py (avoid exception-type mismatch across modules).
 from homework_agent.api.chat import (  # noqa: E402
     _abort_with_assistant_message,
-    _abort_with_user_and_assistant_message,
     _extract_requested_question_number,
     _format_math_for_display,
     _has_explicit_question_switch_intent,
     _qindex_has_slices_for_question,
     _select_question_number_from_text,
-    _sse_event,
     _user_requests_visual_check,
 )
 
@@ -96,13 +99,16 @@ def _load_qindex_refs_from_db(
             request_id=request_id,
             session_id=session_id,
             question_number=str(question_number),
+            error_type=e.__class__.__name__,
             error=str(e),
             level="warning",
         )
         return None
 
 
-def _extract_focus_image_urls(*, wrong_item_context: Dict[str, Any]) -> tuple[Optional[List[str]], Optional[str]]:
+def _extract_focus_image_urls(
+    *, wrong_item_context: Dict[str, Any]
+) -> tuple[Optional[List[str]], Optional[str]]:
     """
     Best-effort: pick a representative image URL for the current focus question to:
     - render in UI (demo: show in chat bubbles)
@@ -123,7 +129,9 @@ def _extract_focus_image_urls(*, wrong_item_context: Dict[str, Any]) -> tuple[Op
                 for r in regions:
                     if not isinstance(r, dict):
                         continue
-                    if (r.get("kind") or "").lower() == "figure" and r.get("slice_image_url"):
+                    if (r.get("kind") or "").lower() == "figure" and r.get(
+                        "slice_image_url"
+                    ):
                         return str(r.get("slice_image_url")), "slice_figure"
 
             slice_urls = p.get("slice_image_urls")
@@ -189,7 +197,9 @@ async def _run_mandatory_visual_path(
 
     # 1) Ensure qindex slices (for focused question)
     qindex_now = get_question_index(session_id) if session_id else None
-    ready = isinstance(qindex_now, dict) and _qindex_has_slices_for_question(qindex_now, str(fqnum))
+    ready = isinstance(qindex_now, dict) and _qindex_has_slices_for_question(
+        qindex_now, str(fqnum)
+    )
     if not ready:
         db_refs = _load_qindex_refs_from_db(
             session_id=session_id,
@@ -216,8 +226,16 @@ async def _run_mandatory_visual_path(
                     queued_already = True
 
             qbank_now = get_question_bank(session_id) if session_id else None
-            page_urls = (qbank_now or {}).get("page_image_urls") if isinstance(qbank_now, dict) else None
-            allow = pick_question_numbers_for_slices(qbank_now) if isinstance(qbank_now, dict) else []
+            page_urls = (
+                (qbank_now or {}).get("page_image_urls")
+                if isinstance(qbank_now, dict)
+                else None
+            )
+            allow = (
+                pick_question_numbers_for_slices(qbank_now)
+                if isinstance(qbank_now, dict)
+                else []
+            )
             fq = str(fqnum).strip()
             if fq and fq not in allow:
                 allow = [*allow, fq] if allow else [fq]
@@ -227,10 +245,16 @@ async def _run_mandatory_visual_path(
                     session_id,
                     [str(u) for u in page_urls if u],
                     question_numbers=allow,
+                    request_id=request_id,
                 ):
-                    save_question_index(session_id, {"questions": {}, "warnings": ["qindex queued (chat)"]})
+                    save_question_index(
+                        session_id,
+                        {"questions": {}, "warnings": ["qindex queued (chat)"]},
+                    )
                 else:
-                    save_qindex_placeholder(session_id, "qindex skipped: redis_unavailable")
+                    save_qindex_placeholder(
+                        session_id, "qindex skipped: redis_unavailable"
+                    )
 
     # 2) Refresh image refs + cached facts into focus_obj
     qindex_now = get_question_index(session_id) if session_id else None
@@ -245,7 +269,11 @@ async def _run_mandatory_visual_path(
         qbank_now = get_question_bank(session_id) if session_id else None
         if isinstance(qbank_now, dict):
             qs = qbank_now.get("questions")
-            if isinstance(qs, dict) and str(fqnum) in qs and isinstance(qs.get(str(fqnum)), dict):
+            if (
+                isinstance(qs, dict)
+                and str(fqnum) in qs
+                and isinstance(qs.get(str(fqnum)), dict)
+            ):
                 cached = qs.get(str(fqnum)) or {}
                 if isinstance(cached, dict):
                     focus_obj.update({k: v for k, v in cached.items() if v is not None})
@@ -272,7 +300,11 @@ def _prepare_chat_context_or_abort(
     """
     # Chat 只能基于 /grade 交付的“题库快照”对话；缺失则直接提示先批改，禁止编造。
     qbank = get_question_bank(session_id) if session_id else None
-    if not (isinstance(qbank, dict) and isinstance(qbank.get("questions"), dict) and qbank.get("questions")):
+    if not (
+        isinstance(qbank, dict)
+        and isinstance(qbank.get("questions"), dict)
+        and qbank.get("questions")
+    ):
         log_event(
             logger,
             "chat_qbank_missing",
@@ -291,7 +323,9 @@ def _prepare_chat_context_or_abort(
         )
 
     bank_questions = qbank.get("questions")
-    bank_questions_str: Dict[str, Any] = {str(k): v for k, v in (bank_questions or {}).items()}
+    bank_questions_str: Dict[str, Any] = {
+        str(k): v for k, v in (bank_questions or {}).items()
+    }
     available_qnums = sorted(bank_questions_str.keys(), key=len, reverse=True)
 
     wrong_item_context: Dict[str, Any] = {
@@ -308,7 +342,8 @@ def _prepare_chat_context_or_abort(
             candidates = [
                 k
                 for k in available_qnums
-                if str(k).startswith(f"{requested_qn}(") or str(k).startswith(requested_qn)
+                if str(k).startswith(f"{requested_qn}(")
+                or str(k).startswith(requested_qn)
             ]
             if candidates:
                 requested_qn = sorted(candidates, key=len)[0]
@@ -327,7 +362,11 @@ def _prepare_chat_context_or_abort(
                     session_data=session_data,
                     message=(
                         f"我没能在本次批改结果里定位到第{requested_qn}题的题干/选项信息。"
-                        + (f" 当前可聊题号：{', '.join(available_qnums[:30])}。" if available_qnums else "")
+                        + (
+                            f" 当前可聊题号：{', '.join(available_qnums[:30])}。"
+                            if available_qnums
+                            else ""
+                        )
                         + " 你可以换一个题号再问，或重新上传更清晰的照片后再批改一次。"
                     ),
                     done_status="continue",
@@ -363,7 +402,11 @@ def _prepare_chat_context_or_abort(
                     session_data=session_data,
                     message=(
                         "这个题目没有找到呢。你可以直接说题号或题名。"
-                        + (f" 当前可聊题目：{', '.join(available_qnums[:30])}。" if available_qnums else "")
+                        + (
+                            f" 当前可聊题目：{', '.join(available_qnums[:30])}。"
+                            if available_qnums
+                            else ""
+                        )
                     ),
                     done_status="continue",
                     question_candidates=available_qnums[:30],
@@ -386,7 +429,11 @@ def _prepare_chat_context_or_abort(
             session_data=session_data,
             message=(
                 "你想先聊哪一题？请直接说“讲第几题”。"
-                + (f" 当前可聊题号：{', '.join(available_qnums[:30])}。" if available_qnums else "")
+                + (
+                    f" 当前可聊题号：{', '.join(available_qnums[:30])}。"
+                    if available_qnums
+                    else ""
+                )
             ),
             done_status="continue",
             question_candidates=available_qnums[:30],
@@ -409,7 +456,9 @@ def _prepare_chat_context_or_abort(
                 session_id=session_id,
                 focus_question_number=focus_q,
                 has_image_refs=bool(image_refs),
-                has_pages=bool(image_refs.get("pages") if isinstance(image_refs, dict) else False),
+                has_pages=bool(
+                    image_refs.get("pages") if isinstance(image_refs, dict) else False
+                ),
             )
         if qindex.get("warnings"):
             wrong_item_context["index_warnings"] = qindex.get("warnings")
@@ -435,7 +484,11 @@ def _prepare_chat_context_or_abort(
         qbank_now = get_question_bank(session_id)
         if isinstance(qbank_now, dict):
             qs = qbank_now.get("questions")
-            if isinstance(qs, dict) and str(focus_q) in qs and isinstance(qs.get(str(focus_q)), dict):
+            if (
+                isinstance(qs, dict)
+                and str(focus_q) in qs
+                and isinstance(qs.get(str(focus_q)), dict)
+            ):
                 if "image_refs" in focus_payload:
                     qs[str(focus_q)]["image_refs"] = focus_payload["image_refs"]
                 qbank_now["questions"] = qs
@@ -485,7 +538,9 @@ def _prepare_chat_context_or_abort(
             and (focus_obj_for_qindex.get("visual_risk") is True or user_visual_hint)
         ):
             qbank_now = get_question_bank(session_id) if session_id else None
-            if isinstance(qbank_now, dict) and (should_create_slices_for_bank(qbank_now) or user_visual_hint):
+            if isinstance(qbank_now, dict) and (
+                should_create_slices_for_bank(qbank_now) or user_visual_hint
+            ):
                 page_urls_now = qbank_now.get("page_image_urls")
                 if isinstance(page_urls_now, list) and page_urls_now:
                     allow = pick_question_numbers_for_slices(qbank_now)
@@ -505,11 +560,22 @@ def _prepare_chat_context_or_abort(
                             session_id,
                             [str(u) for u in page_urls_now if u],
                             question_numbers=allow,
+                            request_id=request_id,
                         ):
-                            save_question_index(session_id, {"questions": {}, "warnings": ["qindex queued (chat)"]})
-                            log_event(logger, "chat_qindex_enqueued", request_id=request_id, session_id=session_id)
+                            save_question_index(
+                                session_id,
+                                {"questions": {}, "warnings": ["qindex queued (chat)"]},
+                            )
+                            log_event(
+                                logger,
+                                "chat_qindex_enqueued",
+                                request_id=request_id,
+                                session_id=session_id,
+                            )
                         else:
-                            save_qindex_placeholder(session_id, "qindex skipped: redis_unavailable")
+                            save_qindex_placeholder(
+                                session_id, "qindex skipped: redis_unavailable"
+                            )
     except Exception as e:
         logger.debug(f"Qindex enqueue failed (best-effort): {e}")
 
@@ -549,7 +615,7 @@ async def _stream_socratic_llm_to_sse(
     try:
         for m in reversed(session_data.get("history") or []):
             if isinstance(m, dict) and m.get("role") == "user":
-                already_has_user = (str(m.get("content") or "") == str(req.question))
+                already_has_user = str(m.get("content") or "") == str(req.question)
                 break
     except Exception as e:
         logger.debug(f"Checking for duplicate user message failed: {e}")
@@ -559,7 +625,9 @@ async def _stream_socratic_llm_to_sse(
     llm_history = list(session_data["history"][-12:])
     summary = session_data.get("summary")
     if isinstance(summary, str) and summary.strip():
-        llm_history = [{"role": "system", "content": f"会话摘要：{summary.strip()}"}] + llm_history
+        llm_history = [
+            {"role": "system", "content": f"会话摘要：{summary.strip()}"}
+        ] + llm_history
 
     def _producer():
         try:
@@ -585,7 +653,9 @@ async def _stream_socratic_llm_to_sse(
     session_data["history"].append(assistant_msg)
 
     # Emit initial state so clients can render immediately
-    focus_image_urls, focus_image_source = _extract_focus_image_urls(wrong_item_context=wrong_item_context)
+    focus_image_urls, focus_image_source = _extract_focus_image_urls(
+        wrong_item_context=wrong_item_context
+    )
     payload = ChatResponse(
         messages=session_data["history"],
         session_id=session_id,
@@ -648,6 +718,12 @@ async def _stream_socratic_llm_to_sse(
     # Persist session
     session_data["interaction_count"] = current_turn + 1
     session_data["updated_at"] = _now_ts()
+    try:
+        from homework_agent.security.safety import sanitize_session_data_for_persistence
+
+        sanitize_session_data_for_persistence(session_data)
+    except Exception as e:
+        logger.debug(f"Sanitizing session for persistence failed (best-effort): {e}")
     save_session(session_id, session_data)
 
     # Status: keep it simple for now
@@ -659,5 +735,7 @@ async def _stream_socratic_llm_to_sse(
         status="continue",
         elapsed_ms=int((time.monotonic() - started_m) * 1000),
     )
-    yield f"event: done\ndata: {{\"status\":\"continue\",\"session_id\":\"{session_id}\"}}\n\n".encode("utf-8")
+    yield f'event: done\ndata: {{"status":"continue","session_id":"{session_id}"}}\n\n'.encode(
+        "utf-8"
+    )
     await producer_task

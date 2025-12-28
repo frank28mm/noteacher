@@ -23,4 +23,3 @@ def test_format_math_for_display_converts_programming_style_pow_outside_math():
     out = _format_math_for_display(s)
     assert "$x^{6n}$" in out
     assert "$y^{2}$" in out
-

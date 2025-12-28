@@ -7,10 +7,11 @@ import httpx
 import logging
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from io import BytesIO
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     from PIL import Image
+
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
@@ -20,6 +21,8 @@ import sympy
 from homework_agent.models.schemas import ImageRef, VisionProvider
 from homework_agent.services.opencv_pipeline import run_opencv_pipeline, upload_slices
 from homework_agent.services.vision import VisionClient
+from homework_agent.services.qindex_locator_siliconflow import SiliconFlowQIndexLocator
+from homework_agent.core.layout_index import crop_and_upload_slices, QuestionLayout
 from homework_agent.api.session import get_question_index
 from homework_agent.core.prompts_autonomous import OCR_FALLBACK_PROMPT, PROMPT_VERSION
 from homework_agent.utils.settings import get_settings
@@ -35,6 +38,134 @@ QINDEX_CACHE_PREFIX = "qindex_slices:"
 OCR_CACHE_TTL = 86400  # 24 hours
 SLICE_FAILED_CACHE_TTL = 3600  # 1 hour
 QINDEX_CACHE_TTL = 3600  # 1 hour
+
+
+def _annotate_tool_signals(*, tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Add stable, machine-readable tool signals without breaking existing callers.
+
+    We keep original keys (status/message/urls/text/etc.) and only append:
+      - ok: bool
+      - needs_review: bool
+      - warning_codes: list[str]
+      - retryable: bool
+      - error_type/error_code (best-effort)
+
+    This is used for observability + HITL triggers; it must never raise.
+    """
+    try:
+        if not isinstance(result, dict):
+            return {
+                "status": "error",
+                "message": "tool_result_not_dict",
+                "ok": False,
+                "needs_review": True,
+                "warning_codes": [f"tool_error:{tool_name}"],
+                "retryable": False,
+            }  # noqa: E501
+
+        status = str(result.get("status") or "").strip().lower()
+        message = str(result.get("message") or result.get("warning") or "").strip()
+
+        warning_codes: List[str] = []
+        needs_review = False
+        retryable = False
+        error_code: Optional[str] = None
+        error_type: Optional[str] = None
+
+        if status in {"error"}:
+            needs_review = True
+            warning_codes.append(f"tool_error:{tool_name}")
+            if "timeout" in message.lower():
+                error_code = "timeout"
+                retryable = True
+            elif "rate" in message.lower() or "429" in message:
+                error_code = "rate_limited"
+                retryable = True
+            elif (
+                "not configured" in message.lower()
+                or "not_configured" in message.lower()
+            ):
+                error_code = "not_configured"
+                retryable = False
+            else:
+                error_code = "tool_failed"
+            error_type = str(result.get("error_type") or "ToolError")
+
+        elif status in {"degraded"}:
+            # Degraded is successful but should be surfaced for review/analysis.
+            warning_codes.append(f"tool_degraded:{tool_name}")
+            # Only force needs_review on high-signal degradation reasons.
+            msg_l = message.lower()
+            if any(
+                k in msg_l
+                for k in ("fallback", "roi_not_found", "diagram_roi_not_found")
+            ):
+                needs_review = True
+                warning_codes.append("evidence_degraded")
+
+        elif status in {"empty"}:
+            warning_codes.append(f"tool_empty:{tool_name}")
+
+        # Domain-specific signals: diagram roi failure is a strong HITL trigger.
+        try:
+            warnings = result.get("warnings") or []
+            if isinstance(warnings, list) and any(
+                "diagram_roi_not_found" in str(w) for w in warnings
+            ):
+                warning_codes.append("diagram_roi_not_found")
+                needs_review = True
+        except Exception:
+            pass
+        if "diagram_roi_not_found" in message:
+            warning_codes.append("diagram_roi_not_found")
+            needs_review = True
+
+        # Keep any existing codes provided by the tool.
+        existing_codes = result.get("warning_codes")
+        if isinstance(existing_codes, list):
+            for c in existing_codes:
+                cs = str(c).strip()
+                if cs:
+                    warning_codes.append(cs)
+
+        # Safety scan (PII / prompt-injection markers): always triggers HITL.
+        try:
+            from homework_agent.security.safety import scan_safety
+
+            scan = scan_safety(result)
+            if scan.warning_codes:
+                warning_codes.extend(scan.warning_codes)
+                needs_review = needs_review or bool(scan.needs_review)
+        except Exception:
+            pass
+
+        # De-dup, preserve order.
+        seen = set()
+        deduped: List[str] = []
+        for c in warning_codes:
+            if c in seen:
+                continue
+            seen.add(c)
+            deduped.append(c)
+
+        ok = status in {"ok", "degraded", "empty"}
+        result.setdefault("ok", bool(ok))
+        result.setdefault("needs_review", bool(needs_review))
+        result.setdefault("warning_codes", deduped)
+        result.setdefault("retryable", bool(retryable))
+        if error_code:
+            result.setdefault("error_code", error_code)
+        if error_type:
+            result.setdefault("error_type", error_type)
+        return result
+    except Exception:
+        # Last resort: do not break tool caller.
+        return (
+            result
+            if isinstance(result, dict)
+            else {"status": "error", "message": "tool_signal_annotation_failed"}
+        )
 
 
 def _as_imageref(value: str) -> ImageRef:
@@ -65,7 +196,9 @@ def _compute_image_hash(image_url_or_base64: str) -> Optional[str]:
             # URL: download and hash
             settings = get_settings()
             timeout = float(getattr(settings, "opencv_processing_timeout", 30))
-            with httpx.Client(timeout=timeout, follow_redirects=True, trust_env=False) as client:
+            with httpx.Client(
+                timeout=timeout, follow_redirects=True, trust_env=False
+            ) as client:
                 r = client.get(image_url_or_base64)
                 if r.status_code == 200:
                     return hashlib.sha256(r.content).hexdigest()
@@ -87,7 +220,9 @@ def _compress_image_if_needed(image_url: str, max_side: int = 1280) -> str:
         # Download image
         settings = get_settings()
         timeout = float(getattr(settings, "opencv_processing_timeout", 30))
-        with httpx.Client(timeout=timeout, follow_redirects=True, trust_env=False) as client:
+        with httpx.Client(
+            timeout=timeout, follow_redirects=True, trust_env=False
+        ) as client:
             r = client.get(image_url)
             if r.status_code != 200:
                 return image_url
@@ -117,7 +252,9 @@ def _compress_image_if_needed(image_url: str, max_side: int = 1280) -> str:
             suffix=".jpg",
             prefix="compressed/",
         )
-        logger.info(f"Compressed image from {w}x{h} to {new_w}x{new_h}: {compressed_url}")
+        logger.info(
+            f"Compressed image from {w}x{h} to {new_w}x{new_h}: {compressed_url}"
+        )
         return compressed_url
     except Exception as e:
         logger.debug(f"Failed to compress image: {e}")
@@ -136,16 +273,27 @@ def diagram_slice(*, image: str, prefix: str) -> Dict[str, Any]:
         cached_failure = cache.get(cache_key)
         if cached_failure:
             logger.info(f"diagram_slice: Cached failure for {img_hash[:8]}...")
-            return {
-                "status": "error",
-                "message": "diagram_roi_not_found",
-                "cached": True,
-            }
+            return _annotate_tool_signals(
+                tool_name="diagram_slice",
+                result={
+                    "status": "error",
+                    "message": "diagram_roi_not_found",
+                    "reason": "roi_not_found",
+                    "cached": True,
+                },
+            )
 
     ref = _as_imageref(image)
     slices = run_opencv_pipeline(ref)
     if not slices:
-        return {"status": "error", "message": "opencv_pipeline_failed"}
+        return _annotate_tool_signals(
+            tool_name="diagram_slice",
+            result={
+                "status": "error",
+                "message": "opencv_pipeline_failed",
+                "reason": "opencv_pipeline_failed",
+            },
+        )
 
     # Cache roi_not_found failures
     if slices.warnings and "diagram_roi_not_found" in slices.warnings:
@@ -155,8 +303,20 @@ def diagram_slice(*, image: str, prefix: str) -> Dict[str, Any]:
             cache.set(cache_key, "1", ttl_seconds=SLICE_FAILED_CACHE_TTL)
             logger.info(f"Cached diagram_slice failure for {img_hash[:8]}...")
 
+    reason = None
+    if slices.warnings and "diagram_roi_not_found" in slices.warnings:
+        reason = "roi_not_found"
+
     urls = upload_slices(slices=slices, prefix=prefix)
-    return {"status": "ok", "urls": urls, "warnings": slices.warnings}
+    return _annotate_tool_signals(
+        tool_name="diagram_slice",
+        result={
+            "status": "ok",
+            "urls": urls,
+            "warnings": slices.warnings,
+            "reason": reason,
+        },
+    )
 
 
 def qindex_fetch(*, session_id: str) -> Dict[str, Any]:
@@ -164,7 +324,10 @@ def qindex_fetch(*, session_id: str) -> Dict[str, Any]:
     P2.1: Cache qindex slices to avoid repeated fetches.
     """
     if not session_id:
-        return {"status": "error", "message": "session_id_missing"}
+        return _annotate_tool_signals(
+            tool_name="qindex_fetch",
+            result={"status": "error", "message": "session_id_missing"},
+        )
 
     # Check cache
     cache = get_cache_store()
@@ -182,19 +345,154 @@ def qindex_fetch(*, session_id: str) -> Dict[str, Any]:
     # Fetch from session
     qindex = get_question_index(session_id)
     if not qindex:
-        return {"status": "empty", "questions": {}, "warnings": ["qindex_empty"]}
+        return _annotate_tool_signals(
+            tool_name="qindex_fetch",
+            result={"status": "empty", "questions": {}, "warnings": ["qindex_empty"]},
+        )
 
-    result = {
-        "status": "ok",
-        "questions": qindex.get("questions") or {},
-        "warnings": qindex.get("warnings") or [],
-    }
+    result = _annotate_tool_signals(
+        tool_name="qindex_fetch",
+        result={
+            "status": "ok",
+            "questions": qindex.get("questions") or {},
+            "warnings": qindex.get("warnings") or [],
+        },
+    )
 
     # Cache result
     cache.set(cache_key, result, ttl_seconds=QINDEX_CACHE_TTL)
     logger.info(f"Cached qindex result for session {session_id}")
 
     return result
+
+
+def vision_roi_detect(*, image: str, prefix: str) -> Dict[str, Any]:
+    """Use VLM locator to detect figure/question regions and upload slices.
+    Returns a unified regions list aligned with qindex_fetch structure.
+    """
+    locator = SiliconFlowQIndexLocator()
+    if not locator.is_configured():
+        return _annotate_tool_signals(
+            tool_name="vision_roi_detect",
+            result={"status": "error", "message": "locator_not_configured"},
+        )
+
+    image_url = str(image or "").strip()
+    if not image_url:
+        return _annotate_tool_signals(
+            tool_name="vision_roi_detect",
+            result={"status": "error", "message": "image_missing"},
+        )
+
+    try:
+        loc = locator.locate(image_url=image_url, only_question_numbers=None)
+    except Exception as e:
+        return _annotate_tool_signals(
+            tool_name="vision_roi_detect",
+            result={
+                "status": "error",
+                "message": str(e),
+                "error_type": e.__class__.__name__,
+            },
+        )
+
+    if not loc.questions:
+        return _annotate_tool_signals(
+            tool_name="vision_roi_detect",
+            result={"status": "empty", "regions": [], "warning": "no_questions"},
+        )
+
+    # Build layouts and kind mapping
+    layouts: Dict[str, QuestionLayout] = {}
+    region_kinds: Dict[str, List[str]] = {}
+    for q in loc.questions:
+        qn = q.get("question_number")
+        regions = q.get("regions")
+        if not isinstance(qn, str) or not qn.strip():
+            continue
+        if not isinstance(regions, list) or not regions:
+            continue
+        qn_s = qn.strip()
+        bboxes_norm: List[List[float]] = []
+        kinds: List[str] = []
+        for r in regions:
+            if not isinstance(r, dict):
+                continue
+            kind = str(r.get("kind") or "question").strip().lower()
+            if kind not in ("question", "figure"):
+                kind = "question"
+            bbox = r.get("bbox_norm_xyxy")
+            if not (
+                isinstance(bbox, (list, tuple))
+                and len(bbox) == 4
+                and all(isinstance(v, (int, float)) for v in bbox)
+            ):
+                continue
+            xmin, ymin, xmax, ymax = [float(v) for v in bbox]
+            xmin = max(0.0, min(1.0, xmin))
+            ymin = max(0.0, min(1.0, ymin))
+            xmax = max(0.0, min(1.0, xmax))
+            ymax = max(0.0, min(1.0, ymax))
+            bboxes_norm.append([ymin, xmin, ymax, xmax])
+            kinds.append(kind)
+
+        if not bboxes_norm:
+            continue
+
+        layouts[qn_s] = QuestionLayout(
+            question_number=qn_s,
+            bboxes_norm=bboxes_norm,
+            slice_image_urls=[],
+            warnings=[],
+        )
+        region_kinds[qn_s] = kinds
+
+    if not layouts:
+        return _annotate_tool_signals(
+            tool_name="vision_roi_detect",
+            result={"status": "empty", "regions": [], "warning": "no_regions"},
+        )
+
+    # Crop and upload slices
+    try:
+        layouts = crop_and_upload_slices(
+            page_image_url=image_url,
+            layouts=layouts,
+            only_question_numbers=None,
+            prefix=prefix,
+        )
+    except Exception as e:
+        return _annotate_tool_signals(
+            tool_name="vision_roi_detect",
+            result={
+                "status": "error",
+                "message": f"slice_upload_failed: {e}",
+                "error_type": e.__class__.__name__,
+            },
+        )
+
+    regions_out: List[Dict[str, Any]] = []
+    for qn, layout in layouts.items():
+        kinds = region_kinds.get(qn, [])
+        for i, url in enumerate(layout.slice_image_urls or []):
+            if not url:
+                continue
+            kind = kinds[i] if i < len(kinds) else "question"
+            bbox_norm = (
+                layout.bboxes_norm[i] if i < len(layout.bboxes_norm or []) else None
+            )
+            regions_out.append(
+                {
+                    "kind": kind,
+                    "bbox_norm_xyxy": bbox_norm,
+                    "slice_url": url,
+                }
+            )
+
+    return _annotate_tool_signals(
+        tool_name="vision_roi_detect",
+        result={"status": "ok", "regions": regions_out, "warning": None},
+    )
 
 
 ALLOWED_SYMPY_FUNCS = {"simplify", "expand", "solve", "factor", "sympify"}
@@ -208,9 +506,15 @@ def math_verify(*, expression: str) -> Dict[str, Any]:
     """Verify mathematical expression using sympy sandbox."""
     cleaned = (expression or "").replace("\n", "").strip()
     if not cleaned:
-        return {"status": "error", "message": "empty_expression"}
+        return _annotate_tool_signals(
+            tool_name="math_verify",
+            result={"status": "error", "message": "empty_expression"},
+        )
     if any(x in cleaned for x in ("__", "import", "exec", "eval", "open")):
-        return {"status": "error", "message": "forbidden_token"}
+        return _annotate_tool_signals(
+            tool_name="math_verify",
+            result={"status": "error", "message": "forbidden_token"},
+        )
 
     try:
         tree = ast.parse(cleaned, mode="eval")
@@ -218,19 +522,41 @@ def math_verify(*, expression: str) -> Dict[str, Any]:
             if isinstance(node, ast.Call):
                 func_name = getattr(node.func, "id", "")
                 if func_name not in ALLOWED_SYMPY_FUNCS:
-                    return {"status": "error", "message": "forbidden_function"}
+                    return _annotate_tool_signals(
+                        tool_name="math_verify",
+                        result={"status": "error", "message": "forbidden_function"},
+                    )
     except Exception as e:
-        return {"status": "error", "message": f"parse_error: {e}"}
+        return _annotate_tool_signals(
+            tool_name="math_verify",
+            result={
+                "status": "error",
+                "message": f"parse_error: {e}",
+                "error_type": e.__class__.__name__,
+            },
+        )
 
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_run_sympy, cleaned)
             result = future.result(timeout=5)
-        return {"status": "ok", "result": str(result)}
+        return _annotate_tool_signals(
+            tool_name="math_verify", result={"status": "ok", "result": str(result)}
+        )
     except FutureTimeout:
-        return {"status": "error", "message": "Expression evaluation timeout"}
+        return _annotate_tool_signals(
+            tool_name="math_verify",
+            result={"status": "error", "message": "Expression evaluation timeout"},
+        )
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return _annotate_tool_signals(
+            tool_name="math_verify",
+            result={
+                "status": "error",
+                "message": str(e),
+                "error_type": e.__class__.__name__,
+            },
+        )
 
 
 def ocr_fallback(*, image: str, provider: str) -> Dict[str, Any]:
@@ -249,24 +575,39 @@ def ocr_fallback(*, image: str, provider: str) -> Dict[str, Any]:
         cached = cache.get(cache_key)
         if cached:
             logger.info(f"ocr_fallback: Cache hit for {img_hash[:8]}...")
-            return {
-                "status": "ok",
-                "text": cached,
-                "source": "cache",
-            }
+            return _annotate_tool_signals(
+                tool_name="ocr_fallback",
+                result={
+                    "status": "ok",
+                    "text": cached,
+                    "source": "cache",
+                },
+            )
 
     ref = _as_imageref(image)
-    settings = get_settings()
-    vision_provider = VisionProvider.QWEN3 if provider == "silicon" else VisionProvider.DOUBAO
+    vision_provider = (
+        VisionProvider.QWEN3 if provider == "silicon" else VisionProvider.DOUBAO
+    )
     client = VisionClient()
     try:
-        result = client.analyze(images=[ref], prompt=OCR_FALLBACK_PROMPT, provider=vision_provider)
+        result = client.analyze(
+            images=[ref], prompt=OCR_FALLBACK_PROMPT, provider=vision_provider
+        )
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return _annotate_tool_signals(
+            tool_name="ocr_fallback",
+            result={
+                "status": "error",
+                "message": str(e),
+                "error_type": e.__class__.__name__,
+            },
+        )
 
     text = (result.text or "").strip()
     if not text:
-        return {"status": "empty", "text": ""}
+        return _annotate_tool_signals(
+            tool_name="ocr_fallback", result={"status": "empty", "text": ""}
+        )
 
     # Cache result
     if img_hash:
@@ -279,4 +620,6 @@ def ocr_fallback(*, image: str, provider: str) -> Dict[str, Any]:
         cache.set(cache_key, text, ttl_seconds=OCR_CACHE_TTL)
         logger.info(f"Cached OCR result for {img_hash[:8]}...")
 
-    return {"status": "ok", "text": text}
+    return _annotate_tool_signals(
+        tool_name="ocr_fallback", result={"status": "ok", "text": text}
+    )

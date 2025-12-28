@@ -2,10 +2,13 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-import pytest
 
 from homework_agent.models.schemas import ImageRef, Subject
 from homework_agent.services import autonomous_agent as aa
+from homework_agent.services.preprocessing import (
+    PreprocessResult,
+    PreprocessingPipeline,
+)
 
 
 def _run(coro):
@@ -21,10 +24,20 @@ def test_autonomous_agent_e2e_happy_path(monkeypatch):
         judgment_basis_min_length = 2
 
     monkeypatch.setattr(aa, "get_settings", lambda: _Settings)
-    monkeypatch.setattr(aa, "run_opencv_pipeline", lambda ref: None)
-    monkeypatch.setattr(aa, "upload_slices", lambda slices, prefix: {})
 
-    def _fake_generate(self, prompt=None, system_prompt=None, provider=None, max_tokens=None, temperature=None):
+    async def _fake_process_image(self, ref, prefix, use_cache=True):
+        return PreprocessResult(source="fallback")
+
+    monkeypatch.setattr(PreprocessingPipeline, "process_image", _fake_process_image)
+
+    def _fake_generate(
+        self,
+        prompt=None,
+        system_prompt=None,
+        provider=None,
+        max_tokens=None,
+        temperature=None,
+    ):
         if system_prompt and "Planning Agent" in system_prompt:
             payload = {"thoughts": "ok", "plan": [], "action": "execute_tools"}
         else:
@@ -65,7 +78,9 @@ def test_autonomous_agent_e2e_happy_path(monkeypatch):
         return SimpleNamespace(text=json.dumps(payload, ensure_ascii=False))
 
     monkeypatch.setattr(aa.LLMClient, "generate", _fake_generate, raising=False)
-    monkeypatch.setattr(aa.LLMClient, "generate_with_images", _fake_generate_with_images, raising=False)
+    monkeypatch.setattr(
+        aa.LLMClient, "generate_with_images", _fake_generate_with_images, raising=False
+    )
 
     result = _run(
         aa.run_autonomous_grade_agent(

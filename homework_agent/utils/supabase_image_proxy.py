@@ -39,7 +39,9 @@ def _create_proxy_image_urls(
 
     for u in cleaned:
         try:
-            with httpx.Client(timeout=25.0, follow_redirects=True, trust_env=False) as client:
+            with httpx.Client(
+                timeout=25.0, follow_redirects=True, trust_env=False
+            ) as client:
                 r = client.get(u)
             r.raise_for_status()
             data = r.content or b""
@@ -72,4 +74,3 @@ def _create_proxy_image_urls(
             out.append(_normalize_public_url(u) or u)
 
     return out if out else None
-

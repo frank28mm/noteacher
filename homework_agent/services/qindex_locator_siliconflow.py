@@ -26,7 +26,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 from PIL import Image
@@ -41,7 +41,9 @@ logger = logging.getLogger(__name__)
 class QIndexLocateResult:
     text: str
     raw: Dict[str, Any]
-    questions: List[Dict[str, Any]]  # {question_number, regions:[{kind,bbox_norm_xyxy}]}
+    questions: List[
+        Dict[str, Any]
+    ]  # {question_number, regions:[{kind,bbox_norm_xyxy}]}
 
 
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
@@ -104,6 +106,7 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
             level="warning",
             text_len=len(s),
             candidates=candidates,
+            error_type="json_parse_failed",
             error=last_err,
         )
     return None
@@ -120,7 +123,9 @@ def _to_float(x: Any) -> Optional[float]:
     return None
 
 
-def _image_url_to_data_url(image_url: str, *, max_side: int = 1600, jpeg_quality: int = 85) -> Optional[str]:
+def _image_url_to_data_url(
+    image_url: str, *, max_side: int = 1600, jpeg_quality: int = 85
+) -> Optional[str]:
     """
     Convert a remote http(s) image URL to a compact JPEG data URL.
 
@@ -222,16 +227,29 @@ class SiliconFlowQIndexLocator:
         self.ark_base_url = settings.ark_base_url
 
         # Provider-specific locator model choices.
-        self.silicon_model = getattr(settings, "silicon_qindex_model", None) or settings.silicon_vision_model
-        self.ark_model = getattr(settings, "ark_qindex_model", None) or settings.ark_vision_model
+        self.silicon_model = (
+            getattr(settings, "silicon_qindex_model", None)
+            or settings.silicon_vision_model
+        )
+        self.ark_model = (
+            getattr(settings, "ark_qindex_model", None) or settings.ark_vision_model
+        )
 
         # Prefer Ark when ARK_QINDEX_MODEL is explicitly set to a Doubao vision model.
-        self.model = self.ark_model if str(self.ark_model or "").strip().lower().startswith("doubao-") else self.silicon_model
+        self.model = (
+            self.ark_model
+            if str(self.ark_model or "").strip().lower().startswith("doubao-")
+            else self.silicon_model
+        )
         self.timeout_seconds = int(
-            getattr(settings, "ark_qindex_timeout_seconds", 180) if self._provider() == "ark" else getattr(settings, "silicon_qindex_timeout_seconds", 180)
+            getattr(settings, "ark_qindex_timeout_seconds", 180)
+            if self._provider() == "ark"
+            else getattr(settings, "silicon_qindex_timeout_seconds", 180)
         )
         self.max_tokens = int(
-            getattr(settings, "ark_qindex_max_tokens", 900) if self._provider() == "ark" else getattr(settings, "silicon_qindex_max_tokens", 900)
+            getattr(settings, "ark_qindex_max_tokens", 900)
+            if self._provider() == "ark"
+            else getattr(settings, "silicon_qindex_max_tokens", 900)
         )
 
     def _provider(self) -> str:
@@ -247,8 +265,16 @@ class SiliconFlowQIndexLocator:
 
     def _client(self) -> OpenAI:
         if self._provider() == "ark":
-            return OpenAI(base_url=self.ark_base_url, api_key=self.ark_api_key, timeout=float(self.timeout_seconds))
-        return OpenAI(base_url=self.silicon_base_url, api_key=self.silicon_api_key, timeout=float(self.timeout_seconds))
+            return OpenAI(
+                base_url=self.ark_base_url,
+                api_key=self.ark_api_key,
+                timeout=float(self.timeout_seconds),
+            )
+        return OpenAI(
+            base_url=self.silicon_base_url,
+            api_key=self.silicon_api_key,
+            timeout=float(self.timeout_seconds),
+        )
 
     def _prompt(self, *, only_question_numbers: Optional[List[str]] = None) -> str:
         only = ""
@@ -265,9 +291,9 @@ class SiliconFlowQIndexLocator:
             "JSON 结构：{version, questions}\\n",
             "- version: 2\\n",
             "- questions: 数组，每项 {question_number, regions}\\n",
-            "  - question_number: 字符串，如 \"27\"、\"28(1)\"、\"20(2)\"、\"21①\"。\\n",
+            '  - question_number: 字符串，如 "27"、"28(1)"、"20(2)"、"21①"。\\n',
             "  - regions: 数组，每项 {kind, bbox}\\n",
-            "    - kind: \"question\" 或 \"figure\"。\\n",
+            '    - kind: "question" 或 "figure"。\\n',
             "    - bbox: 归一化坐标 [xmin, ymin, xmax, ymax]，范围 0~1。\\n",
             "      - kind=question：覆盖题干+作答。\\n",
             "      - kind=figure：覆盖该题所需的图示/函数图像/几何图形（如存在）。\\n",
@@ -282,9 +308,13 @@ class SiliconFlowQIndexLocator:
         ]
         return "".join(parts)
 
-    def locate(self, *, image_url: str, only_question_numbers: Optional[List[str]] = None) -> QIndexLocateResult:
+    def locate(
+        self, *, image_url: str, only_question_numbers: Optional[List[str]] = None
+    ) -> QIndexLocateResult:
         if not self.is_configured():
-            raise RuntimeError("qindex locator not configured (check SILICON_* or ARK_* env + ARK_QINDEX_MODEL/SILICON_QINDEX_MODEL)")
+            raise RuntimeError(
+                "qindex locator not configured (check SILICON_* or ARK_* env + ARK_QINDEX_MODEL/SILICON_QINDEX_MODEL)"
+            )
         if not image_url:
             raise ValueError("image_url is required")
 
@@ -374,7 +404,10 @@ class SiliconFlowQIndexLocator:
                 break
             except Exception as e:
                 msg = str(e)
-                fetch_timeout = "Timeout while fetching image_url" in msg or "timeout while fetching image_url" in msg
+                fetch_timeout = (
+                    "Timeout while fetching image_url" in msg
+                    or "timeout while fetching image_url" in msg
+                )
                 if provider == "ark" and fetch_timeout and data_url is None:
                     data_url = _image_url_to_data_url(image_url)
                     log_event(

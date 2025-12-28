@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import io
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,6 +30,7 @@ class OpenCVSliceResult:
     figure_bytes: Optional[bytes]
     question_bytes: Optional[bytes]
     diagram_bbox: Optional[Tuple[int, int, int, int]]
+    figure_size: Optional[Tuple[int, int]]
     warnings: List[str]
 
 
@@ -40,10 +40,14 @@ def _strip_data_uri(data: str) -> str:
     return data
 
 
-def _load_image_bytes(ref: ImageRef, *, timeout_seconds: float, max_bytes: int) -> Optional[bytes]:
+def _load_image_bytes(
+    ref: ImageRef, *, timeout_seconds: float, max_bytes: int
+) -> Optional[bytes]:
     if ref.url:
         try:
-            with httpx.Client(timeout=timeout_seconds, follow_redirects=True, trust_env=False) as client:
+            with httpx.Client(
+                timeout=timeout_seconds, follow_redirects=True, trust_env=False
+            ) as client:
                 r = client.get(str(ref.url))
             if r.status_code != 200:
                 return None
@@ -67,7 +71,9 @@ def _load_image_bytes(ref: ImageRef, *, timeout_seconds: float, max_bytes: int) 
 
 def _encode_jpeg(img: Any, *, quality: int = 90) -> Optional[bytes]:
     try:
-        ok, encoded = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+        ok, encoded = cv2.imencode(
+            ".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+        )
         if not ok:
             return None
         return encoded.tobytes()
@@ -120,7 +126,9 @@ def _detect_diagram_roi(img: Any) -> Optional[Tuple[int, int, int, int]]:
     try:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(
+            edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
         if not contours:
             return None
         h, w = gray.shape[:2]
@@ -172,10 +180,13 @@ def run_opencv_pipeline(ref: ImageRef) -> Optional[OpenCVSliceResult]:
 
     bbox = _detect_diagram_roi(img)
     figure_bytes = None
+    figure_size: Optional[Tuple[int, int]] = None
     question_bytes = None
     if bbox:
         try:
             fig = _crop(img, bbox)
+            fh, fw = fig.shape[:2]
+            figure_size = (int(fw), int(fh))
             fig_gray = _preprocess_gray(fig)
             figure_bytes = _encode_jpeg(fig_gray)
         except Exception:
@@ -190,6 +201,7 @@ def run_opencv_pipeline(ref: ImageRef) -> Optional[OpenCVSliceResult]:
         figure_bytes=figure_bytes,
         question_bytes=question_bytes,
         diagram_bbox=bbox,
+        figure_size=figure_size,
         warnings=warnings,
     )
 
@@ -199,7 +211,11 @@ def upload_slices(
     slices: OpenCVSliceResult,
     prefix: str,
 ) -> Dict[str, Optional[str]]:
-    out: Dict[str, Optional[str]] = {"page_url": None, "figure_url": None, "question_url": None}
+    out: Dict[str, Optional[str]] = {
+        "page_url": None,
+        "figure_url": None,
+        "question_url": None,
+    }
     try:
         storage = get_storage_client()
     except Exception as e:
@@ -216,14 +232,20 @@ def upload_slices(
     if slices.figure_bytes:
         try:
             out["figure_url"] = storage.upload_bytes(
-                slices.figure_bytes, mime_type="image/jpeg", suffix=".jpg", prefix=prefix
+                slices.figure_bytes,
+                mime_type="image/jpeg",
+                suffix=".jpg",
+                prefix=prefix,
             )
         except Exception as e:
             logger.debug(f"upload figure slice failed: {e}")
     if slices.question_bytes:
         try:
             out["question_url"] = storage.upload_bytes(
-                slices.question_bytes, mime_type="image/jpeg", suffix=".jpg", prefix=prefix
+                slices.question_bytes,
+                mime_type="image/jpeg",
+                suffix=".jpg",
+                prefix=prefix,
             )
         except Exception as e:
             logger.debug(f"upload question slice failed: {e}")

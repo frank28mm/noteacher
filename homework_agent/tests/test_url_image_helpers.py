@@ -23,7 +23,10 @@ def test_is_public_url_rejects_localhost_and_non_http():
 
 
 def test_normalize_public_url_strips_trailing_question_mark_and_whitespace():
-    assert _normalize_public_url("  https://example.com/a.jpg?  ") == "https://example.com/a.jpg"
+    assert (
+        _normalize_public_url("  https://example.com/a.jpg?  ")
+        == "https://example.com/a.jpg"
+    )
     assert _normalize_public_url("") is None
     assert _normalize_public_url(None) is None
 
@@ -43,7 +46,10 @@ def test_first_public_image_url_handles_dict_and_object():
 
 
 def test_is_provider_image_fetch_issue_detects_common_patterns():
-    assert _is_provider_image_fetch_issue(Exception("Timeout while fetching image_url")) is True
+    assert (
+        _is_provider_image_fetch_issue(Exception("Timeout while fetching image_url"))
+        is True
+    )
     assert _is_provider_image_fetch_issue(Exception("20040 image_url")) is True
     assert _is_provider_image_fetch_issue(Exception("something else")) is False
 
@@ -125,4 +131,3 @@ def test_download_as_data_uri_rejects_non_200(monkeypatch: pytest.MonkeyPatch):
     fake_httpx = SimpleNamespace(Client=FakeClient)
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
     assert _download_as_data_uri("https://example.com/forbidden.jpg") is None
-

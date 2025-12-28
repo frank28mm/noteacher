@@ -16,7 +16,9 @@ def sanitize_wrong_items(wrong_items: List[Dict[str, Any]]) -> List[Dict[str, An
         copy_item = dict(item)
         # Normalize question_number to string for schema compatibility
         qn = _normalize_question_number(
-            copy_item.get("question_number") or copy_item.get("question_index") or copy_item.get("id")
+            copy_item.get("question_number")
+            or copy_item.get("question_index")
+            or copy_item.get("id")
         )
         if qn is not None:
             copy_item["question_number"] = qn
@@ -30,7 +32,9 @@ def sanitize_wrong_items(wrong_items: List[Dict[str, Any]]) -> List[Dict[str, An
                 sev = step.get("severity")
                 if isinstance(sev, str):
                     sev_norm = sev.strip().lower()
-                    step["severity"] = sev_norm if sev_norm in allowed_sev else Severity.UNKNOWN.value
+                    step["severity"] = (
+                        sev_norm if sev_norm in allowed_sev else Severity.UNKNOWN.value
+                    )
         # Normalize geometry_check
         geom = copy_item.get("geometry_check")
         if geom is not None and not isinstance(geom, (dict, GeometryInfo)):
@@ -131,7 +135,10 @@ def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             if isinstance(steps, list) and steps:
                 first_bad = None
                 for s in steps:
-                    if isinstance(s, dict) and (s.get("verdict") or "").strip().lower() != "correct":
+                    if (
+                        isinstance(s, dict)
+                        and (s.get("verdict") or "").strip().lower() != "correct"
+                    ):
                         first_bad = s
                         break
                 first_bad = first_bad or steps[0]
@@ -181,7 +188,9 @@ def build_question_bank(
         vision_raw_text=vision_raw_text,
         page_image_urls=page_image_urls,
     )
-    vision_questions = vision_qbank.get("questions") if isinstance(vision_qbank, dict) else None
+    vision_questions = (
+        vision_qbank.get("questions") if isinstance(vision_qbank, dict) else None
+    )
     vision_questions = vision_questions if isinstance(vision_questions, dict) else {}
 
     by_qn: Dict[str, Any] = {}
@@ -211,7 +220,14 @@ def build_question_bank(
                 merged[field] = q.get(field)
 
         # Always take grader judgments when present.
-        for field in ("verdict", "reason", "knowledge_tags", "math_steps", "warnings", "cross_subject_flag"):
+        for field in (
+            "verdict",
+            "reason",
+            "knowledge_tags",
+            "math_steps",
+            "warnings",
+            "cross_subject_flag",
+        ):
             if q.get(field) is not None:
                 merged[field] = q.get(field)
 
@@ -247,7 +263,11 @@ def build_question_bank(
     if isinstance(visual_facts_map, dict):
         for qn, facts in visual_facts_map.items():
             qn_str = str(qn)
-            if qn_str in by_qn and isinstance(by_qn.get(qn_str), dict) and isinstance(facts, dict):
+            if (
+                qn_str in by_qn
+                and isinstance(by_qn.get(qn_str), dict)
+                and isinstance(facts, dict)
+            ):
                 by_qn[qn_str]["visual_facts"] = facts
     return {
         "session_id": session_id,
@@ -258,7 +278,9 @@ def build_question_bank(
     }
 
 
-def derive_wrong_items_from_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def derive_wrong_items_from_questions(
+    questions: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     """
     Derive WrongItem-shaped dicts from questions[*] entries.
     Provides a robust fallback when the model fails to emit valid `wrong_items`.

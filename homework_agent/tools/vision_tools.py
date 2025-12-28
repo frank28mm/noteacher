@@ -27,4 +27,3 @@ def correct_ocr_context(text: str) -> Dict[str, Any]:
         "status": "ok",
         "normalized": cleaned,
     }
-

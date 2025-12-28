@@ -17,7 +17,7 @@ import logging
 import time
 from urllib.parse import urlparse
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List
 
 import httpx
 
@@ -84,7 +84,9 @@ class BaiduPaddleOCRVLClient:
         )
         return token
 
-    def submit(self, *, image_url: Optional[str] = None, image_bytes: Optional[bytes] = None) -> str:
+    def submit(
+        self, *, image_url: Optional[str] = None, image_bytes: Optional[bytes] = None
+    ) -> str:
         """
         Submit an OCR/layout task. Prefer `image_url` (public https).
         Fallback to base64 if URL is rejected.
@@ -150,7 +152,9 @@ class BaiduPaddleOCRVLClient:
                 )
                 last = _post({"file_url": image_url, "file_name": file_name})
                 if last.get("error_code"):
-                    raise RuntimeError(f"{last.get('error_code')}: {last.get('error_msg')}")
+                    raise RuntimeError(
+                        f"{last.get('error_code')}: {last.get('error_msg')}"
+                    )
                 task_id = (
                     last.get("task_id")
                     or last.get("taskId")
@@ -189,7 +193,9 @@ class BaiduPaddleOCRVLClient:
                     r.raise_for_status()
                     image_bytes = r.content
             except Exception as e:
-                raise RuntimeError(f"Baidu OCR submit failed (cannot download url for base64 fallback): {e}") from e
+                raise RuntimeError(
+                    f"Baidu OCR submit failed (cannot download url for base64 fallback): {e}"
+                ) from e
 
         if image_bytes is not None:
             b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -238,7 +244,10 @@ class BaiduPaddleOCRVLClient:
             "baidu_ocr_query_http",
             endpoint=endpoint_for_log,
             task_id=str(task_id),
-            status=str((data.get("status") or (data.get("result") or {}).get("status") or "")).strip() or None,
+            status=str(
+                (data.get("status") or (data.get("result") or {}).get("status") or "")
+            ).strip()
+            or None,
             elapsed_ms=int((time.monotonic() - t0) * 1000),
             error_code=data.get("error_code"),
         )
@@ -265,7 +274,10 @@ class BaiduPaddleOCRVLClient:
             status = str(status).lower()
 
             # Heuristics
-            if any(k in status for k in ("done", "success", "finished", "complete", "completed")):
+            if any(
+                k in status
+                for k in ("done", "success", "finished", "complete", "completed")
+            ):
                 log_event(
                     logger,
                     "baidu_ocr_wait_done",
@@ -285,7 +297,9 @@ class BaiduPaddleOCRVLClient:
                     elapsed_ms=int((time.monotonic() - t0) * 1000),
                     error_code=last.get("error_code"),
                 )
-                return BaiduOCRTaskResult(task_id=str(task_id), status="failed", raw=last)
+                return BaiduOCRTaskResult(
+                    task_id=str(task_id), status="failed", raw=last
+                )
 
             if time.time() - start > self.poll_max_seconds:
                 log_event(
@@ -296,18 +310,24 @@ class BaiduPaddleOCRVLClient:
                     polls=polls,
                     elapsed_ms=int((time.monotonic() - t0) * 1000),
                 )
-                return BaiduOCRTaskResult(task_id=str(task_id), status="timeout", raw=last)
+                return BaiduOCRTaskResult(
+                    task_id=str(task_id), status="timeout", raw=last
+                )
 
             time.sleep(self.poll_interval_seconds)
 
     @staticmethod
-    def _fetch_parse_result_json(parse_result_url: str, *, timeout_seconds: float) -> Optional[Dict[str, Any]]:
+    def _fetch_parse_result_json(
+        parse_result_url: str, *, timeout_seconds: float
+    ) -> Optional[Dict[str, Any]]:
         if not parse_result_url:
             return None
         try:
             # parse_result_url is a signed BOS URL with limited lifetime.
             t0 = time.monotonic()
-            with httpx.Client(timeout=timeout_seconds, follow_redirects=True, trust_env=False) as client:
+            with httpx.Client(
+                timeout=timeout_seconds, follow_redirects=True, trust_env=False
+            ) as client:
                 resp = client.get(parse_result_url)
                 resp.raise_for_status()
                 data = resp.json()
@@ -345,12 +365,18 @@ class BaiduPaddleOCRVLClient:
                 r = raw.get("result") if isinstance(raw.get("result"), dict) else None
                 if isinstance(r, dict):
                     parse_url = r.get("parse_result_url") or r.get("parseResultUrl")
-                parse_url = parse_url or raw.get("parse_result_url") or raw.get("parseResultUrl")
+                parse_url = (
+                    parse_url
+                    or raw.get("parse_result_url")
+                    or raw.get("parseResultUrl")
+                )
             if isinstance(parse_url, str) and parse_url.strip():
                 parsed = BaiduPaddleOCRVLClient._fetch_parse_result_json(
                     parse_url.strip(), timeout_seconds=30.0
                 )
-                pages = (parsed or {}).get("pages") if isinstance(parsed, dict) else None
+                pages = (
+                    (parsed or {}).get("pages") if isinstance(parsed, dict) else None
+                )
                 if isinstance(pages, list) and pages:
                     blocks: List[Dict[str, Any]] = []
                     for p in pages:
@@ -366,13 +392,28 @@ class BaiduPaddleOCRVLClient:
                             pos = it.get("position")
                             if not isinstance(text, str) or not text.strip():
                                 continue
-                            block: Dict[str, Any] = {"text": text.strip(), "type": it.get("type")}
+                            block: Dict[str, Any] = {
+                                "text": text.strip(),
+                                "type": it.get("type"),
+                            }
                             # position is typically [x, y, w, h]
-                            if isinstance(pos, (list, tuple)) and len(pos) == 4 and all(
-                                isinstance(v, (int, float)) for v in pos
+                            if (
+                                isinstance(pos, (list, tuple))
+                                and len(pos) == 4
+                                and all(isinstance(v, (int, float)) for v in pos)
                             ):
-                                x, y, w, h = float(pos[0]), float(pos[1]), float(pos[2]), float(pos[3])
-                                block["location"] = {"left": x, "top": y, "width": w, "height": h}
+                                x, y, w, h = (
+                                    float(pos[0]),
+                                    float(pos[1]),
+                                    float(pos[2]),
+                                    float(pos[3]),
+                                )
+                                block["location"] = {
+                                    "left": x,
+                                    "top": y,
+                                    "width": w,
+                                    "height": h,
+                                }
                             blocks.append(block)
                     log_event(
                         logger,
@@ -415,5 +456,7 @@ class BaiduPaddleOCRVLClient:
         for item in candidates or []:
             if isinstance(item, dict):
                 blocks.append(item)
-        log_event(logger, "baidu_ocr_blocks_extracted", mode="legacy", blocks=len(blocks))
+        log_event(
+            logger, "baidu_ocr_blocks_extracted", mode="legacy", blocks=len(blocks)
+        )
         return blocks

@@ -1,36 +1,62 @@
 from functools import lru_cache
+import os
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-import os
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    # App environment
+    # dev | test | staging | prod
+    app_env: str = Field(default="dev", validation_alias="APP_ENV")
+
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
-    openai_base_url: str = Field(default="https://api.openai.com/v1", validation_alias="OPENAI_BASE_URL")
+    openai_base_url: str = Field(
+        default="https://api.openai.com/v1", validation_alias="OPENAI_BASE_URL"
+    )
     model_reasoning: str = Field(default="gpt-4o", validation_alias="MODEL_REASONING")
     model_vision: str = Field(default="gpt-4o", validation_alias="MODEL_VISION")
 
-    silicon_api_key: str | None = Field(default=None, validation_alias="SILICON_API_KEY")
-    silicon_base_url: str = Field(default="https://api.siliconflow.cn/v1", validation_alias="SILICON_BASE_URL")
-    silicon_vision_model: str = Field(default="Qwen/Qwen3-VL-32B-Thinking", validation_alias="SILICON_VISION_MODEL")
+    silicon_api_key: str | None = Field(
+        default=None, validation_alias="SILICON_API_KEY"
+    )
+    silicon_base_url: str = Field(
+        default="https://api.siliconflow.cn/v1", validation_alias="SILICON_BASE_URL"
+    )
+    silicon_vision_model: str = Field(
+        default="Qwen/Qwen3-VL-32B-Thinking", validation_alias="SILICON_VISION_MODEL"
+    )
     # Strict user requirement: Use Qwen3-VL-32B-Thinking for reasoning as well
-    silicon_reasoning_model: str = Field(default="Qwen/Qwen3-VL-235B-A22B-Instruct", validation_alias="SILICON_REASONING_MODEL")
+    silicon_reasoning_model: str = Field(
+        default="Qwen/Qwen3-VL-235B-A22B-Instruct",
+        validation_alias="SILICON_REASONING_MODEL",
+    )
 
     ark_api_key: str | None = Field(default=None, validation_alias="ARK_API_KEY")
-    ark_base_url: str = Field(default="https://ark.cn-beijing.volces.com/api/v3", validation_alias="ARK_BASE_URL")
-    ark_vision_model: str = Field(default="doubao-seed-1-6-vision-250815", validation_alias="ARK_VISION_MODEL")
+    ark_base_url: str = Field(
+        default="https://ark.cn-beijing.volces.com/api/v3",
+        validation_alias="ARK_BASE_URL",
+    )
+    ark_vision_model: str = Field(
+        default="doubao-seed-1-6-vision-250815", validation_alias="ARK_VISION_MODEL"
+    )
     # Ark/Doubao text reasoning models for chat/grading
-    ark_reasoning_model: str = Field(default="Doubao-Seed-1-6", validation_alias="ARK_REASONING_MODEL")
+    ark_reasoning_model: str = Field(
+        default="Doubao-Seed-1-6", validation_alias="ARK_REASONING_MODEL"
+    )
     ark_reasoning_model_thinking: str = Field(
         default="Doubao-Seed-1-6-thinking",
         validation_alias="ARK_REASONING_MODEL_THINKING",
     )
 
     # Baidu PaddleOCR-VL (OCR + layout)
-    baidu_ocr_api_key: str | None = Field(default=None, validation_alias="BAIDU_OCR_API_KEY")
-    baidu_ocr_secret_key: str | None = Field(default=None, validation_alias="BAIDU_OCR_SECRET_KEY")
+    baidu_ocr_api_key: str | None = Field(
+        default=None, validation_alias="BAIDU_OCR_API_KEY"
+    )
+    baidu_ocr_secret_key: str | None = Field(
+        default=None, validation_alias="BAIDU_OCR_SECRET_KEY"
+    )
     baidu_ocr_oauth_url: str = Field(
         default="https://aip.baidubce.com/oauth/2.0/token",
         validation_alias="BAIDU_OCR_OAUTH_URL",
@@ -43,10 +69,13 @@ class Settings(BaseSettings):
         default="https://aip.baidubce.com/rest/2.0/brain/online/v2/paddle-vl-parser/task/query",
         validation_alias="BAIDU_OCR_QUERY_URL",
     )
-    baidu_ocr_timeout_seconds: int = Field(default=60, validation_alias="BAIDU_OCR_TIMEOUT_SECONDS")
+    baidu_ocr_timeout_seconds: int = Field(
+        default=60, validation_alias="BAIDU_OCR_TIMEOUT_SECONDS"
+    )
     baidu_ocr_poll_interval_seconds: float = Field(
         # Baidu doc recommends polling every 5-10 seconds (query QPS limit applies).
-        default=5.0, validation_alias="BAIDU_OCR_POLL_INTERVAL_SECONDS"
+        default=5.0,
+        validation_alias="BAIDU_OCR_POLL_INTERVAL_SECONDS",
     )
     baidu_ocr_poll_max_seconds: int = Field(
         default=60, validation_alias="BAIDU_OCR_POLL_MAX_SECONDS"
@@ -58,7 +87,9 @@ class Settings(BaseSettings):
     # - siliconflow_deepseek: use SiliconFlow chat-completions with deepseek-ai/DeepSeek-OCR
     # - baidu_paddleocr_vl: use Baidu PaddleOCR-VL (legacy; can be disabled if quota is limited)
     # - disabled: do not run OCR (qindex will be skipped)
-    ocr_provider: str = Field(default="siliconflow_qwen3_vl", validation_alias="OCR_PROVIDER")
+    ocr_provider: str = Field(
+        default="siliconflow_qwen3_vl", validation_alias="OCR_PROVIDER"
+    )
 
     # SiliconFlow OCR model (OpenAI-compatible chat completions)
     silicon_ocr_model: str = Field(
@@ -103,35 +134,47 @@ class Settings(BaseSettings):
     )
 
     # Slice generation (BBox + Slice)
-    slice_padding_ratio: float = Field(default=0.05, validation_alias="SLICE_PADDING_RATIO")
-    slice_ttl_seconds: int = Field(default=24 * 3600, validation_alias="SLICE_TTL_SECONDS")
+    slice_padding_ratio: float = Field(
+        default=0.05, validation_alias="SLICE_PADDING_RATIO"
+    )
+    slice_ttl_seconds: int = Field(
+        default=24 * 3600, validation_alias="SLICE_TTL_SECONDS"
+    )
 
     # SLA / Time budgets (seconds)
     grade_completion_sla_seconds: int = Field(
         # Completion SLA should cover both Vision (240s) and LLM (600s) budgets (+ margin).
-        default=900, validation_alias="GRADE_COMPLETION_SLA_SECONDS"
+        default=900,
+        validation_alias="GRADE_COMPLETION_SLA_SECONDS",
     )
     grade_vision_timeout_seconds: int = Field(
         # Vision can be slow on some images; keep a safer default than 60s.
-        default=240, validation_alias="GRADE_VISION_TIMEOUT_SECONDS"
+        default=240,
+        validation_alias="GRADE_VISION_TIMEOUT_SECONDS",
     )
     grade_llm_timeout_seconds: int = Field(
         # Full-question grading JSON can be slow; 600s (10min) for large homework with detailed judgment_basis.
-        default=600, validation_alias="GRADE_LLM_TIMEOUT_SECONDS"
+        default=600,
+        validation_alias="GRADE_LLM_TIMEOUT_SECONDS",
     )
     vision_client_timeout_seconds: int = Field(
         # Low-level client timeout should not undercut grade vision budget.
-        default=240, validation_alias="VISION_CLIENT_TIMEOUT_SECONDS"
+        default=240,
+        validation_alias="VISION_CLIENT_TIMEOUT_SECONDS",
     )
     llm_client_timeout_seconds: int = Field(
         default=600, validation_alias="LLM_CLIENT_TIMEOUT_SECONDS"
     )
-    tool_calling_enabled: bool = Field(default=True, validation_alias="TOOL_CALLING_ENABLED")
+    tool_calling_enabled: bool = Field(
+        default=True, validation_alias="TOOL_CALLING_ENABLED"
+    )
     max_tool_calls: int = Field(default=3, validation_alias="MAX_TOOL_CALLS")
     tool_choice: str = Field(default="auto", validation_alias="TOOL_CHOICE")
 
     # Concurrency limits (to avoid thread pile-ups)
-    max_concurrent_vision: int = Field(default=2, validation_alias="MAX_CONCURRENT_VISION")
+    max_concurrent_vision: int = Field(
+        default=2, validation_alias="MAX_CONCURRENT_VISION"
+    )
     max_concurrent_llm: int = Field(default=4, validation_alias="MAX_CONCURRENT_LLM")
 
     # Unified Vision-Grade Agent
@@ -168,13 +211,19 @@ class Settings(BaseSettings):
         default=600, validation_alias="AUTONOMOUS_AGENT_TIMEOUT_SECONDS"
     )
     autonomous_agent_max_tokens: int = Field(
-        default=1600, validation_alias="AUTONOMOUS_AGENT_MAX_TOKENS"
+        default=4000, validation_alias="AUTONOMOUS_AGENT_MAX_TOKENS"
     )
     autonomous_agent_max_iterations: int = Field(
         default=3, validation_alias="AUTONOMOUS_AGENT_MAX_ITERATIONS"
     )
     autonomous_agent_confidence_threshold: float = Field(
         default=0.90, validation_alias="AUTONOMOUS_AGENT_CONFIDENCE_THRESHOLD"
+    )
+    autonomous_agent_token_budget_total: int = Field(
+        default=12000, validation_alias="AUTONOMOUS_AGENT_TOKEN_BUDGET_TOTAL"
+    )
+    autonomous_agent_min_aggregator_seconds: int = Field(
+        default=20, validation_alias="AUTONOMOUS_AGENT_MIN_AGGREGATOR_SECONDS"
     )
 
     # OpenCV pipeline
@@ -186,7 +235,9 @@ class Settings(BaseSettings):
     )
 
     # Vision/OCR preprocessing (OpenCV-enhanced)
-    vision_preprocess_enabled: bool = Field(default=False, validation_alias="VISION_PREPROCESS_ENABLED")
+    vision_preprocess_enabled: bool = Field(
+        default=False, validation_alias="VISION_PREPROCESS_ENABLED"
+    )
     vision_preprocess_timeout_seconds: int = Field(
         default=20, validation_alias="VISION_PREPROCESS_TIMEOUT_SECONDS"
     )
@@ -194,8 +245,12 @@ class Settings(BaseSettings):
         default=20 * 1024 * 1024, validation_alias="VISION_PREPROCESS_MAX_BYTES"
     )
 
-    ocr_preprocess_enabled: bool = Field(default=False, validation_alias="OCR_PREPROCESS_ENABLED")
-    ocr_preprocess_prefix: str = Field(default="preprocessed/ocr/", validation_alias="OCR_PREPROCESS_PREFIX")
+    ocr_preprocess_enabled: bool = Field(
+        default=False, validation_alias="OCR_PREPROCESS_ENABLED"
+    )
+    ocr_preprocess_prefix: str = Field(
+        default="preprocessed/ocr/", validation_alias="OCR_PREPROCESS_PREFIX"
+    )
     ocr_preprocess_timeout_seconds: int = Field(
         default=20, validation_alias="OCR_PREPROCESS_TIMEOUT_SECONDS"
     )
@@ -204,16 +259,61 @@ class Settings(BaseSettings):
     )
 
     # Context compaction (session memory)
-    context_compaction_enabled: bool = Field(default=False, validation_alias="CONTEXT_COMPACTION_ENABLED")
-    context_compaction_max_messages: int = Field(default=24, validation_alias="CONTEXT_COMPACTION_MAX_MESSAGES")
-    context_compaction_overlap: int = Field(default=6, validation_alias="CONTEXT_COMPACTION_OVERLAP")
-    context_compaction_interval: int = Field(default=8, validation_alias="CONTEXT_COMPACTION_INTERVAL")
+    # Backward-compatible flag: historically used to toggle LLM-based summarization.
+    # Prefer CONTEXT_COMPACTION_MODE for new setups.
+    context_compaction_enabled: bool = Field(
+        default=False, validation_alias="CONTEXT_COMPACTION_ENABLED"
+    )
+    # off | deterministic | llm
+    context_compaction_mode: str = Field(
+        default="deterministic", validation_alias="CONTEXT_COMPACTION_MODE"
+    )
+    context_compaction_max_messages: int = Field(
+        default=24, validation_alias="CONTEXT_COMPACTION_MAX_MESSAGES"
+    )
+    context_compaction_overlap: int = Field(
+        default=6, validation_alias="CONTEXT_COMPACTION_OVERLAP"
+    )
+    context_compaction_interval: int = Field(
+        default=8, validation_alias="CONTEXT_COMPACTION_INTERVAL"
+    )
+
+    # Reviewer workflow (P2)
+    review_api_enabled: bool = Field(
+        default=False, validation_alias="REVIEW_API_ENABLED"
+    )
+    review_admin_token: str = Field(default="", validation_alias="REVIEW_ADMIN_TOKEN")
+    review_item_ttl_seconds: int = Field(
+        default=7 * 24 * 3600, validation_alias="REVIEW_ITEM_TTL_SECONDS"
+    )
+    review_ui_enabled: bool = Field(default=False, validation_alias="REVIEW_UI_ENABLED")
+
+    # Feature flags / experiments (P2)
+    feature_flags_json: str = Field(default="{}", validation_alias="FEATURE_FLAGS_JSON")
+    feature_flags_salt: str = Field(
+        default="ff_v1", validation_alias="FEATURE_FLAGS_SALT"
+    )
+
+    # Metrics (P2)
+    metrics_enabled: bool = Field(default=False, validation_alias="METRICS_ENABLED")
+    metrics_token: str = Field(default="", validation_alias="METRICS_TOKEN")
 
     # QIndex worker queue (Redis required)
-    qindex_queue_name: str = Field(default="qindex:queue", validation_alias="QINDEX_QUEUE_NAME")
+    qindex_queue_name: str = Field(
+        default="qindex:queue", validation_alias="QINDEX_QUEUE_NAME"
+    )
 
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
-    allow_origins: list[str] = Field(default=["*"], validation_alias="ALLOW_ORIGINS")
+    # CORS: default to explicit dev origins (production must set ALLOW_ORIGINS explicitly).
+    allow_origins: list[str] = Field(
+        default=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        validation_alias="ALLOW_ORIGINS",
+    )
     log_to_file: bool = Field(default=True, validation_alias="LOG_TO_FILE")
     log_file_path: str = Field(
         default=os.path.join("logs", "backend.log"),

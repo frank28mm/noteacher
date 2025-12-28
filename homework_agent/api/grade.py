@@ -1,22 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-import io
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, status, Request, Header, BackgroundTasks
 
 from homework_agent.models.schemas import (
-    GradeRequest, GradeResponse,
-    VisionProvider, Subject, SimilarityMode, ImageRef
+    GradeRequest,
+    GradeResponse,
+    VisionProvider,
+    Subject,
+    ImageRef,
 )
+from homework_agent.services.vision_grade_agent import UnifiedGradeResult
 from homework_agent.services.llm import MathGradingResult, EnglishGradingResult
 from homework_agent.services.autonomous_agent import run_autonomous_grade_agent
 from homework_agent.services.qindex_queue import enqueue_qindex_job
@@ -26,17 +27,14 @@ from homework_agent.core.qbank import (
     assign_stable_item_ids,
     build_question_bank,
     dedupe_wrong_items,
-    derive_wrong_items_from_questions,
     normalize_questions,
     sanitize_wrong_items,
 )
 from homework_agent.core.slice_policy import should_create_slices_for_bank
 from homework_agent.core.slice_policy import pick_question_numbers_for_slices
-from homework_agent.core.slice_policy import analyze_visual_risk
 from homework_agent.api.session import (
     cache_store,
     save_mistakes,
-    get_mistakes,
     get_question_bank,
     save_question_index,
     save_grade_progress,
@@ -46,8 +44,14 @@ from homework_agent.api.session import (
     _ensure_session_id,
     IDP_TTL_HOURS,
 )
-from homework_agent.utils.observability import get_request_id_from_headers, log_event, trace_span
+from homework_agent.utils.observability import (
+    get_request_id_from_headers,
+    log_event,
+    trace_span,
+)
 from homework_agent.utils.user_context import require_user_id
+from homework_agent.utils.feature_flags import decide as decide_feature_flag
+from homework_agent.utils.versioning import stable_json_hash, stable_text_hash
 from homework_agent.utils.submission_store import (
     resolve_page_image_urls,
     touch_submission,
@@ -58,12 +62,7 @@ from homework_agent.utils.url_image_helpers import (
     _is_public_url,
     _normalize_public_url,
     _strip_base64_prefix,
-    _first_public_image_url,
-    _probe_url_head,
-    _download_as_data_uri,
-    _is_provider_image_fetch_issue,
 )
-from homework_agent.utils.supabase_image_proxy import _create_proxy_image_urls
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +70,9 @@ router = APIRouter()
 
 # 并发保护：防止线程池堆积导致“越跑越慢/无响应”
 _settings_for_limits = get_settings()
-VISION_SEMAPHORE = asyncio.Semaphore(max(1, int(_settings_for_limits.max_concurrent_vision)))
+VISION_SEMAPHORE = asyncio.Semaphore(
+    max(1, int(_settings_for_limits.max_concurrent_vision))
+)
 LLM_SEMAPHORE = asyncio.Semaphore(max(1, int(_settings_for_limits.max_concurrent_llm)))
 UNIFIED_AGENT_SEMAPHORE = asyncio.Semaphore(
     max(1, int(getattr(_settings_for_limits, "unified_agent_max_concurrency", 2)))
@@ -79,6 +80,7 @@ UNIFIED_AGENT_SEMAPHORE = asyncio.Semaphore(
 AUTONOMOUS_AGENT_SEMAPHORE = asyncio.Semaphore(
     max(1, int(getattr(_settings_for_limits, "autonomous_agent_max_concurrency", 2)))
 )
+
 
 async def _call_blocking_in_thread(
     fn,
@@ -94,8 +96,10 @@ async def _call_blocking_in_thread(
             timeout=timeout_seconds,
         )
 
+
 # 常量
 # 取消硬性 5 轮上限；仅保留计数用于提示递进
+
 
 def _bank_has_visual_risk(bank: Any) -> bool:
     try:
@@ -104,7 +108,9 @@ def _bank_has_visual_risk(bank: Any) -> bool:
         qs = bank.get("questions")
         if not isinstance(qs, dict):
             return False
-        return any(isinstance(q, dict) and q.get("visual_risk") is True for q in qs.values())
+        return any(
+            isinstance(q, dict) and q.get("visual_risk") is True for q in qs.values()
+        )
     except Exception as e:
         logger.debug(f"_bank_has_visual_risk check failed: {e}")
         return False
@@ -113,6 +119,58 @@ def _bank_has_visual_risk(bank: Any) -> bool:
 def _visual_risk_warning_text() -> str:
     # Short, client-friendly.
     return "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+
+
+def _decide_autonomous_variant(
+    *,
+    settings: Any,
+    experiment_key: str,
+    request_id: Optional[str],
+    session_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """
+    Decide P2 "canary/AB" for /grade and return:
+      - experiments meta (persistable; for qbank/run_versions)
+      - autonomous agent overrides (max_iterations/token_budget/timeout/confidence_threshold)
+    """
+    flags_json = str(getattr(settings, "feature_flags_json", "{}") or "{}")
+    salt = str(getattr(settings, "feature_flags_salt", "ff_v1") or "ff_v1")
+    key = (
+        str(experiment_key or session_id or "").strip() or str(session_id or "").strip()
+    )
+
+    decision = decide_feature_flag(
+        flags_json=flags_json, name="grade.autonomous_loop", key=key, salt=salt
+    )
+    exp: dict[str, Any] = {
+        "grade.autonomous_loop": {
+            "enabled": bool(decision.enabled),
+            "variant": str(decision.variant or "") if decision.enabled else "",
+            "reason": str(decision.reason or ""),
+            "key": str(key),
+        }
+    }
+
+    overrides: dict[str, Any] = {}
+    if decision.enabled:
+        variant = str(decision.variant or "").strip().lower()
+        if variant in {"iter2", "iterations_2"}:
+            overrides["max_iterations_override"] = 2
+        elif variant in {"iter3", "iterations_3"}:
+            overrides["max_iterations_override"] = 3
+        elif variant in {"low_budget"}:
+            overrides["token_budget_total_override"] = 8000
+        elif variant in {"short_timeout"}:
+            overrides["timeout_seconds_override"] = 300
+
+    log_event(
+        logger,
+        "experiment_decision",
+        request_id=request_id,
+        session_id=session_id,
+        experiments=exp,
+    )
+    return exp, overrides
 
 
 @dataclass(frozen=True)
@@ -144,22 +202,25 @@ def _needs_fallback(result: Any) -> bool:
     return False
 
 
-
 def validate_vision_provider(provider: VisionProvider) -> VisionProvider:
     """验证vision_provider是否在白名单中"""
     allowed_providers = [VisionProvider.QWEN3, VisionProvider.DOUBAO]
     if provider not in allowed_providers:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid vision_provider. Allowed values: {[p.value for p in allowed_providers]}"
+            detail=f"Invalid vision_provider. Allowed values: {[p.value for p in allowed_providers]}",
         )
     return provider
 
 
-def validate_images_payload(images: List[Dict[str, Any]], vision_provider: VisionProvider) -> None:
+def validate_images_payload(
+    images: List[Dict[str, Any]], vision_provider: VisionProvider
+) -> None:
     """Early validation for /grade to reduce invalid calls."""
     if not images:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Images cannot be empty")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Images cannot be empty"
+        )
     for img in images:
         url = img.get("url")
         b64 = img.get("base64")
@@ -173,7 +234,10 @@ def validate_images_payload(images: List[Dict[str, Any]], vision_provider: Visio
             cleaned = _strip_base64_prefix(b64)
             est_bytes = int(len(cleaned) * 0.75)
             if est_bytes > 20 * 1024 * 1024:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Image size exceeds 20MB; use URL")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Image size exceeds 20MB; use URL",
+                )
             if vision_provider == VisionProvider.DOUBAO:
                 # Ark/Doubao is URL-preferred but can accept data-url fallback (avoids provider-side URL fetch).
                 if not str(b64).lstrip().lower().startswith("data:image/"):
@@ -182,7 +246,10 @@ def validate_images_payload(images: List[Dict[str, Any]], vision_provider: Visio
                         detail="Doubao base64 must be a data URL (data:image/...;base64,...)",
                     )
         else:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Each image must provide url or base64")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Each image must provide url or base64",
+            )
 
 
 def generate_job_id() -> str:
@@ -190,7 +257,9 @@ def generate_job_id() -> str:
     return f"job_{uuid.uuid4().hex[:16]}"
 
 
-def get_idempotency_key(request: Request, x_idempotency_key: Optional[str] = None) -> Optional[str]:
+def get_idempotency_key(
+    request: Request, x_idempotency_key: Optional[str] = None
+) -> Optional[str]:
     """获取幂等性键，只接受 Header。"""
     if x_idempotency_key:
         return x_idempotency_key.strip()
@@ -209,11 +278,78 @@ def check_idempotency(idempotency_key: str) -> Optional[GradeResponse]:
         return None
 
 
-def cache_response(idempotency_key: str, response: GradeResponse) -> None:
+def _check_idempotency_or_raise(
+    *, idempotency_key: str, fingerprint: str
+) -> Optional[GradeResponse]:
+    cached = cache_store.get(f"idp:{idempotency_key}")
+    if not cached:
+        return None
+    try:
+        cached_fp = str(
+            (cached.get("fingerprint") if isinstance(cached, dict) else "") or ""
+        )
+        if cached_fp and cached_fp != str(fingerprint or ""):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Idempotency key conflict"
+            )
+        resp = cached.get("response") if isinstance(cached, dict) else None
+        if not isinstance(resp, dict):
+            return None
+        return GradeResponse(**resp)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.debug(f"_check_idempotency_or_raise parse failed: {e}")
+        return None
+
+
+def _idempotency_fingerprint(req: GradeRequest) -> str:
+    """
+    Stable fingerprint for idempotency key collision detection.
+    Contract: same key + different params => 409.
+    Keep it cheap: do not persist full base64 blobs.
+    """
+    try:
+        imgs: List[Dict[str, Any]] = []
+        for img in (req.images or [])[:10]:
+            url = getattr(img, "url", None)
+            b64 = getattr(img, "base64", None)
+            if url:
+                imgs.append({"url": str(url).strip()})
+            elif b64:
+                b64s = str(b64)
+                imgs.append(
+                    {
+                        "base64_hash": stable_text_hash(b64s)[:16],
+                        "base64_len": len(b64s),
+                    }
+                )
+        payload = {
+            "subject": getattr(req.subject, "value", str(req.subject)),
+            "vision_provider": getattr(
+                req.vision_provider, "value", str(req.vision_provider)
+            ),
+            "llm_provider": str(getattr(req, "llm_provider", None) or ""),
+            "mode": str(getattr(req, "mode", None) or ""),
+            "session_id": str(getattr(req, "session_id", None) or ""),
+            "images": imgs,
+        }
+        return stable_json_hash(payload)
+    except Exception:
+        return stable_text_hash(repr(req))
+
+
+def cache_response(
+    idempotency_key: str, response: GradeResponse, *, fingerprint: str
+) -> None:
     """缓存响应结果"""
     cache_store.set(
         f"idp:{idempotency_key}",
-        {"response": response.model_dump(), "ts": datetime.now().isoformat()},
+        {
+            "response": response.model_dump(),
+            "ts": datetime.now().isoformat(),
+            "fingerprint": str(fingerprint or ""),
+        },
         ttl_seconds=IDP_TTL_HOURS * 3600,
     )
 
@@ -291,10 +427,14 @@ def _init_grading_ctx(req: GradeRequest, provider_str: str) -> _GradingCtx:
     deadline_m = started_m + float(settings.grade_completion_sla_seconds)
     timings_ms: Dict[str, int] = {}
     request_id = getattr(req, "_request_id", None)
-    save_grade_progress(session_id, "grade_start", "已接收请求，准备识别…", {"request_id": request_id})
+    save_grade_progress(
+        session_id, "grade_start", "已接收请求，准备识别…", {"request_id": request_id}
+    )
 
     meta_base: Dict[str, Any] = {
-        "vision_provider_requested": getattr(req.vision_provider, "value", str(req.vision_provider)),
+        "vision_provider_requested": getattr(
+            req.vision_provider, "value", str(req.vision_provider)
+        ),
         "vision_provider_used": None,
         "vision_used_base64_fallback": False,
         "vision_used_proxy_url": False,
@@ -338,7 +478,9 @@ def _persist_done_qbank_snapshot(
         return None
 
     questions_raw = getattr(grading_result, "questions", None)
-    questions_list: List[Dict[str, Any]] = questions_raw if isinstance(questions_raw, list) else []
+    questions_list: List[Dict[str, Any]] = (
+        questions_raw if isinstance(questions_raw, list) else []
+    )
     bank = build_question_bank(
         session_id=ctx.session_id,
         subject=req.subject,
@@ -356,6 +498,7 @@ def _persist_done_qbank_snapshot(
         grade_warnings=(getattr(grading_result, "warnings", None) or [])
         + ([vision_fallback_warning] if vision_fallback_warning else [])
         + ([extra_warn] if extra_warn else []),
+        request_id=ctx.request_id,
         timings_ms=ctx.timings_ms,
     )
     return extra_warn
@@ -365,14 +508,18 @@ def _ensure_grading_counts(grading_result: Any) -> None:
     """Defensive: if LLM didn't output counts, compute from normalized results."""
     if getattr(grading_result, "wrong_count", None) is None:
         try:
-            grading_result.wrong_count = len(getattr(grading_result, "wrong_items", []) or [])
+            grading_result.wrong_count = len(
+                getattr(grading_result, "wrong_items", []) or []
+            )
         except Exception as e:
             logger.debug(f"Setting wrong_count failed: {e}")
             grading_result.wrong_count = None
     if getattr(grading_result, "total_items", None) is None:
         try:
             qs = getattr(grading_result, "questions", None) or []
-            grading_result.total_items = len(qs) if isinstance(qs, list) and qs else None
+            grading_result.total_items = (
+                len(qs) if isinstance(qs, list) and qs else None
+            )
         except Exception as e:
             logger.debug(f"Setting total_items failed: {e}")
             grading_result.total_items = None
@@ -538,11 +685,24 @@ def _build_done_grade_response(
     )
 
 
-
-async def _perform_autonomous_grading(req: GradeRequest, provider_str: str) -> GradeResponse:
+async def _perform_autonomous_grading(
+    req: GradeRequest,
+    provider_str: str,
+    *,
+    experiment_key: Optional[str] = None,
+) -> GradeResponse:
     """Run the autonomous agent loop and map to GradeResponse."""
     ctx = _init_grading_ctx(req, provider_str)
-    save_grade_progress(ctx.session_id, "vision_start", "自主阅卷中（规划→工具→反思）…", None)
+    experiments_meta, overrides = _decide_autonomous_variant(
+        settings=ctx.settings,
+        experiment_key=str(experiment_key or ctx.session_id),
+        request_id=ctx.request_id,
+        session_id=ctx.session_id,
+    )
+    ctx.meta_base["experiments"] = experiments_meta
+    save_grade_progress(
+        ctx.session_id, "vision_start", "自主阅卷中（规划→工具→反思）…", None
+    )
     log_event(
         logger,
         "autonomous_grade_start",
@@ -561,6 +721,8 @@ async def _perform_autonomous_grading(req: GradeRequest, provider_str: str) -> G
                 provider=provider_str,
                 session_id=ctx.session_id,
                 request_id=ctx.request_id,
+                experiments=experiments_meta,
+                **overrides,
             )
         except Exception as e:
             log_event(
@@ -589,7 +751,9 @@ async def _perform_autonomous_grading(req: GradeRequest, provider_str: str) -> G
             )
 
     if autonomous.status == "rejected":
-        save_grade_progress(ctx.session_id, "failed", "输入非作业图片，已拒绝批改", None)
+        save_grade_progress(
+            ctx.session_id, "failed", "输入非作业图片，已拒绝批改", None
+        )
         return GradeResponse(
             wrong_items=[],
             summary=autonomous.summary,
@@ -605,7 +769,9 @@ async def _perform_autonomous_grading(req: GradeRequest, provider_str: str) -> G
             questions=[],
         )
 
-    grading_result = _build_grading_result_from_autonomous(autonomous=autonomous, subject=req.subject)
+    grading_result = _build_grading_result_from_autonomous(
+        autonomous=autonomous, subject=req.subject
+    )
 
     extra_warn = _persist_done_qbank_snapshot(
         ctx=ctx,
@@ -619,7 +785,9 @@ async def _perform_autonomous_grading(req: GradeRequest, provider_str: str) -> G
 
     _ensure_grading_counts(grading_result)
     _log_grade_done(ctx=ctx, grading_result=grading_result)
-    save_grade_progress(ctx.session_id, "done", "批改结果已生成", {"timings_ms": ctx.timings_ms})
+    save_grade_progress(
+        ctx.session_id, "done", "批改结果已生成", {"timings_ms": ctx.timings_ms}
+    )
 
     return _build_done_grade_response(
         ctx=ctx,
@@ -635,9 +803,13 @@ async def _perform_autonomous_grading(req: GradeRequest, provider_str: str) -> G
 
 
 @trace_span("grade.perform_grading")
-async def perform_grading(req: GradeRequest, provider_str: str) -> GradeResponse:
+async def perform_grading(
+    req: GradeRequest, provider_str: str, *, experiment_key: Optional[str] = None
+) -> GradeResponse:
     """执行批改（同步/后台共用），统一走 Autonomous Agent。"""
-    return await _perform_autonomous_grading(req, provider_str)
+    return await _perform_autonomous_grading(
+        req, provider_str, experiment_key=experiment_key
+    )
 
 
 async def background_grade(job_id: str, req: GradeRequest, provider_str: str):
@@ -672,7 +844,11 @@ async def background_grade(job_id: str, req: GradeRequest, provider_str: str):
 
 def background_build_question_index(session_id: str, page_urls: List[str]) -> None:
     """Deprecated: qindex is handled by an external worker (see `qindex_queue.py`)."""
-    logger.warning("background_build_question_index called but is deprecated; session_id=%s pages=%s", session_id, len(page_urls or []))
+    logger.warning(
+        "background_build_question_index called but is deprecated; session_id=%s pages=%s",
+        session_id,
+        len(page_urls or []),
+    )
     return None
 
 
@@ -684,12 +860,12 @@ def validate_images(images: List[Any], provider: VisionProvider):
             if not (url_str.startswith("http://") or url_str.startswith("https://")):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Image index {idx}: URL must be HTTP/HTTPS"
+                    detail=f"Image index {idx}: URL must be HTTP/HTTPS",
                 )
             if "localhost" in url_str or "127.0.0.1" in url_str:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Image index {idx}: URL must be public (no localhost/127)"
+                    detail=f"Image index {idx}: URL must be public (no localhost/127)",
                 )
         elif img.base64:
             if provider == VisionProvider.DOUBAO:
@@ -704,7 +880,7 @@ def validate_images(images: List[Any], provider: VisionProvider):
             if est_size > 20 * 1024 * 1024:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Image index {idx}: Base64 image too large (>20MB), please use URL"
+                    detail=f"Image index {idx}: Base64 image too large (>20MB), please use URL",
                 )
 
 
@@ -713,7 +889,13 @@ def _resolve_images_from_upload_id(upload_id: str, *, user_id: str) -> List[str]
     Backward-compatible name: we treat upload_id as submission_id (one upload == one Submission).
     Resolve canonical page_image_urls from Supabase Postgres.
     """
-    return [str(u).strip() for u in (resolve_page_image_urls(user_id=user_id, submission_id=str(upload_id)) or []) if str(u).strip()]
+    return [
+        str(u).strip()
+        for u in (
+            resolve_page_image_urls(user_id=user_id, submission_id=str(upload_id)) or []
+        )
+        if str(u).strip()
+    ]
 
 
 @router.post("/grade", response_model=GradeResponse, status_code=status.HTTP_200_OK)
@@ -728,20 +910,32 @@ async def grade_homework(
     批改作业 API (Stub)
     """
     # 1. Resolve images (optional upload_id) + Early Validation
-    user_id = require_user_id(authorization=request.headers.get("Authorization"), x_user_id=x_user_id)
+    user_id = require_user_id(
+        authorization=request.headers.get("Authorization"), x_user_id=x_user_id
+    )
     upload_id = (getattr(req, "upload_id", None) or "").strip()
     if upload_id and not (req.images or []):
         urls = _resolve_images_from_upload_id(upload_id, user_id=user_id)
         if not urls:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="upload_id not found for this user")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="upload_id not found for this user",
+            )
         req = req.model_copy(update={"images": [ImageRef(url=u) for u in urls]})
 
     if not (req.images or []):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Images cannot be empty (provide images or upload_id)")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Images cannot be empty (provide images or upload_id)",
+        )
 
     validate_images(req.images, req.vision_provider)
 
-    request_id = get_request_id_from_headers(request.headers) or f"req_{uuid.uuid4().hex[:12]}"
+    request_id = getattr(
+        getattr(request, "state", None), "request_id", None
+    ) or get_request_id_from_headers(request.headers)
+    if not request_id:
+        request_id = f"req_{uuid.uuid4().hex[:12]}"
     try:
         setattr(req, "_request_id", request_id)
     except Exception as e:
@@ -769,21 +963,38 @@ async def grade_homework(
     # 2. 幂等性校验
     idempotency_key = get_idempotency_key(None, x_idempotency_key)
     if idempotency_key:
-        cached_response = check_idempotency(idempotency_key)
+        fp = _idempotency_fingerprint(req)
+        cached_response = _check_idempotency_or_raise(
+            idempotency_key=idempotency_key, fingerprint=fp
+        )
         if cached_response:
-            log_event(logger, "grade_idempotency_hit", request_id=request_id, idempotency_key=idempotency_key)
+            log_event(
+                logger,
+                "grade_idempotency_hit",
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
             return cached_response
 
     # 2.5 Ensure session_id is always present so results can be delivered to /chat
     session_for_ctx = _ensure_session_id(req.session_id or req.batch_id)
     req = req.model_copy(update={"session_id": session_for_ctx})
-    save_grade_progress(session_for_ctx, "accepted", "已开始处理…", {"request_id": request_id})
+    save_grade_progress(
+        session_for_ctx, "accepted", "已开始处理…", {"request_id": request_id}
+    )
 
     # Best-effort: link session_id back to durable Submission for later history/chat mapping.
     if upload_id:
         try:
-            subj = req.subject.value if hasattr(req.subject, "value") else str(req.subject)
-            link_session_to_submission(user_id=user_id, submission_id=upload_id, session_id=session_for_ctx, subject=subj)
+            subj = (
+                req.subject.value if hasattr(req.subject, "value") else str(req.subject)
+            )
+            link_session_to_submission(
+                user_id=user_id,
+                submission_id=upload_id,
+                session_id=session_for_ctx,
+                subject=subj,
+            )
         except Exception as e:
             logger.debug(f"link_session_to_submission failed (best-effort): {e}")
 
@@ -793,7 +1004,9 @@ async def grade_homework(
     if req.llm_provider:
         provider_str = req.llm_provider  # "ark" or "silicon"
     else:
-        provider_str = "silicon" if req.vision_provider == VisionProvider.QWEN3 else "ark"
+        provider_str = (
+            "silicon" if req.vision_provider == VisionProvider.QWEN3 else "ark"
+        )
     log_event(
         logger,
         "grade_request_start",
@@ -842,35 +1055,68 @@ async def grade_homework(
         )
 
     try:
-        response = await perform_grading(req, provider_str)
+        response = await perform_grading(req, provider_str, experiment_key=user_id)
 
         # Best-effort: persist Submission facts to Supabase Postgres (long-term "hard disk").
         # We treat upload_id as submission_id.
         if upload_id:
             try:
-                bank_now = get_question_bank(session_for_ctx) if session_for_ctx else None
-                meta_now = (bank_now or {}).get("meta") if isinstance(bank_now, dict) else None
+                bank_now = (
+                    get_question_bank(session_for_ctx) if session_for_ctx else None
+                )
+                meta_now = (
+                    (bank_now or {}).get("meta") if isinstance(bank_now, dict) else None
+                )
                 meta_now = meta_now if isinstance(meta_now, dict) else {}
-                page_urls_now = (bank_now or {}).get("page_image_urls") if isinstance(bank_now, dict) else None
-                page_urls_now = page_urls_now if isinstance(page_urls_now, list) else None
+                page_urls_now = (
+                    (bank_now or {}).get("page_image_urls")
+                    if isinstance(bank_now, dict)
+                    else None
+                )
+                page_urls_now = (
+                    page_urls_now if isinstance(page_urls_now, list) else None
+                )
                 proxy_urls_now = meta_now.get("page_image_urls_proxy")
-                proxy_urls_now = proxy_urls_now if isinstance(proxy_urls_now, list) else None
+                proxy_urls_now = (
+                    proxy_urls_now if isinstance(proxy_urls_now, list) else None
+                )
 
-                subj = req.subject.value if hasattr(req.subject, "value") else str(req.subject)
+                subj = (
+                    req.subject.value
+                    if hasattr(req.subject, "value")
+                    else str(req.subject)
+                )
                 update_submission_after_grade(
                     user_id=user_id,
                     submission_id=upload_id,
                     session_id=session_for_ctx,
+                    request_id=request_id,
                     subject=subj,
-                    page_image_urls=[str(u) for u in (page_urls_now or []) if str(u).strip()] if page_urls_now else None,
-                    proxy_page_image_urls=[str(u) for u in (proxy_urls_now or []) if str(u).strip()] if proxy_urls_now else None,
+                    page_image_urls=(
+                        [str(u) for u in (page_urls_now or []) if str(u).strip()]
+                        if page_urls_now
+                        else None
+                    ),
+                    proxy_page_image_urls=(
+                        [str(u) for u in (proxy_urls_now or []) if str(u).strip()]
+                        if proxy_urls_now
+                        else None
+                    ),
                     vision_raw_text=getattr(response, "vision_raw_text", None),
-                    grade_result=response.model_dump() if hasattr(response, "model_dump") else {},
+                    grade_result=(
+                        response.model_dump() if hasattr(response, "model_dump") else {}
+                    ),
                     warnings=list(getattr(response, "warnings", None) or []),
-                    meta={k: v for k, v in meta_now.items() if v is not None} if isinstance(meta_now, dict) else None,
+                    meta=(
+                        {k: v for k, v in meta_now.items() if v is not None}
+                        if isinstance(meta_now, dict)
+                        else None
+                    ),
                 )
             except Exception as e:
-                logger.debug(f"update_submission_grade_result failed (best-effort): {e}")
+                logger.debug(
+                    f"update_submission_grade_result failed (best-effort): {e}"
+                )
 
         if session_for_ctx:
             wrong_items_payload: List[Dict[str, Any]] = []
@@ -895,17 +1141,25 @@ async def grade_homework(
                 if isinstance(pu, list):
                     page_urls = [str(u) for u in pu if str(u).strip()]
             if not page_urls:
-                page_urls = [str(img.url) for img in req.images if getattr(img, "url", None)]
+                page_urls = [
+                    str(img.url) for img in req.images if getattr(img, "url", None)
+                ]
             must_slice = False
             try:
                 must_slice = _visual_risk_warning_text() in (response.warnings or [])
             except Exception as e:
                 logger.debug(f"Checking visual risk warning failed: {e}")
                 must_slice = False
-            if page_urls and isinstance(bank, dict) and (should_create_slices_for_bank(bank) or must_slice):
+            if (
+                page_urls
+                and isinstance(bank, dict)
+                and (should_create_slices_for_bank(bank) or must_slice)
+            ):
                 ok, reason = qindex_is_configured()
                 if not ok:
-                    save_qindex_placeholder(session_for_ctx, f"qindex skipped: {reason}")
+                    save_qindex_placeholder(
+                        session_for_ctx, f"qindex skipped: {reason}"
+                    )
                 else:
                     allow = pick_question_numbers_for_slices(bank)
                     if not allow:
@@ -915,24 +1169,44 @@ async def grade_homework(
                             if isinstance(qs, dict):
                                 allow = [str(k) for k in qs.keys() if str(k).strip()]
                         except Exception as e:
-                            logger.debug(f"Fallback question number extraction failed: {e}")
+                            logger.debug(
+                                f"Fallback question number extraction failed: {e}"
+                            )
                             allow = []
                     enqueued = enqueue_qindex_job(
                         session_for_ctx,
-                        [v for u in page_urls for v in [_normalize_public_url(str(u))] if v],
+                        [
+                            v
+                            for u in page_urls
+                            for v in [_normalize_public_url(str(u))]
+                            if v
+                        ],
                         question_numbers=allow,
+                        request_id=request_id,
                     )
                     if enqueued:
-                        save_question_index(session_for_ctx, {"questions": {}, "warnings": ["qindex queued"]})
+                        save_question_index(
+                            session_for_ctx,
+                            {"questions": {}, "warnings": ["qindex queued"]},
+                        )
                     else:
-                        save_qindex_placeholder(session_for_ctx, "qindex skipped: redis_unavailable")
+                        save_qindex_placeholder(
+                            session_for_ctx, "qindex skipped: redis_unavailable"
+                        )
         if idempotency_key:
-            cache_response(idempotency_key, response)
+            cache_response(
+                idempotency_key, response, fingerprint=_idempotency_fingerprint(req)
+            )
         return response
     except HTTPException:
         raise
     except Exception as e:
-        save_grade_progress(session_for_ctx, "failed", f"系统错误：{str(e)}", {"error_type": e.__class__.__name__})
+        save_grade_progress(
+            session_for_ctx,
+            "failed",
+            f"系统错误：{str(e)}",
+            {"error_type": e.__class__.__name__},
+        )
         log_event(
             logger,
             "grade_failed",
@@ -942,7 +1216,8 @@ async def grade_homework(
             error_type=e.__class__.__name__,
             error=str(e),
         )
+        # Do not leak internal errors to clients; keep details in logs only.
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
+            detail="Internal server error",
         )

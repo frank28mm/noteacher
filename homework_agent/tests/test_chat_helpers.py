@@ -64,10 +64,4 @@ class TestFormatMathForDisplay:
     def test_error_handling(self):
         """Should not raise on invalid input."""
         # Function converts None to string "None" or similar - should not crash
-        try:
-            result = _format_math_for_display(None)  # type: ignore
-            # If it doesn't crash, test passes (result could be None or "None")
-            assert True
-        except Exception:
-            assert False, "Should not raise exception"
-
+        _format_math_for_display(None)  # type: ignore[arg-type]

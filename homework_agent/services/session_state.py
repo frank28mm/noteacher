@@ -24,6 +24,9 @@ class SessionState:
     tool_results: Dict[str, Any] = field(default_factory=dict)
     reflection_count: int = 0
     partial_results: Dict[str, Any] = field(default_factory=dict)
+    slice_failed_cache: Dict[str, bool] = field(default_factory=dict)
+    attempted_tools: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    preprocess_meta: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -36,6 +39,9 @@ class SessionState:
             "tool_results": dict(self.tool_results or {}),
             "reflection_count": int(self.reflection_count or 0),
             "partial_results": dict(self.partial_results or {}),
+            "slice_failed_cache": dict(self.slice_failed_cache or {}),
+            "attempted_tools": dict(self.attempted_tools or {}),
+            "preprocess_meta": dict(self.preprocess_meta or {}),
             "warnings": list(self.warnings or []),
         }
 
@@ -45,24 +51,27 @@ class SessionState:
         return cls(
             session_id=str(payload.get("session_id") or ""),
             image_urls=list(payload.get("image_urls") or []),
-            slice_urls=dict(payload.get("slice_urls") or {"figure": [], "question": []}),
+            slice_urls=dict(
+                payload.get("slice_urls") or {"figure": [], "question": []}
+            ),
             ocr_text=payload.get("ocr_text"),
             plan_history=list(payload.get("plan_history") or []),
             tool_results=dict(payload.get("tool_results") or {}),
             reflection_count=int(payload.get("reflection_count") or 0),
             partial_results=dict(payload.get("partial_results") or {}),
+            slice_failed_cache=dict(payload.get("slice_failed_cache") or {}),
+            attempted_tools=dict(payload.get("attempted_tools") or {}),
+            preprocess_meta=dict(payload.get("preprocess_meta") or {}),
             warnings=list(payload.get("warnings") or []),
         )
 
 
 class SessionStore(ABC):
     @abstractmethod
-    def save(self, session_id: str, state: SessionState) -> None:
-        ...
+    def save(self, session_id: str, state: SessionState) -> None: ...
 
     @abstractmethod
-    def load(self, session_id: str) -> Optional[SessionState]:
-        ...
+    def load(self, session_id: str) -> Optional[SessionState]: ...
 
 
 class CacheSessionStore(SessionStore):

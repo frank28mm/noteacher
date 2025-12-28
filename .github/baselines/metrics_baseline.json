@@ -1,0 +1,46 @@
+{
+  "metrics_mode": "offline",
+  "total_samples": 5,
+  "success_count": 5,
+  "error_count": 0,
+  "success_rate": 1.0,
+  "latency": {
+    "p50_ms": 0,
+    "p95_ms": 0,
+    "min_ms": 0,
+    "max_ms": 0,
+    "avg_ms": 0
+  },
+  "confidence": {
+    "p50": 0,
+    "p95": 0,
+    "min": 0,
+    "max": 0,
+    "avg": 0
+  },
+  "iterations": {
+    "avg": 0,
+    "max": 0
+  },
+  "verdicts": {
+    "correct_total": 0,
+    "incorrect_total": 0,
+    "uncertain_total": 0
+  },
+  "dataset": {
+    "subjects": {
+      "math": 4,
+      "english": 1
+    },
+    "tags": {
+      "offline": 5,
+      "arithmetic": 1,
+      "geometry": 1,
+      "diagram": 1,
+      "ocr": 1,
+      "english": 1,
+      "multi_question": 1
+    }
+  }
+}
+

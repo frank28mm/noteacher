@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from homework_agent.services.llm import LLMClient
 from homework_agent.utils.settings import get_settings
@@ -20,7 +19,39 @@ _SUMMARY_SYSTEM_PROMPT = (
 )
 
 
-def summarize_history(history: List[Dict[str, Any]], *, provider: str = "silicon") -> str:
+def _deterministic_summary(
+    history: List[Dict[str, Any]], *, max_chars: int = 200
+) -> str:
+    """
+    CI-safe / provider-free summary.
+    Keep only high-signal snippets from user/assistant messages.
+    """
+    if not history:
+        return ""
+    parts: List[str] = []
+    for m in history:
+        if not isinstance(m, dict):
+            continue
+        role = str(m.get("role") or "").strip().lower()
+        content = str(m.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "user":
+            parts.append(f"用户: {content}")
+        elif role == "assistant":
+            parts.append(f"助理: {content}")
+    if not parts:
+        return ""
+    tail = parts[-6:]
+    joined = " | ".join(tail)
+    if len(joined) <= max_chars:
+        return joined
+    return joined[: max(0, max_chars - 1)] + "…"
+
+
+def summarize_history(
+    history: List[Dict[str, Any]], *, provider: str = "silicon"
+) -> str:
     if not history:
         return ""
     client = LLMClient()
@@ -56,8 +87,19 @@ def compact_session_history(
     provider: str = "silicon",
 ) -> bool:
     settings = get_settings()
-    if not getattr(settings, "context_compaction_enabled", False):
+    mode = (
+        str(
+            getattr(settings, "context_compaction_mode", "deterministic")
+            or "deterministic"
+        )
+        .strip()
+        .lower()
+    )
+    enabled_llm = bool(getattr(settings, "context_compaction_enabled", False))
+    if mode in {"0", "false", "off", "disabled", "none"}:
         return False
+    if mode not in {"deterministic", "llm"}:
+        mode = "deterministic"
 
     history = session_data.get("history") or []
     if not isinstance(history, list):
@@ -77,7 +119,10 @@ def compact_session_history(
     if not to_summarize:
         return False
 
-    summary = summarize_history(to_summarize, provider=provider)
+    if mode == "llm" and enabled_llm:
+        summary = summarize_history(to_summarize, provider=provider)
+    else:
+        summary = _deterministic_summary(to_summarize)
     if not summary:
         return False
 
@@ -87,8 +132,8 @@ def compact_session_history(
     log_event(
         logger,
         "session_compacted",
+        mode="llm" if (mode == "llm" and enabled_llm) else "deterministic",
         kept=len(session_data.get("history") or []),
         summarized=len(to_summarize),
     )
     return True
-

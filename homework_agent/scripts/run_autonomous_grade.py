@@ -9,10 +9,17 @@ from pathlib import Path
 from PIL import Image
 
 from homework_agent.api.grade import perform_grading
-from homework_agent.models.schemas import GradeRequest, ImageRef, Subject, VisionProvider
+from homework_agent.models.schemas import (
+    GradeRequest,
+    ImageRef,
+    Subject,
+    VisionProvider,
+)
 
 
-def _file_to_data_url(path: Path, *, max_side: int = 1600, jpeg_quality: int = 85) -> str:
+def _file_to_data_url(
+    path: Path, *, max_side: int = 1600, jpeg_quality: int = 85
+) -> str:
     with Image.open(path) as img:
         img = img.convert("RGB")
         w, h = img.size
@@ -36,7 +43,9 @@ async def _run(
     max_side: int,
     jpeg_quality: int,
 ) -> None:
-    data_url = _file_to_data_url(image_path, max_side=max_side, jpeg_quality=jpeg_quality)
+    data_url = _file_to_data_url(
+        image_path, max_side=max_side, jpeg_quality=jpeg_quality
+    )
     req = GradeRequest(
         images=[ImageRef(base64=data_url)],
         subject=Subject(subject),
@@ -44,7 +53,9 @@ async def _run(
         llm_provider=llm_provider,
         session_id="local_autonomous_demo",
     )
-    provider_str = llm_provider or ("silicon" if req.vision_provider == VisionProvider.QWEN3 else "ark")
+    provider_str = llm_provider or (
+        "silicon" if req.vision_provider == VisionProvider.QWEN3 else "ark"
+    )
     result = await perform_grading(req, provider_str)
     payload = result.model_dump()
     print("=== GradeResponse ===")
@@ -52,9 +63,13 @@ async def _run(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run autonomous grade pipeline with a local image file.")
+    parser = argparse.ArgumentParser(
+        description="Run autonomous grade pipeline with a local image file."
+    )
     parser.add_argument("--image", required=True, help="Path to local image file")
-    parser.add_argument("--subject", default="math", choices=["math", "english"], help="Subject")
+    parser.add_argument(
+        "--subject", default="math", choices=["math", "english"], help="Subject"
+    )
     parser.add_argument(
         "--vision-provider",
         default="doubao",
@@ -67,8 +82,15 @@ def main() -> None:
         choices=["ark", "silicon"],
         help="LLM provider override",
     )
-    parser.add_argument("--max-side", type=int, default=1600, help="Max side length for local image")
-    parser.add_argument("--jpeg-quality", type=int, default=85, help="JPEG quality for local image (1-100)")
+    parser.add_argument(
+        "--max-side", type=int, default=1600, help="Max side length for local image"
+    )
+    parser.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=85,
+        help="JPEG quality for local image (1-100)",
+    )
     args = parser.parse_args()
 
     image_path = Path(args.image).expanduser().resolve()

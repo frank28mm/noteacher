@@ -9,7 +9,10 @@ Implementation is split into:
 
 from __future__ import annotations
 
-from homework_agent.core.qbank_parser import _normalize_question_number, build_question_bank_from_vision_raw_text
+from homework_agent.core.qbank_parser import (
+    _normalize_question_number,
+    build_question_bank_from_vision_raw_text,
+)
 from homework_agent.core.qbank_builder import (
     sanitize_wrong_items,
     normalize_questions,
@@ -29,4 +32,3 @@ __all__ = [
     "assign_stable_item_ids",
     "dedupe_wrong_items",
 ]
-

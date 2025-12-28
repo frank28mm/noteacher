@@ -11,7 +11,6 @@ from fastapi import APIRouter, HTTPException, status
 from homework_agent.core.qbank import _normalize_question_number
 from homework_agent.core.qindex import build_question_index_for_pages
 from homework_agent.utils.cache import BaseCache, get_cache_store
-from homework_agent.utils.settings import get_settings
 from homework_agent.utils.observability import log_event
 
 logger = logging.getLogger(__name__)
@@ -55,6 +54,7 @@ def persist_question_bank(
     grade_status: str,
     grade_summary: str,
     grade_warnings: List[str],
+    request_id: Optional[str] = None,
     timings_ms: Optional[Dict[str, int]] = None,
 ) -> None:
     """Persist the canonical qbank snapshot that /chat must rely on."""
@@ -71,11 +71,17 @@ def persist_question_bank(
         }
     )
     if timings_ms:
-        meta["timings_ms"] = {str(k): int(v) for k, v in timings_ms.items() if v is not None}
+        meta["timings_ms"] = {
+            str(k): int(v) for k, v in timings_ms.items() if v is not None
+        }
     # Derived stats for acceptance checks
     try:
         meta["vision_raw_len"] = int(len(bank.get("vision_raw_text") or ""))
-        meta["questions_count"] = int(len(bank.get("questions") or {})) if isinstance(bank.get("questions"), dict) else 0
+        meta["questions_count"] = (
+            int(len(bank.get("questions") or {}))
+            if isinstance(bank.get("questions"), dict)
+            else 0
+        )
         meta["questions_with_options"] = int(_count_questions_with_options(bank))
     except Exception as e:
         logger.debug(f"Meta stats calculation failed: {e}")
@@ -85,6 +91,7 @@ def persist_question_bank(
         log_event(
             logger,
             "qbank_saved",
+            request_id=request_id,
             session_id=session_id,
             status=grade_status,
             questions=meta.get("questions_count"),
@@ -147,6 +154,12 @@ def save_session(session_id: str, data: Dict[str, Any]) -> None:
     copy = dict(data or {})
     copy["created_at"] = _coerce_ts(copy.get("created_at")) or _now_ts()
     copy["updated_at"] = _coerce_ts(copy.get("updated_at")) or _now_ts()
+    try:
+        from homework_agent.security.safety import sanitize_session_data_for_persistence
+
+        sanitize_session_data_for_persistence(copy)
+    except Exception as e:
+        logger.debug(f"Sanitizing session for persistence failed (best-effort): {e}")
     cache_store.set(f"sess:{session_id}", copy, ttl_seconds=SESSION_TTL_SECONDS)
 
 
@@ -161,7 +174,9 @@ def save_mistakes(session_id: str, wrong_items: List[Dict[str, Any]]) -> None:
     for idx, item in enumerate(wrong_items):
         enriched_item = dict(item)
         # ensure question_number preserved as string
-        qn = _normalize_question_number(enriched_item.get("question_number") or enriched_item.get("question_index"))
+        qn = _normalize_question_number(
+            enriched_item.get("question_number") or enriched_item.get("question_index")
+        )
         if qn is not None:
             enriched_item["question_number"] = qn
         item_id = enriched_item.get("item_id") or enriched_item.get("id")
@@ -235,7 +250,9 @@ def get_question_bank(session_id: str) -> Optional[Dict[str, Any]]:
     return bank if isinstance(bank, dict) else None
 
 
-def save_grade_progress(session_id: str, stage: str, message: str, extra: Optional[Dict[str, Any]] = None) -> None:
+def save_grade_progress(
+    session_id: str, stage: str, message: str, extra: Optional[Dict[str, Any]] = None
+) -> None:
     """Persist best-effort grade progress for UI polling during long /grade calls."""
     if not session_id:
         return
@@ -264,7 +281,9 @@ def get_grade_progress(session_id: str) -> Optional[Dict[str, Any]]:
     return p if isinstance(p, dict) else None
 
 
-def _build_question_index_for_pages(page_urls: List[str], *, session_id: str | None = None) -> Dict[str, Any]:
+def _build_question_index_for_pages(
+    page_urls: List[str], *, session_id: str | None = None
+) -> Dict[str, Any]:
     """Backward-compatible wrapper for worker/session imports."""
     # Keep this symbol stable, but route implementation to shared module to avoid path drift.
     return build_question_index_for_pages(page_urls, session_id=session_id)
@@ -274,7 +293,9 @@ def _build_question_index_for_pages(page_urls: List[str], *, session_id: str | N
 async def get_job(job_id: str):
     job = cache_store.get(f"job:{job_id}")
     if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        )
     return job
 
 
@@ -287,7 +308,10 @@ async def get_session_qbank_meta(session_id: str):
     sid = _ensure_session_id(session_id)
     bank = get_question_bank(sid)
     if not bank:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="qbank not found for session_id")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="qbank not found for session_id",
+        )
 
     questions = bank.get("questions") if isinstance(bank, dict) else None
     qnums: List[str] = []
@@ -298,7 +322,11 @@ async def get_session_qbank_meta(session_id: str):
     out: Dict[str, Any] = {
         "session_id": sid,
         "subject": bank.get("subject"),
-        "page_image_urls_count": len(bank.get("page_image_urls") or []) if isinstance(bank.get("page_image_urls"), list) else 0,
+        "page_image_urls_count": (
+            len(bank.get("page_image_urls") or [])
+            if isinstance(bank.get("page_image_urls"), list)
+            else 0
+        ),
         "vision_raw_len": len(bank.get("vision_raw_text") or ""),
         "questions_count": len(qnums),
         "questions_with_options": _count_questions_with_options(bank),
@@ -319,4 +347,8 @@ async def get_session_qbank_meta(session_id: str):
 async def get_session_progress(session_id: str):
     """UI 辅助接口：返回 /grade 的当前进度（best-effort，可能为空）。"""
     sid = _ensure_session_id(session_id)
-    return get_grade_progress(sid) or {"session_id": sid, "stage": "unknown", "message": "no progress yet"}
+    return get_grade_progress(sid) or {
+        "session_id": sid,
+        "stage": "unknown",
+        "message": "no progress yet",
+    }

@@ -75,7 +75,11 @@ def build_error_payload(
     - keep `error` as the primary string message (older clients already parse this)
     - also include `message` as an alias for readability
     """
-    payload: Dict[str, Any] = {"code": str(code), "error": str(message), "message": str(message)}
+    payload: Dict[str, Any] = {
+        "code": str(getattr(code, "value", code)),
+        "error": str(message),
+        "message": str(message),
+    }
     if details is not None:
         payload["details"] = details
     if retry_after_ms is not None:

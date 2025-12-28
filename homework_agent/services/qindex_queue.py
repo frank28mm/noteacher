@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover
 @dataclass(frozen=True)
 class QIndexJob:
     session_id: str
+    request_id: Optional[str]
     page_urls: list[str]
     # Optional allowlist: only slice/index these question numbers (best-effort).
     question_numbers: list[str]
@@ -39,6 +40,7 @@ class QIndexJob:
         return json.dumps(
             {
                 "session_id": self.session_id,
+                "request_id": self.request_id,
                 "page_urls": self.page_urls,
                 "question_numbers": self.question_numbers,
                 "enqueued_at": self.enqueued_at,
@@ -51,8 +53,11 @@ class QIndexJob:
         obj = json.loads(data)
         return QIndexJob(
             session_id=str(obj.get("session_id")),
+            request_id=str(obj.get("request_id") or "").strip() or None,
             page_urls=[str(u) for u in (obj.get("page_urls") or []) if u],
-            question_numbers=[str(q) for q in (obj.get("question_numbers") or []) if str(q).strip()],
+            question_numbers=[
+                str(q) for q in (obj.get("question_numbers") or []) if str(q).strip()
+            ],
             enqueued_at=float(obj.get("enqueued_at") or time.time()),
         )
 
@@ -78,13 +83,27 @@ def queue_key() -> str:
     return f"{prefix}{settings.qindex_queue_name}"
 
 
-def enqueue_qindex_job(session_id: str, page_urls: list[str], *, question_numbers: Optional[list[str]] = None) -> bool:
+def enqueue_qindex_job(
+    session_id: str,
+    page_urls: list[str],
+    *,
+    question_numbers: Optional[list[str]] = None,
+    request_id: Optional[str] = None,
+) -> bool:
     client = get_redis_client()
     if client is None:
-        log_event(logger, "qindex_enqueue_skipped", level="warning", session_id=session_id, reason="redis_unavailable")
+        log_event(
+            logger,
+            "qindex_enqueue_skipped",
+            level="warning",
+            request_id=request_id,
+            session_id=session_id,
+            reason="redis_unavailable",
+        )
         return False
     job = QIndexJob(
         session_id=session_id,
+        request_id=str(request_id).strip() or None,
         page_urls=page_urls,
         question_numbers=[str(q) for q in (question_numbers or []) if str(q).strip()],
         enqueued_at=time.time(),
@@ -93,15 +112,24 @@ def enqueue_qindex_job(session_id: str, page_urls: list[str], *, question_number
     log_event(
         logger,
         "qindex_enqueued",
+        request_id=request_id,
         session_id=session_id,
         pages=len(page_urls or []),
         questions=len(job.question_numbers),
-        page_image_urls=[redact_url(u) for u in (page_urls or [])[:3]] if page_urls else None,
+        page_image_urls=(
+            [redact_url(u) for u in (page_urls or [])[:3]] if page_urls else None
+        ),
     )
     return True
 
 
-def store_qindex_result(session_id: str, index: dict[str, Any], *, ttl_seconds: int) -> None:
+def store_qindex_result(
+    session_id: str,
+    index: dict[str, Any],
+    *,
+    ttl_seconds: int,
+    request_id: Optional[str] = None,
+) -> None:
     """Store qindex in the same shape as routes.save_question_index()."""
     if not session_id:
         return
@@ -115,6 +143,13 @@ def store_qindex_result(session_id: str, index: dict[str, Any], *, ttl_seconds: 
     try:
         questions = index.get("questions") if isinstance(index, dict) else None
         qn = len(questions or {}) if isinstance(questions, dict) else None
-        log_event(logger, "qindex_stored", session_id=session_id, questions=qn, ttl_seconds=ttl_seconds)
+        log_event(
+            logger,
+            "qindex_stored",
+            request_id=request_id,
+            session_id=session_id,
+            questions=qn,
+            ttl_seconds=ttl_seconds,
+        )
     except Exception:
         return

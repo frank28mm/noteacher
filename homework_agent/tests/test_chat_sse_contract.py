@@ -68,14 +68,19 @@ def test_chat_allows_response_without_slices(monkeypatch: pytest.MonkeyPatch):
     session_id = "sess_visual_fail_closed"
 
     # Seed session to have a stable focus question.
-    save_session(session_id, {"history": [], "focus_question_number": "9", "interaction_count": 0})
+    save_session(
+        session_id,
+        {"history": [], "focus_question_number": "9", "interaction_count": 0},
+    )
     save_question_bank(
         session_id,
         {
             "session_id": session_id,
             "subject": "math",
             "page_image_urls": [],
-            "questions": {"9": {"question_content": "如图，已知∠1=150°，∠BCD=30°，试说明AD∥BC。"}},
+            "questions": {
+                "9": {"question_content": "如图，已知∠1=150°，∠BCD=30°，试说明AD∥BC。"}
+            },
         },
     )
 
@@ -109,11 +114,16 @@ def test_chat_allows_response_without_slices(monkeypatch: pytest.MonkeyPatch):
     assert "stub response" in content
 
 
-def test_chat_allows_response_when_visual_facts_missing(monkeypatch: pytest.MonkeyPatch):
+def test_chat_allows_response_when_visual_facts_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Chat should still respond even if visual facts are missing for risky questions."""
     session_id = "sess_vfe_fail_closed_first_turn"
 
-    save_session(session_id, {"history": [], "focus_question_number": "9", "interaction_count": 0})
+    save_session(
+        session_id,
+        {"history": [], "focus_question_number": "9", "interaction_count": 0},
+    )
     save_question_bank(
         session_id,
         {
@@ -124,7 +134,9 @@ def test_chat_allows_response_when_visual_facts_missing(monkeypatch: pytest.Monk
                 "9": {
                     "question_content": "如图，已知∠1=150°，∠BCD=30°，试说明AD∥BC。",
                     "visual_risk": True,
-                    "warnings": ["作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"],
+                    "warnings": [
+                        "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+                    ],
                 }
             },
         },
@@ -133,7 +145,13 @@ def test_chat_allows_response_when_visual_facts_missing(monkeypatch: pytest.Monk
     # Pretend qindex slices are ready, but no visual_facts have been cached yet.
     monkeypatch.setattr(
         "homework_agent.api._chat_stages.get_question_index",
-        lambda _sid: {"questions": {"9": {"pages": [{"slice_image_urls": ["https://example.com/slice.jpg"]}]}}},
+        lambda _sid: {
+            "questions": {
+                "9": {
+                    "pages": [{"slice_image_urls": ["https://example.com/slice.jpg"]}]
+                }
+            }
+        },
     )
     monkeypatch.setattr(
         "homework_agent.services.llm.LLMClient.socratic_tutor_stream",

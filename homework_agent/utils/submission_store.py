@@ -29,6 +29,7 @@ def create_submission_on_upload(
     submission_id: str,
     user_id: str,
     session_id: Optional[str],
+    request_id: Optional[str] = None,
     page_image_urls: List[str],
     filename: Optional[str] = None,
     content_type: Optional[str] = None,
@@ -46,7 +47,9 @@ def create_submission_on_upload(
             "submission_id": str(submission_id),
             "user_id": str(user_id),
             "session_id": str(session_id) if session_id else None,
-            "page_image_urls": [str(u).strip() for u in (page_image_urls or []) if str(u).strip()],
+            "page_image_urls": [
+                str(u).strip() for u in (page_image_urls or []) if str(u).strip()
+            ],
             "proxy_page_image_urls": [],
             "grade_result": {},
             "warnings": [],
@@ -65,10 +68,28 @@ def create_submission_on_upload(
             record["grade_result"] = {"upload": extra}
 
         _safe_table("submissions").upsert(record, on_conflict="submission_id").execute()
-        log_event(logger, "submission_created", submission_id=submission_id, user_id=user_id, pages=len(record["page_image_urls"]))
+        log_event(
+            logger,
+            "submission_created",
+            request_id=request_id,
+            submission_id=submission_id,
+            user_id=user_id,
+            session_id=session_id,
+            pages=len(record["page_image_urls"]),
+        )
     except Exception as e:
         try:
-            log_event(logger, "submission_create_failed", level="warning", submission_id=submission_id, user_id=user_id, error=str(e))
+            log_event(
+                logger,
+                "submission_create_failed",
+                level="warning",
+                request_id=request_id,
+                submission_id=submission_id,
+                user_id=user_id,
+                session_id=session_id,
+                error_type=e.__class__.__name__,
+                error=str(e),
+            )
         except Exception:
             pass
 
@@ -166,6 +187,7 @@ def update_submission_after_grade(
     user_id: str,
     submission_id: str,
     session_id: str,
+    request_id: Optional[str] = None,
     subject: Optional[str],
     page_image_urls: Optional[List[str]],
     proxy_page_image_urls: Optional[List[str]],
@@ -188,19 +210,43 @@ def update_submission_after_grade(
             "last_active_at": _iso(now),
         }
         if page_image_urls is not None:
-            payload["page_image_urls"] = [str(u).strip() for u in (page_image_urls or []) if str(u).strip()]
+            payload["page_image_urls"] = [
+                str(u).strip() for u in (page_image_urls or []) if str(u).strip()
+            ]
         if proxy_page_image_urls is not None:
-            payload["proxy_page_image_urls"] = [str(u).strip() for u in (proxy_page_image_urls or []) if str(u).strip()]
+            payload["proxy_page_image_urls"] = [
+                str(u).strip() for u in (proxy_page_image_urls or []) if str(u).strip()
+            ]
         if meta:
             # Keep provider/meta inside grade_result for now to avoid schema churn.
             payload["grade_result"] = dict(grade_result or {})
             payload["grade_result"]["_meta"] = meta
 
-        _safe_table("submissions").upsert({**payload, "submission_id": submission_id, "user_id": user_id}, on_conflict="submission_id").execute()
-        log_event(logger, "submission_graded", submission_id=submission_id, user_id=user_id, session_id=session_id)
+        _safe_table("submissions").upsert(
+            {**payload, "submission_id": submission_id, "user_id": user_id},
+            on_conflict="submission_id",
+        ).execute()
+        log_event(
+            logger,
+            "submission_graded",
+            request_id=request_id,
+            submission_id=submission_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
     except Exception as e:
         try:
-            log_event(logger, "submission_grade_persist_failed", level="warning", submission_id=submission_id, user_id=user_id, error=str(e))
+            log_event(
+                logger,
+                "submission_grade_persist_failed",
+                level="warning",
+                request_id=request_id,
+                submission_id=submission_id,
+                user_id=user_id,
+                session_id=session_id,
+                error_type=e.__class__.__name__,
+                error=str(e),
+            )
         except Exception:
             pass
 
@@ -211,6 +257,7 @@ def persist_qindex_slices(
     submission_id: str,
     session_id: str,
     qindex: Dict[str, Any],
+    request_id: Optional[str] = None,
 ) -> None:
     """
     Persist per-question qindex image refs to Postgres with TTL (7d by default).
@@ -248,9 +295,31 @@ def persist_qindex_slices(
             )
         if not rows:
             return
-        _safe_table("qindex_slices").upsert(rows, on_conflict="submission_id,question_number").execute()
-        log_event(logger, "qindex_slices_persisted", submission_id=submission_id, session_id=session_id, questions=len(rows))
-    except Exception:
+        _safe_table("qindex_slices").upsert(
+            rows, on_conflict="submission_id,question_number"
+        ).execute()
+        log_event(
+            logger,
+            "qindex_slices_persisted",
+            request_id=request_id,
+            submission_id=submission_id,
+            session_id=session_id,
+            questions=len(rows),
+        )
+    except Exception as e:
+        try:
+            log_event(
+                logger,
+                "qindex_slices_persist_failed",
+                level="warning",
+                request_id=request_id,
+                submission_id=submission_id,
+                session_id=session_id,
+                error_type=e.__class__.__name__,
+                error=str(e),
+            )
+        except Exception:
+            pass
         return
 
 

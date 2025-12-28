@@ -12,7 +12,7 @@ import json
 import re
 import logging
 import time
-from typing import Optional, List, Dict, Any, Union, Iterable
+from typing import Optional, List, Dict, Any, Iterable
 from pydantic import BaseModel, Field
 from pydantic.config import ConfigDict
 
@@ -23,7 +23,6 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type,
-    before_sleep_log,
 )
 from functools import partial
 from fastapi.encoders import jsonable_encoder
@@ -76,7 +75,7 @@ def _extract_first_json_object(text: str) -> Optional[str]:
 def _repair_json_text(text: str) -> Optional[str]:
     """
     Attempt to repair malformed JSON from LLM output.
-    
+
     Handles common issues:
     - Trailing commas before } or ]
     - Missing commas between elements (e.g., }{, ][, "...", etc.)
@@ -96,31 +95,34 @@ def _repair_json_text(text: str) -> Optional[str]:
             block = s[start:]
         else:
             return None
-    
+
     # Step 1: Remove trailing commas before closing braces/brackets.
     cleaned = re.sub(r",\s*([}\]])", r"\1", block)
-    
+
     # Step 2: Insert missing commas between elements.
     # Pattern: `}` followed by whitespace/newline then `{` or `"` (next element)
     cleaned = re.sub(r"}\s*\n\s*{", r"},\n{", cleaned)
     cleaned = re.sub(r"}\s*\n\s*\"", r"},\n\"", cleaned)
     # Pattern: `]` followed by whitespace/newline then `{` or `[` (next element in array context)
     cleaned = re.sub(r"]\s*\n\s*\[", r"],\n[", cleaned)
-    cleaned = re.sub(r"]\s*\n\s*{", r"},\n{", cleaned)  # Note: this might be inside an array of objects
+    cleaned = re.sub(
+        r"]\s*\n\s*{", r"},\n{", cleaned
+    )  # Note: this might be inside an array of objects
     # Pattern: closing quote of value, newline, then opening quote of key (missing comma)
     # e.g., "value"\n"key" -> "value",\n"key"
     # Be careful: only match when it looks like end-of-value followed by new key
     cleaned = re.sub(r'"\s*\n\s*"([^"]+)":', r'",\n"\1":', cleaned)
-    
+
     # Step 3: Try to fix unterminated strings by attempting suffix repairs
     # Count unbalanced quotes, braces, brackets
     try:
         import json
+
         json.loads(cleaned)
         return cleaned  # Already valid
     except Exception:
         pass
-    
+
     # Step 3b: Escape control characters that might be in unterminated strings
     # This helps when LLM output is truncated mid-string
     def escape_control_chars(s: str) -> str:
@@ -129,49 +131,50 @@ def _repair_json_text(text: str) -> Optional[str]:
         i = 0
         while i < len(s):
             c = s[i]
-            if c == '\\' and i + 1 < len(s):
+            if c == "\\" and i + 1 < len(s):
                 # Already escaped, keep as is
-                result.append(s[i:i+2])
+                result.append(s[i : i + 2])
                 i += 2
-            elif c == '\n':
-                result.append('\\n')
+            elif c == "\n":
+                result.append("\\n")
                 i += 1
-            elif c == '\r':
-                result.append('\\r')
+            elif c == "\r":
+                result.append("\\r")
                 i += 1
-            elif c == '\t':
-                result.append('\\t')
+            elif c == "\t":
+                result.append("\\t")
                 i += 1
             else:
                 result.append(c)
                 i += 1
-        return ''.join(result)
-    
+        return "".join(result)
+
     cleaned_escaped = escape_control_chars(cleaned)
-    
+
     # Try common suffix repairs for truncated output
     suffixes_to_try = [
-        '"}]}',      # Close string, close array, close object
-        '"}]',       # Close string, close array
-        '"]}',       # Close string, close array, close object
-        '"}',        # Close string, close object
-        '"]',        # Close string, close array
-        '"',         # Just close string
-        '}]}',       # Close array, close object
-        '}]',        # Close array
-        ']}',        # Close array, close object
-        '}',         # Close object
-        ']',         # Close array
+        '"}]}',  # Close string, close array, close object
+        '"}]',  # Close string, close array
+        '"]}',  # Close string, close array, close object
+        '"}',  # Close string, close object
+        '"]',  # Close string, close array
+        '"',  # Just close string
+        "}]}",  # Close array, close object
+        "}]",  # Close array
+        "]}",  # Close array, close object
+        "}",  # Close object
+        "]",  # Close array
     ]
-    
+
     for suffix in suffixes_to_try:
         try:
             import json
+
             json.loads(cleaned_escaped + suffix)
             return cleaned_escaped + suffix
         except Exception:
             continue
-    
+
     return cleaned
 
 
@@ -201,6 +204,7 @@ def _log_retry(op: str, retry_state):
 
 class LLMResult(BaseModel):
     """LLM推理结果"""
+
     text: str = Field(..., description="模型返回的文本内容")
     raw: Dict[str, Any] = Field(default_factory=dict, description="原始API响应")
     usage: Optional[Dict[str, int]] = Field(None, description="token使用统计")
@@ -208,9 +212,14 @@ class LLMResult(BaseModel):
 
 class MathGradingResult(BaseModel):
     """数学批改结果"""
+
     model_config = ConfigDict(extra="ignore")
-    wrong_items: List[Dict[str, Any]] = Field(default_factory=list, description="错误项列表")
-    questions: List[Dict[str, Any]] = Field(default_factory=list, description="全题列表（用于按题号检索对话）")
+    wrong_items: List[Dict[str, Any]] = Field(
+        default_factory=list, description="错误项列表"
+    )
+    questions: List[Dict[str, Any]] = Field(
+        default_factory=list, description="全题列表（用于按题号检索对话）"
+    )
     summary: str = Field(..., description="总体摘要")
     subject: Subject = Subject.MATH
     total_items: Optional[int] = Field(None, description="检测到的题目总数")
@@ -221,9 +230,14 @@ class MathGradingResult(BaseModel):
 
 class EnglishGradingResult(BaseModel):
     """英语批改结果"""
+
     model_config = ConfigDict(extra="ignore")
-    wrong_items: List[Dict[str, Any]] = Field(default_factory=list, description="错误项列表")
-    questions: List[Dict[str, Any]] = Field(default_factory=list, description="全题列表（用于按题号检索对话）")
+    wrong_items: List[Dict[str, Any]] = Field(
+        default_factory=list, description="错误项列表"
+    )
+    questions: List[Dict[str, Any]] = Field(
+        default_factory=list, description="全题列表（用于按题号检索对话）"
+    )
     summary: str = Field(..., description="总体摘要")
     subject: Subject = Subject.ENGLISH
     total_items: Optional[int] = Field(None, description="检测到的题目总数")
@@ -234,6 +248,7 @@ class EnglishGradingResult(BaseModel):
 
 class SocraticTutorResult(BaseModel):
     """苏格拉底辅导结果"""
+
     messages: List[Dict[str, str]] = Field(default_factory=list, description="对话消息")
     session_id: Optional[str] = Field(None, description="会话ID")
     status: str = Field(..., description="状态: continue/limit_reached/explained")
@@ -257,7 +272,9 @@ class LLMClient:
         self.silicon_api_key = settings.silicon_api_key
         self.silicon_base_url = settings.silicon_base_url
         # 使用专用配置，若未设置则回退到 generic model_reasoning (需确保兼容) 或默认值
-        self.silicon_model = settings.silicon_reasoning_model or settings.model_reasoning
+        self.silicon_model = (
+            settings.silicon_reasoning_model or settings.model_reasoning
+        )
         self.silicon_vision_model = settings.silicon_vision_model or self.silicon_model
 
         # Ark配置 (doubao)
@@ -272,7 +289,9 @@ class LLMClient:
             int(settings.llm_client_timeout_seconds),
             int(settings.grade_llm_timeout_seconds),
         )
-        self.tool_calling_enabled = bool(getattr(settings, "tool_calling_enabled", True))
+        self.tool_calling_enabled = bool(
+            getattr(settings, "tool_calling_enabled", True)
+        )
         self.max_tool_calls = int(getattr(settings, "max_tool_calls", 3))
         self.tool_choice = getattr(settings, "tool_choice", "auto") or "auto"
 
@@ -296,7 +315,9 @@ class LLMClient:
                     blocks.append({"type": "image_url", "image_url": {"url": str(b64)}})
         return blocks
 
-    def _normalize_math_wrong_items(self, wrong_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _normalize_math_wrong_items(
+        self, wrong_items: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         """将 math_steps 中非白名单的 severity 归一化，避免后续 Pydantic 校验报错。"""
         allowed = {sev.value for sev in Severity}
         normalized: List[Dict[str, Any]] = []
@@ -373,7 +394,9 @@ class LLMClient:
         elif provider == "openai":
             if not self.openai_api_key:
                 raise ValueError("OPENAI_API_KEY not configured")
-            return OpenAI(base_url=self.openai_base_url, api_key=self.openai_api_key, timeout=60.0)
+            return OpenAI(
+                base_url=self.openai_base_url, api_key=self.openai_api_key, timeout=60.0
+            )
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
@@ -507,7 +530,12 @@ class LLMClient:
     @trace_span("llm.generate")
     @retry(
         retry=retry_if_exception_type(
-            (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)
+            (
+                APIConnectionError,
+                APITimeoutError,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            )
         ),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         stop=stop_after_attempt(3),
@@ -557,14 +585,20 @@ class LLMClient:
             content = response.choices[0].message.content
             # Log finish_reason to check if output was truncated
             finish_reason = (
-                getattr(response.choices[0], "finish_reason", "unknown") if response.choices else "unknown"
+                getattr(response.choices[0], "finish_reason", "unknown")
+                if response.choices
+                else "unknown"
             )
-            logger.info(f"[grade_math] finish_reason={finish_reason}, content_len={len(content or '')}")
+            logger.info(
+                f"[grade_math] finish_reason={finish_reason}, content_len={len(content or '')}"
+            )
             try:
                 result_data = json.loads(content)
                 # Log questions count for debugging
                 questions = result_data.get("questions") or []
-                logger.info(f"[grade_math] questions_count={len(questions)}, total_items={result_data.get('total_items')}")
+                logger.info(
+                    f"[grade_math] questions_count={len(questions)}, total_items={result_data.get('total_items')}"
+                )
                 # Output contract hardening:
                 # - Do not keep `standard_answer` (avoid leakage + reduce payload).
                 # - Keep only the first non-correct step for incorrect/uncertain; omit steps for correct.
@@ -586,7 +620,11 @@ class LLMClient:
                             if isinstance(steps, list) and steps:
                                 first_bad = None
                                 for s in steps:
-                                    if isinstance(s, dict) and (s.get("verdict") or "").strip().lower() != "correct":
+                                    if (
+                                        isinstance(s, dict)
+                                        and (s.get("verdict") or "").strip().lower()
+                                        != "correct"
+                                    ):
                                         first_bad = s
                                         break
                                 first_bad = first_bad or steps[0]
@@ -597,7 +635,9 @@ class LLMClient:
                                 q.pop("steps", None)
 
                 if "wrong_items" in result_data:
-                    result_data["wrong_items"] = self._normalize_math_wrong_items(result_data.get("wrong_items"))
+                    result_data["wrong_items"] = self._normalize_math_wrong_items(
+                        result_data.get("wrong_items")
+                    )
                     for it in result_data["wrong_items"] or []:
                         if isinstance(it, dict):
                             it.pop("standard_answer", None)
@@ -610,9 +650,18 @@ class LLMClient:
                     provider=provider,
                     model=model,
                     content_len=len(content or ""),
-                    questions=len(result_data.get("questions") or []) if isinstance(result_data.get("questions"), list) else None,
-                    wrong_items=len(result_data.get("wrong_items") or []) if isinstance(result_data.get("wrong_items"), list) else None,
-                    usage=getattr(response, "usage", None) and getattr(response.usage, "model_dump", lambda: None)(),
+                    questions=(
+                        len(result_data.get("questions") or [])
+                        if isinstance(result_data.get("questions"), list)
+                        else None
+                    ),
+                    wrong_items=(
+                        len(result_data.get("wrong_items") or [])
+                        if isinstance(result_data.get("wrong_items"), list)
+                        else None
+                    ),
+                    usage=getattr(response, "usage", None)
+                    and getattr(response.usage, "model_dump", lambda: None)(),
                 )
                 return MathGradingResult(**result_data)
             except Exception as parse_err:
@@ -621,19 +670,29 @@ class LLMClient:
                     try:
                         result_data = json.loads(repaired)
                         if "wrong_items" in result_data:
-                            result_data["wrong_items"] = self._normalize_math_wrong_items(result_data.get("wrong_items"))
+                            result_data["wrong_items"] = (
+                                self._normalize_math_wrong_items(
+                                    result_data.get("wrong_items")
+                                )
+                            )
                             for it in result_data["wrong_items"] or []:
                                 if isinstance(it, dict):
                                     it.pop("standard_answer", None)
-                                    it["judgment_basis"] = self._normalize_judgment_basis(
-                                        it.get("judgment_basis"), reason=it.get("reason")
+                                    it["judgment_basis"] = (
+                                        self._normalize_judgment_basis(
+                                            it.get("judgment_basis"),
+                                            reason=it.get("reason"),
+                                        )
                                     )
                         questions = result_data.get("questions")
                         if isinstance(questions, list):
                             for q in questions:
                                 if isinstance(q, dict):
-                                    q["judgment_basis"] = self._normalize_judgment_basis(
-                                        q.get("judgment_basis"), reason=q.get("reason")
+                                    q["judgment_basis"] = (
+                                        self._normalize_judgment_basis(
+                                            q.get("judgment_basis"),
+                                            reason=q.get("reason"),
+                                        )
                                     )
                         log_event(
                             logger,
@@ -673,7 +732,12 @@ class LLMClient:
                     warnings=[f"Parse error: {parse_err}"],
                 )
 
-        except (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+        except (
+            APIConnectionError,
+            APITimeoutError,
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+        ) as e:
             # Re-raise network/timeout errors so tenacity can trigger retries
             raise e
         except Exception as e:
@@ -687,7 +751,7 @@ class LLMClient:
                 error=str(e),
             )
             # Return error result for non-retryable errors (or after retries exhausted if wrapped elsewhere)
-            # Note: Since tenacity reraise=True, final timeout will propagate out. 
+            # Note: Since tenacity reraise=True, final timeout will propagate out.
             # If we want to return a Result object on final failure, we'd need an outer wrapper.
             # For now, we follow the instruction to "re-raise network errors".
             return MathGradingResult(
@@ -699,7 +763,12 @@ class LLMClient:
     @trace_span("grade_english")
     @retry(
         retry=retry_if_exception_type(
-            (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)
+            (
+                APIConnectionError,
+                APITimeoutError,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            )
         ),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         stop=stop_after_attempt(3),
@@ -772,9 +841,18 @@ class LLMClient:
                     provider=provider,
                     model=model,
                     content_len=len(content or ""),
-                    questions=len(result_data.get("questions") or []) if isinstance(result_data.get("questions"), list) else None,
-                    wrong_items=len(result_data.get("wrong_items") or []) if isinstance(result_data.get("wrong_items"), list) else None,
-                    usage=getattr(response, "usage", None) and getattr(response.usage, "model_dump", lambda: None)(),
+                    questions=(
+                        len(result_data.get("questions") or [])
+                        if isinstance(result_data.get("questions"), list)
+                        else None
+                    ),
+                    wrong_items=(
+                        len(result_data.get("wrong_items") or [])
+                        if isinstance(result_data.get("wrong_items"), list)
+                        else None
+                    ),
+                    usage=getattr(response, "usage", None)
+                    and getattr(response.usage, "model_dump", lambda: None)(),
                 )
                 return EnglishGradingResult(**result_data)
             except Exception as parse_err:
@@ -786,15 +864,21 @@ class LLMClient:
                         if isinstance(questions, list):
                             for q in questions:
                                 if isinstance(q, dict):
-                                    q["judgment_basis"] = self._normalize_judgment_basis(
-                                        q.get("judgment_basis"), reason=q.get("reason")
+                                    q["judgment_basis"] = (
+                                        self._normalize_judgment_basis(
+                                            q.get("judgment_basis"),
+                                            reason=q.get("reason"),
+                                        )
                                     )
                         wrong_items = result_data.get("wrong_items")
                         if isinstance(wrong_items, list):
                             for it in wrong_items:
                                 if isinstance(it, dict):
-                                    it["judgment_basis"] = self._normalize_judgment_basis(
-                                        it.get("judgment_basis"), reason=it.get("reason")
+                                    it["judgment_basis"] = (
+                                        self._normalize_judgment_basis(
+                                            it.get("judgment_basis"),
+                                            reason=it.get("reason"),
+                                        )
                                     )
                         log_event(
                             logger,
@@ -834,7 +918,12 @@ class LLMClient:
                     warnings=[f"Parse error: {parse_err}"],
                 )
 
-        except (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+        except (
+            APIConnectionError,
+            APITimeoutError,
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+        ) as e:
             raise e
         except Exception as e:
             log_event(
@@ -855,7 +944,12 @@ class LLMClient:
     @trace_span("socratic_tutor")
     @retry(
         retry=retry_if_exception_type(
-            (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)
+            (
+                APIConnectionError,
+                APITimeoutError,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            )
         ),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         stop=stop_after_attempt(3),
@@ -908,7 +1002,9 @@ class LLMClient:
                 {
                     "role": "system",
                     "content": "本次作业辅导上下文（仅供参考，勿编造；若存在歧义/误读提示，请优先向学生确认）：\n"
-                    + json.dumps(jsonable_encoder(wrong_item_context), ensure_ascii=False),
+                    + json.dumps(
+                        jsonable_encoder(wrong_item_context), ensure_ascii=False
+                    ),
                 }
             )
         messages.append(
@@ -930,7 +1026,11 @@ class LLMClient:
                 messages.append({"role": role, "content": str(content)})
 
         # Ensure the current user question is included as the last message.
-        if not messages or messages[-1]["role"] != "user" or messages[-1]["content"] != str(question):
+        if (
+            not messages
+            or messages[-1]["role"] != "user"
+            or messages[-1]["content"] != str(question)
+        ):
             messages.append({"role": "user", "content": str(question)})
 
         try:
@@ -965,18 +1065,30 @@ class LLMClient:
                 interaction_count=interaction_count + 1,
             )
 
-        except (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+        except (
+            APIConnectionError,
+            APITimeoutError,
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+        ) as e:
             raise e
         except Exception as e:
             logger.error(f"Socratic tutoring failed: {str(e)}")
             return SocraticTutorResult(
-                messages=[{"role": "assistant", "content": f"抱歉，辅导服务暂时不可用: {str(e)}"}],
+                messages=[
+                    {
+                        "role": "assistant",
+                        "content": f"抱歉，辅导服务暂时不可用: {str(e)}",
+                    }
+                ],
                 session_id=session_id,
                 status="error",
                 interaction_count=interaction_count,
             )
 
-    def _extract_slice_url_from_context(self, wrong_item_context: Optional[Dict[str, Any]]) -> Optional[str]:
+    def _extract_slice_url_from_context(
+        self, wrong_item_context: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
         """从辅导上下文中提取切片 URL"""
         if not wrong_item_context:
             return None
@@ -998,7 +1110,9 @@ class LLMClient:
                     for r in regions:
                         if not isinstance(r, dict):
                             continue
-                        if (r.get("kind") or "").lower() == "figure" and r.get("slice_image_url"):
+                        if (r.get("kind") or "").lower() == "figure" and r.get(
+                            "slice_image_url"
+                        ):
                             return str(r.get("slice_image_url"))
                 # 优先选择 slice_image_urls（列表）
                 slice_urls = p.get("slice_image_urls")
@@ -1073,16 +1187,19 @@ class LLMClient:
             "interaction_count": interaction_count,
             "strategy": strategy,
         }
-        messages: List[Dict[str, str]] = [{"role": "system", "content": SOCRATIC_TUTOR_SYSTEM_PROMPT}]
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": SOCRATIC_TUTOR_SYSTEM_PROMPT}
+        ]
         # For visually risky questions, force the model to anchor on the image first (facts before reasoning).
-        has_visual_facts = False
-        gate_passed = False
         try:
-            focus_q = (wrong_item_context or {}).get("focus_question") if isinstance(wrong_item_context, dict) else None
-            visual_risk = bool(isinstance(focus_q, dict) and focus_q.get("visual_risk") is True)
-            has_visual_facts = bool(isinstance(focus_q, dict) and isinstance(focus_q.get("visual_facts"), dict))
-            gate = focus_q.get("vfe_gate") if isinstance(focus_q, dict) else None
-            gate_passed = bool(isinstance(gate, dict) and gate.get("passed") is True)
+            focus_q = (
+                (wrong_item_context or {}).get("focus_question")
+                if isinstance(wrong_item_context, dict)
+                else None
+            )
+            visual_risk = bool(
+                isinstance(focus_q, dict) and focus_q.get("visual_risk") is True
+            )
             if visual_risk:
                 messages.append(
                     {
@@ -1102,7 +1219,9 @@ class LLMClient:
                 {
                     "role": "system",
                     "content": "本次作业辅导上下文（仅供参考，勿编造；若存在歧义/误读提示，请优先向学生确认）：\n"
-                    + json.dumps(jsonable_encoder(wrong_item_context), ensure_ascii=False),
+                    + json.dumps(
+                        jsonable_encoder(wrong_item_context), ensure_ascii=False
+                    ),
                 }
             )
         messages.append(
@@ -1136,13 +1255,18 @@ class LLMClient:
         else:
             # If the last message isn't the current question (e.g. mis-ordered history),
             # append a fresh copy so the model answers the right prompt.
-            if messages[-1].get("role") != "user" or messages[-1].get("content") != current_question:
+            if (
+                messages[-1].get("role") != "user"
+                or messages[-1].get("content") != current_question
+            ):
                 messages.append({"role": "user", "content": current_question})
                 last_user_idx = len(messages) - 1
 
         # Stable mode: do not attach images to chat LLM; rely on cached visual_facts only.
 
-        model = model_override or (self.silicon_model if provider == "silicon" else self.ark_model)
+        model = model_override or (
+            self.silicon_model if provider == "silicon" else self.ark_model
+        )
 
         tool_events: List[Dict[str, Any]] = []
 
@@ -1184,7 +1308,12 @@ class LLMClient:
 
     @retry(
         retry=retry_if_exception_type(
-            (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)
+            (
+                APIConnectionError,
+                APITimeoutError,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            )
         ),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         stop=stop_after_attempt(3),
@@ -1233,12 +1362,19 @@ class LLMClient:
                 raw=response.to_dict(),
                 usage={
                     "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                    "completion_tokens": getattr(response.usage, "completion_tokens", 0),
+                    "completion_tokens": getattr(
+                        response.usage, "completion_tokens", 0
+                    ),
                     "total_tokens": getattr(response.usage, "total_tokens", 0),
-                }
+                },
             )
 
-        except (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+        except (
+            APIConnectionError,
+            APITimeoutError,
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+        ) as e:
             raise e
         except Exception as e:
             logger.error(f"LLM generation failed: {str(e)}")
@@ -1267,7 +1403,9 @@ class LLMClient:
 
         if provider == "silicon":
             model = self.silicon_vision_model or self.silicon_model
-            content_blocks = [{"type": "text", "text": user_prompt}] + self._image_blocks_from_refs(images, provider)
+            content_blocks = [
+                {"type": "text", "text": user_prompt}
+            ] + self._image_blocks_from_refs(images, provider)
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content_blocks},
@@ -1292,20 +1430,27 @@ class LLMClient:
                 raw=response.to_dict(),
                 usage={
                     "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                    "completion_tokens": getattr(response.usage, "completion_tokens", 0),
+                    "completion_tokens": getattr(
+                        response.usage, "completion_tokens", 0
+                    ),
                     "total_tokens": getattr(response.usage, "total_tokens", 0),
                 },
             )
 
         if provider == "ark":
             model = self.ark_vision_model or self.ark_model
-            content_blocks: List[Dict[str, Any]] = [{"type": "input_text", "text": user_prompt}]
+            content_blocks: List[Dict[str, Any]] = [
+                {"type": "input_text", "text": user_prompt}
+            ]
             content_blocks += self._image_blocks_from_refs(images, provider)
             # responses API does not support tool calls; use direct call.
             resp = client.responses.create(
                 model=model,
                 input=[
-                    {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+                    {
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": system_prompt}],
+                    },
                     {"role": "user", "content": content_blocks},
                 ],
             )

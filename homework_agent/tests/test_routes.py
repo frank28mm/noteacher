@@ -2,7 +2,11 @@ from fastapi.testclient import TestClient
 from homework_agent.main import create_app
 from homework_agent.models.schemas import VisionProvider
 from homework_agent.api import routes
-from homework_agent.api.routes import resolve_context_items, normalize_context_ids, assistant_tail
+from homework_agent.api.routes import (
+    resolve_context_items,
+    normalize_context_ids,
+    assistant_tail,
+)
 
 
 client = TestClient(create_app())
@@ -16,6 +20,7 @@ def test_grade_stub():
     }
     resp = client.post("/api/v1/grade", json=payload)
     assert resp.status_code == 200
+    assert resp.headers.get("X-Request-Id")
     data = resp.json()
     assert data["status"] in ["processing", "failed", "done", None]
     assert "warnings" in data
@@ -30,6 +35,7 @@ def test_chat_stub_sse():
     }
     resp = client.post("/api/v1/chat", json=payload)
     assert resp.status_code == 200
+    assert resp.headers.get("X-Request-Id")
     assert resp.headers["content-type"].startswith("text/event-stream")
 
 
@@ -82,3 +88,23 @@ def test_assistant_tail_replays_last_messages_in_order():
 def test_upload_route_exists_validation_error_without_file():
     resp = client.post("/api/v1/uploads")
     assert resp.status_code == 422
+    assert resp.headers.get("X-Request-Id")
+    payload = resp.json()
+    assert payload.get("code") == "E4220"
+    assert payload.get("request_id") == resp.headers.get("X-Request-Id")
+
+
+def test_session_id_header_is_propagated_to_validation_error():
+    session_id = "sess_test_123"
+    resp = client.post("/api/v1/uploads", headers={"X-Session-Id": session_id})
+    assert resp.status_code == 422
+    assert resp.headers.get("X-Request-Id")
+    assert resp.headers.get("X-Session-Id") == session_id
+    payload = resp.json()
+    assert payload.get("session_id") == session_id
+
+
+def test_request_id_header_is_preserved():
+    rid = "req_test_123"
+    resp = client.get("/api/v1/jobs/notfound", headers={"X-Request-Id": rid})
+    assert resp.headers.get("X-Request-Id") == rid

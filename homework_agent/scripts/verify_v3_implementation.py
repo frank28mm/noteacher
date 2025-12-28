@@ -48,6 +48,7 @@ def test_image_preprocessor():
     try:
         from homework_agent.services.image_preprocessor import preprocess_image_bytes
         import cv2
+
         _cv_available = True
     except ImportError:
         _cv_available = False
@@ -56,6 +57,7 @@ def test_image_preprocessor():
 
     # Create a simple test image (gray gradient)
     import numpy as np
+
     img = np.zeros((100, 100), dtype=np.uint8)
     img[:, :50] = 50  # left half darker
     img[:, 50:] = 200  # right half lighter

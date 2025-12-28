@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, ConfigDict
 
 from homework_agent.core.prompts_autonomous import (
+    PROMPT_VERSION,
     PLANNER_SYSTEM_PROMPT,
     REFLECTOR_SYSTEM_PROMPT,
     AGGREGATOR_SYSTEM_PROMPT_MATH,
@@ -25,12 +26,17 @@ from homework_agent.services.session_state import SessionState, get_session_stor
 from homework_agent.services.autonomous_tools import (
     diagram_slice,
     qindex_fetch,
+    vision_roi_detect,
     math_verify,
     ocr_fallback,
     _compress_image_if_needed,
+    _compute_image_hash,
 )
-from homework_agent.utils.observability import log_event, trace_span
+from homework_agent.models.tool_result import ToolResult
+from homework_agent.utils.observability import log_event, log_llm_usage, trace_span
 from homework_agent.utils.settings import get_settings
+from homework_agent.utils.budget import RunBudget
+from homework_agent.utils.versioning import stable_json_hash
 
 logger = logging.getLogger("homework_agent.autonomous")
 planner_logger = logging.getLogger("homework_agent.autonomous.planner")
@@ -41,10 +47,14 @@ aggregator_logger = logging.getLogger("homework_agent.autonomous.aggregator")
 
 def _is_rate_limit_error(err: Exception) -> bool:
     msg = str(err or "").lower()
-    return any(s in msg for s in ("429", "rate limit", "tpm limit", "too many requests"))
+    return any(
+        s in msg for s in ("429", "rate limit", "tpm limit", "too many requests")
+    )
 
 
-async def _call_llm_with_backoff(fn, *, timeout_s: float, retries: int = 2, base_delay: float = 1.0):
+async def _call_llm_with_backoff(
+    fn, *, timeout_s: float, retries: int = 2, base_delay: float = 1.0
+):
     for attempt in range(retries + 1):
         try:
             return await asyncio.wait_for(asyncio.to_thread(fn), timeout=timeout_s)
@@ -88,6 +98,9 @@ class AutonomousGradeResult:
     summary: str
     warnings: List[str]
     iterations: int
+    tokens_used: Optional[int] = None
+    duration_ms: Optional[int] = None
+    needs_review: Optional[bool] = None
 
 
 def _normalize_verdict(v: Any) -> str:
@@ -143,13 +156,22 @@ def _dedupe_images(images: List[str]) -> List[str]:
 
 
 class PlannerAgent:
-    def __init__(self, llm: LLMClient, provider: str, max_tokens: int, timeout_s: float) -> None:
+    def __init__(
+        self, llm: LLMClient, provider: str, max_tokens: int, timeout_s: float
+    ) -> None:
         self.llm = llm
         self.provider = provider
         self.max_tokens = max_tokens
         self.timeout_s = timeout_s
 
-    async def run(self, state: SessionState) -> PlannerPayload:
+    async def run(
+        self,
+        state: SessionState,
+        *,
+        request_id: Optional[str] = None,
+        budget: Optional[RunBudget] = None,
+        min_reserve_s: float = 0.0,
+    ) -> PlannerPayload:
         payload = json.dumps(
             {
                 "image_urls": state.image_urls,
@@ -157,40 +179,115 @@ class PlannerAgent:
                 "ocr_text": state.ocr_text,
                 "plan_history": (state.plan_history or [])[-2:],
                 "reflection_result": state.partial_results.get("reflection"),
+                "slice_failed_cache": state.slice_failed_cache,
+                "attempted_tools": state.attempted_tools,
+                "preprocess_meta": state.preprocess_meta,
             },
             ensure_ascii=False,
         )
         prompt = build_planner_user_prompt(state_payload=payload)
-        text = await _call_llm_with_backoff(
-            lambda: self.llm.generate(
-                prompt=prompt,
-                system_prompt=PLANNER_SYSTEM_PROMPT,
-                provider=self.provider,
-                max_tokens=self.max_tokens,
-                temperature=0.2,
-            ),
-            timeout_s=self.timeout_s,
+        if budget is None:
+            budget = RunBudget.for_timeout_seconds(
+                timeout_seconds=float(self.timeout_s), token_budget_total=None
+            )
+        remaining = float(budget.remaining_seconds())
+        effective_timeout = max(
+            0.0, min(float(self.timeout_s), float(remaining - min_reserve_s))
         )
-        parsed = _parse_json(text.text if hasattr(text, "text") else str(text), PlannerPayload)
+        if effective_timeout <= 0:
+            return PlannerPayload(
+                thoughts="budget_exhausted_before_planner",
+                plan=[],
+                action="execute_tools",
+            )
+        model = (
+            self.llm.silicon_model if self.provider == "silicon" else self.llm.ark_model
+        )
+        try:
+            text = await _call_llm_with_backoff(
+                lambda: self.llm.generate(
+                    prompt=prompt,
+                    system_prompt=PLANNER_SYSTEM_PROMPT,
+                    provider=self.provider,
+                    max_tokens=self.max_tokens,
+                    temperature=0.2,
+                ),
+                timeout_s=effective_timeout,
+            )
+        except Exception as e:
+            log_event(
+                planner_logger,
+                "agent_plan_llm_failed",
+                level="warning",
+                request_id=request_id,
+                session_id=state.session_id,
+                iteration=state.reflection_count + 1,
+                error_type=e.__class__.__name__,
+                error=str(e),
+            )
+            return PlannerPayload(
+                thoughts="planner_llm_failed", plan=[], action="execute_tools"
+            )
+
+        usage = getattr(text, "usage", None)
+        budget.consume_usage(usage)
+        log_llm_usage(
+            planner_logger,
+            request_id=str(request_id or ""),
+            session_id=str(state.session_id or ""),
+            provider=self.provider,
+            model=str(model or ""),
+            usage=usage or {},
+            stage="autonomous.planner",
+        )
+        parsed = _parse_json(
+            text.text if hasattr(text, "text") else str(text), PlannerPayload
+        )
         if not parsed:
-            return PlannerPayload(thoughts="planner_parse_failed", plan=[], action="execute_tools")
+            return PlannerPayload(
+                thoughts="planner_parse_failed", plan=[], action="execute_tools"
+            )
         if not parsed.action:
             parsed.action = "execute_tools"
 
-        # P1.2: OpenCV parameter grading - skip diagram_slice on iteration 3 if it failed before
-        iteration = state.reflection_count + 1
-        if iteration >= 3:
-            prev_failed = any(
-                "diagram" in str(v).lower() and "roi_not_found" in str(v).lower()
-                for v in state.tool_results.values()
-            )
-            if prev_failed:
-                logger.info(f"Planner: Iteration {iteration}, skipping diagram_slice due to previous failures")
-                # Replace diagram_slice with ocr_fallback in the plan
-                for step in parsed.plan:
-                    if step.get("step") == "diagram_slice":
-                        step["step"] = "ocr_fallback"
-                        step["args"] = {"image": state.image_urls[0] if state.image_urls else ""}
+        # Planner failure strategy: enforce qindex_fetch -> vision_roi_detect -> text_only
+        issues = []
+        reflection = state.partial_results.get("reflection")
+        if isinstance(reflection, dict):
+            issues = reflection.get("issues") or []
+        diagram_issue = any("diagram_roi_not_found" in str(i) for i in issues)
+        slice_failed = False
+        if state.slice_failed_cache and state.image_urls:
+            img_hash = _compute_image_hash(state.image_urls[0] or "")
+            slice_failed = bool(img_hash and state.slice_failed_cache.get(img_hash))
+
+        if diagram_issue or slice_failed:
+            forced_plan: List[Dict[str, Any]] = []
+            attempted = state.attempted_tools or {}
+            if not attempted.get("qindex_fetch", {}).get("status") == "ok":
+                forced_plan.append(
+                    {"step": "qindex_fetch", "args": {"session_id": state.session_id}}
+                )
+            if not attempted.get("vision_roi_detect", {}).get("status") == "ok":
+                forced_plan.append(
+                    {
+                        "step": "vision_roi_detect",
+                        "args": {
+                            "image": state.image_urls[0] if state.image_urls else "",
+                            "prefix": f"autonomous/slices/{state.session_id}/",
+                        },
+                    }
+                )
+            if not state.ocr_text:
+                forced_plan.append(
+                    {
+                        "step": "ocr_fallback",
+                        "args": {
+                            "image": state.image_urls[0] if state.image_urls else ""
+                        },
+                    }
+                )
+            parsed.plan = forced_plan
 
         return parsed
 
@@ -200,7 +297,13 @@ class ExecutorAgent:
         self.provider = provider
         self.session_id = session_id
 
-    async def run(self, state: SessionState, plan: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def run(
+        self,
+        state: SessionState,
+        plan: List[Dict[str, Any]],
+        *,
+        request_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         results: Dict[str, Any] = {}
         retry_attempts = 1
         backoff_s = 0.5
@@ -215,6 +318,7 @@ class ExecutorAgent:
                 executor_logger,
                 "agent_tool_call",
                 session_id=state.session_id,
+                request_id=request_id,
                 tool=tool_name,
                 status="running",
                 iteration=state.reflection_count + 1,
@@ -224,19 +328,81 @@ class ExecutorAgent:
             for attempt in range(retry_attempts + 1):
                 try:
                     if tool_name == "diagram_slice":
-                        image = args.get("image") or (state.image_urls[0] if state.image_urls else "")
+                        image = args.get("image") or (
+                            state.image_urls[0] if state.image_urls else ""
+                        )
                         prefix = f"autonomous/slices/{state.session_id}/"
-                        result = await asyncio.to_thread(diagram_slice, image=image, prefix=prefix)
+                        result = await asyncio.to_thread(
+                            diagram_slice, image=image, prefix=prefix
+                        )
                         urls = result.get("urls") or {}
                         if urls.get("figure_url"):
-                            state.slice_urls.setdefault("figure", []).append(urls["figure_url"])
+                            state.slice_urls.setdefault("figure", []).append(
+                                urls["figure_url"]
+                            )
                         if urls.get("question_url"):
-                            state.slice_urls.setdefault("question", []).append(urls["question_url"])
+                            state.slice_urls.setdefault("question", []).append(
+                                urls["question_url"]
+                            )
+                        if result.get(
+                            "status"
+                        ) == "error" and "diagram_roi_not_found" in str(
+                            result.get("message", "")
+                        ):
+                            img_hash = _compute_image_hash(image or "")
+                            if img_hash:
+                                state.slice_failed_cache[img_hash] = True
+                        if result.get("status") == "ok":
+                            break
+                    elif tool_name == "vision_roi_detect":
+                        image = args.get("image") or (
+                            state.image_urls[0] if state.image_urls else ""
+                        )
+                        prefix = (
+                            args.get("prefix")
+                            or f"autonomous/slices/{state.session_id}/"
+                        )
+                        result = await asyncio.to_thread(
+                            vision_roi_detect, image=image, prefix=prefix
+                        )
+                        for region in result.get("regions") or []:
+                            if not isinstance(region, dict):
+                                continue
+                            url = region.get("slice_url")
+                            if not url:
+                                continue
+                            kind = str(region.get("kind") or "question").strip().lower()
+                            if kind == "figure":
+                                state.slice_urls.setdefault("figure", []).append(url)
+                            else:
+                                state.slice_urls.setdefault("question", []).append(url)
                         if result.get("status") == "ok":
                             break
                     elif tool_name == "qindex_fetch":
                         session_id = args.get("session_id") or state.session_id
-                        result = await asyncio.to_thread(qindex_fetch, session_id=session_id)
+                        result = await asyncio.to_thread(
+                            qindex_fetch, session_id=session_id
+                        )
+                        if result.get("status") == "ok":
+                            for qn, data in (result.get("questions") or {}).items():
+                                for page in data.get("pages", []):
+                                    for region in page.get("regions", []):
+                                        url = region.get("slice_image_url")
+                                        if not url:
+                                            continue
+                                        kind = (
+                                            str(region.get("kind") or "question")
+                                            .strip()
+                                            .lower()
+                                        )
+                                        if kind == "figure":
+                                            state.slice_urls.setdefault(
+                                                "figure", []
+                                            ).append(url)
+                                        else:
+                                            state.slice_urls.setdefault(
+                                                "question", []
+                                            ).append(url)
                         if result.get("status") == "ok":
                             break
                     elif tool_name == "math_verify":
@@ -245,8 +411,12 @@ class ExecutorAgent:
                         if result.get("status") == "ok":
                             break
                     elif tool_name == "ocr_fallback":
-                        image = args.get("image") or (state.image_urls[0] if state.image_urls else "")
-                        result = await asyncio.to_thread(ocr_fallback, image=image, provider=self.provider)
+                        image = args.get("image") or (
+                            state.image_urls[0] if state.image_urls else ""
+                        )
+                        result = await asyncio.to_thread(
+                            ocr_fallback, image=image, provider=self.provider
+                        )
                         if result.get("status") == "ok":
                             state.ocr_text = result.get("text") or state.ocr_text
                             break
@@ -259,8 +429,12 @@ class ExecutorAgent:
                     await asyncio.sleep(backoff_s * (2**attempt))
 
             if tool_name == "diagram_slice" and result.get("status") != "ok":
-                image = args.get("image") or (state.image_urls[0] if state.image_urls else "")
-                fallback = await asyncio.to_thread(ocr_fallback, image=image, provider=self.provider)
+                image = args.get("image") or (
+                    state.image_urls[0] if state.image_urls else ""
+                )
+                fallback = await asyncio.to_thread(
+                    ocr_fallback, image=image, provider=self.provider
+                )
                 if fallback.get("status") == "ok":
                     state.ocr_text = fallback.get("text") or state.ocr_text
                     result = {
@@ -270,30 +444,60 @@ class ExecutorAgent:
                     }
                     state.warnings.append("diagram_slice_failed_fallback_ocr")
 
-            results[tool_name] = result
+            # Normalize to unified ToolResult (while keeping legacy keys for compatibility).
+            duration_ms = int((time.monotonic() - start) * 1000)
+            tr = ToolResult.from_legacy(
+                tool_name=str(tool_name),
+                stage=f"autonomous.tool.{tool_name}",
+                raw=result,
+                request_id=request_id,
+                session_id=state.session_id,
+                timing_ms=duration_ms,
+            )
+            results[tool_name] = tr.to_dict(merge_raw=True)
+            state.attempted_tools[tool_name] = {
+                "status": result.get("status"),
+                "reason": result.get("message") or result.get("warning"),
+            }
             status = str(result.get("status") or "").lower()
-            status_label = "completed" if status in {"ok", "degraded", "empty"} else "error"
+            status_label = (
+                "completed" if status in {"ok", "degraded", "empty"} else "error"
+            )
             log_event(
                 executor_logger,
                 "agent_tool_done",
                 session_id=state.session_id,
+                request_id=request_id,
                 tool=tool_name,
                 status=status_label,
                 iteration=state.reflection_count + 1,
-                duration_ms=int((time.monotonic() - start) * 1000),
+                duration_ms=duration_ms,
+                needs_review=bool(tr.needs_review),
+                warning_codes=tr.warning_codes,
+                error_code=tr.error_code,
             )
         state.tool_results.update(results)
         return results
 
 
 class ReflectorAgent:
-    def __init__(self, llm: LLMClient, provider: str, max_tokens: int, timeout_s: float) -> None:
+    def __init__(
+        self, llm: LLMClient, provider: str, max_tokens: int, timeout_s: float
+    ) -> None:
         self.llm = llm
         self.provider = provider
         self.max_tokens = max_tokens
         self.timeout_s = timeout_s
 
-    async def run(self, state: SessionState, plan: List[Dict[str, Any]]) -> ReflectorPayload:
+    async def run(
+        self,
+        state: SessionState,
+        plan: List[Dict[str, Any]],
+        *,
+        request_id: Optional[str] = None,
+        budget: Optional[RunBudget] = None,
+        min_reserve_s: float = 0.0,
+    ) -> ReflectorPayload:
         payload = json.dumps(
             {
                 "tool_results": state.tool_results,
@@ -304,48 +508,111 @@ class ReflectorAgent:
             ensure_ascii=False,
         )
         prompt = build_reflector_user_prompt(payload=payload)
-        text = await _call_llm_with_backoff(
-            lambda: self.llm.generate(
-                prompt=prompt,
-                system_prompt=REFLECTOR_SYSTEM_PROMPT,
-                provider=self.provider,
-                max_tokens=self.max_tokens,
-                temperature=0.2,
-            ),
-            timeout_s=self.timeout_s,
-        )
-        parsed = _parse_json(text.text if hasattr(text, "text") else str(text), ReflectorPayload)
-        if not parsed:
-            return ReflectorPayload(pass_=False, issues=["reflector_parse_failed"], confidence=0.0, suggestion="replan")
-
-        # P1.1: Figure exemption logic
-        # If OCR is complete but diagram failed, boost confidence to avoid unnecessary iterations
-        if (not parsed.pass_
-            and 0.70 <= parsed.confidence < 0.90
-            and len(state.ocr_text or "") > 100):
-            # Check if diagram_slice failed
-            has_diagram_failure = any(
-                "diagram" in str(v).lower() and ("roi_not_found" in str(v).lower() or "failed" in str(v).lower())
-                for v in state.tool_results.values()
+        if budget is None:
+            budget = RunBudget.for_timeout_seconds(
+                timeout_seconds=float(self.timeout_s), token_budget_total=None
             )
-            if has_diagram_failure:
-                logger.info(f"Reflector: Figure exemption triggered, boosting confidence from {parsed.confidence:.2f} to 0.90")
-                parsed.pass_ = True
-                parsed.confidence = 0.90
-                parsed.suggestion = "图示不足，基于完整文本推断"
+        remaining = float(budget.remaining_seconds())
+        effective_timeout = max(
+            0.0, min(float(self.timeout_s), float(remaining - min_reserve_s))
+        )
+        if effective_timeout <= 0:
+            return ReflectorPayload(
+                pass_=False,
+                issues=["budget_exhausted"],
+                confidence=0.0,
+                suggestion="finalize",
+            )
+        model = (
+            self.llm.silicon_model if self.provider == "silicon" else self.llm.ark_model
+        )
+        try:
+            text = await _call_llm_with_backoff(
+                lambda: self.llm.generate(
+                    prompt=prompt,
+                    system_prompt=REFLECTOR_SYSTEM_PROMPT,
+                    provider=self.provider,
+                    max_tokens=self.max_tokens,
+                    temperature=0.2,
+                ),
+                timeout_s=effective_timeout,
+            )
+        except Exception as e:
+            log_event(
+                reflector_logger,
+                "agent_reflect_llm_failed",
+                level="warning",
+                request_id=request_id,
+                session_id=state.session_id,
+                iteration=state.reflection_count + 1,
+                error_type=e.__class__.__name__,
+                error=str(e),
+            )
+            return ReflectorPayload(
+                pass_=False,
+                issues=["reflector_llm_failed"],
+                confidence=0.0,
+                suggestion="finalize",
+            )
+
+        usage = getattr(text, "usage", None)
+        budget.consume_usage(usage)
+        log_llm_usage(
+            reflector_logger,
+            request_id=str(request_id or ""),
+            session_id=str(state.session_id or ""),
+            provider=self.provider,
+            model=str(model or ""),
+            usage=usage or {},
+            stage="autonomous.reflector",
+        )
+        parsed = _parse_json(
+            text.text if hasattr(text, "text") else str(text), ReflectorPayload
+        )
+        if not parsed:
+            return ReflectorPayload(
+                pass_=False,
+                issues=["reflector_parse_failed"],
+                confidence=0.0,
+                suggestion="replan",
+            )
+
+        # Assessment-only: record diagram issues without forcing pass/confidence.
+        has_diagram_failure = any(
+            "diagram" in str(v).lower()
+            and ("roi_not_found" in str(v).lower() or "failed" in str(v).lower())
+            for v in state.tool_results.values()
+        )
+        if has_diagram_failure and "diagram_roi_not_found" not in parsed.issues:
+            parsed.issues.append("diagram_roi_not_found")
+            if not parsed.suggestion:
+                parsed.suggestion = "缺少图示证据，建议改用 qindex 或 text_only"
 
         return parsed
 
 
 class AggregatorAgent:
-    def __init__(self, llm: LLMClient, provider: str, max_tokens: int, subject: Subject, timeout_s: float) -> None:
+    def __init__(
+        self,
+        llm: LLMClient,
+        provider: str,
+        max_tokens: int,
+        subject: Subject,
+        timeout_s: float,
+    ) -> None:
         self.llm = llm
         self.provider = provider
         self.max_tokens = max_tokens
         self.subject = subject
         self.timeout_s = timeout_s
 
-    async def run(self, state: SessionState) -> AutonomousPayload:
+    async def run(
+        self,
+        state: SessionState,
+        *,
+        request_id: Optional[str] = None,
+        budget: Optional[RunBudget] = None,
+    ) -> AutonomousPayload:
         evidence = json.dumps(
             {
                 "ocr_text": state.ocr_text,
@@ -356,18 +623,27 @@ class AggregatorAgent:
             },
             ensure_ascii=False,
         )
-        prompt = build_aggregator_user_prompt(subject=str(self.subject.value), payload=evidence)
-        system_prompt = AGGREGATOR_SYSTEM_PROMPT_ENGLISH if self.subject == Subject.ENGLISH else AGGREGATOR_SYSTEM_PROMPT_MATH
+        prompt = build_aggregator_user_prompt(
+            subject=str(self.subject.value), payload=evidence
+        )
+        system_prompt = (
+            AGGREGATOR_SYSTEM_PROMPT_ENGLISH
+            if self.subject == Subject.ENGLISH
+            else AGGREGATOR_SYSTEM_PROMPT_MATH
+        )
 
         figure_urls = state.slice_urls.get("figure") or []
         question_urls = state.slice_urls.get("question") or []
         figure_urls = figure_urls[:1]
         question_urls = question_urls[:1]
+        figure_too_small = bool(state.preprocess_meta.get("figure_too_small"))
 
         # Determine image source and apply P0.2 compression
         image_source = "unknown"
-        if figure_urls or question_urls:
-            image_urls = _dedupe_images(figure_urls + question_urls)
+        if figure_urls and not figure_too_small:
+            image_urls = _dedupe_images(
+                figure_urls + (question_urls if question_urls else [])
+            )
             image_source = "slices"
         else:
             # P0.2: Compress original images if needed
@@ -376,15 +652,22 @@ class AggregatorAgent:
             for url in original_urls:
                 compressed_url = _compress_image_if_needed(url, max_side=1280)
                 image_urls.append(compressed_url)
-            image_source = "original"
+            if figure_too_small:
+                image_source = "original_fallback_small_figure"
+            else:
+                image_source = "original_fallback_no_figure"
 
-        image_refs = [ImageRef(url=u) if not u.startswith("data:image/") else ImageRef(base64=u) for u in image_urls]
+        image_refs = [
+            ImageRef(url=u) if not u.startswith("data:image/") else ImageRef(base64=u)
+            for u in image_urls
+        ]
 
         # P0.4: Enhanced logging with image_source
         log_event(
             aggregator_logger,
             "agent_aggregate_start",
             session_id=state.session_id,
+            request_id=request_id,
             image_source=image_source,
             image_count=len(image_refs),
             original_image_count=len(state.image_urls or []),
@@ -392,26 +675,82 @@ class AggregatorAgent:
             question_count=len(question_urls),
         )
         start = time.monotonic()
-        text = await _call_llm_with_backoff(
-            lambda: self.llm.generate_with_images(
-                system_prompt=system_prompt,
-                user_prompt=prompt,
-                images=image_refs,
-                provider=self.provider,
-                max_tokens=self.max_tokens,
-                temperature=0.2,
-                use_tools=False,
-            ),
-            timeout_s=self.timeout_s,
+        remaining = (
+            float(budget.remaining_seconds())
+            if budget is not None
+            else float(self.timeout_s)
         )
+        effective_timeout = max(0.0, min(float(self.timeout_s), remaining))
+        if effective_timeout <= 0:
+            return AutonomousPayload(
+                status="failed",
+                reason="budget_exhausted",
+                ocr_text=state.ocr_text,
+                results=[],
+                summary="超时预算已耗尽，建议人工复核",
+                warnings=["budget_exhausted_needs_review"],
+            )
+        model = (
+            self.llm.silicon_vision_model
+            if self.provider == "silicon"
+            else self.llm.ark_vision_model
+        )
+        try:
+            text = await _call_llm_with_backoff(
+                lambda: self.llm.generate_with_images(
+                    system_prompt=system_prompt,
+                    user_prompt=prompt,
+                    images=image_refs,
+                    provider=self.provider,
+                    max_tokens=self.max_tokens,
+                    temperature=0.2,
+                    use_tools=False,
+                ),
+                timeout_s=effective_timeout,
+            )
+        except Exception as e:
+            log_event(
+                aggregator_logger,
+                "agent_aggregate_llm_failed",
+                level="warning",
+                session_id=state.session_id,
+                request_id=request_id,
+                error_type=e.__class__.__name__,
+                error=str(e),
+            )
+            return AutonomousPayload(
+                status="failed",
+                reason="llm_failed",
+                ocr_text=state.ocr_text,
+                results=[],
+                summary="批改暂时失败，建议稍后重试或人工复核",
+                warnings=["autonomous_agent_llm_failed", "needs_review"],
+            )
         log_event(
             aggregator_logger,
             "agent_aggregate_done",
             session_id=state.session_id,
+            request_id=request_id,
             duration_ms=int((time.monotonic() - start) * 1000),
         )
-        parsed = _parse_json(text.text if hasattr(text, "text") else str(text), AutonomousPayload)
+        usage = getattr(text, "usage", None)
+        if budget is not None:
+            budget.consume_usage(usage)
+        log_llm_usage(
+            aggregator_logger,
+            request_id=str(request_id or ""),
+            session_id=str(state.session_id or ""),
+            provider=self.provider,
+            model=str(model or ""),
+            usage=usage or {},
+            stage="autonomous.aggregator",
+        )
+        raw_text = text.text if hasattr(text, "text") else str(text)
+        parsed = _parse_json(raw_text, AutonomousPayload)
         if not parsed:
+            logger.error(
+                f"Aggregator parse failed for {state.session_id}. Raw response (first 500 chars): {raw_text[:500]}"
+            )
             return AutonomousPayload(
                 status="failed",
                 reason="parse_failed",
@@ -431,14 +770,87 @@ async def run_autonomous_grade_agent(
     provider: str,
     session_id: str,
     request_id: Optional[str],
+    max_iterations_override: Optional[int] = None,
+    confidence_threshold_override: Optional[float] = None,
+    timeout_seconds_override: Optional[float] = None,
+    token_budget_total_override: Optional[int] = None,
+    experiments: Optional[Dict[str, Any]] = None,
 ) -> AutonomousGradeResult:
     settings = get_settings()
     llm = LLMClient()
     max_tokens = int(getattr(settings, "autonomous_agent_max_tokens", 1600))
     max_iterations = int(getattr(settings, "autonomous_agent_max_iterations", 3))
-    confidence_threshold = float(getattr(settings, "autonomous_agent_confidence_threshold", 0.90))
+    confidence_threshold = float(
+        getattr(settings, "autonomous_agent_confidence_threshold", 0.90)
+    )
     timeout_s = float(getattr(settings, "autonomous_agent_timeout_seconds", 600))
+    token_budget_total = int(
+        getattr(settings, "autonomous_agent_token_budget_total", 12000)
+    )
+    min_aggregator_s = float(
+        getattr(settings, "autonomous_agent_min_aggregator_seconds", 20)
+    )
+
+    if max_iterations_override is not None:
+        try:
+            max_iterations = max(1, int(max_iterations_override))
+        except Exception:
+            pass
+    if confidence_threshold_override is not None:
+        try:
+            confidence_threshold = float(confidence_threshold_override)
+        except Exception:
+            pass
+    if timeout_seconds_override is not None:
+        try:
+            timeout_s = max(1.0, float(timeout_seconds_override))
+        except Exception:
+            pass
+    if token_budget_total_override is not None:
+        try:
+            token_budget_total = max(1, int(token_budget_total_override))
+        except Exception:
+            pass
+
+    # Keep this guardrail adaptive for tests/dev where timeout may be small.
+    min_aggregator_s = min(min_aggregator_s, max(0.0, timeout_s * 0.4))
     overall_start = time.monotonic()
+    budget = RunBudget.for_timeout_seconds(
+        timeout_seconds=timeout_s, token_budget_total=token_budget_total
+    )
+
+    thresholds = {
+        "max_iterations": max_iterations,
+        "confidence_threshold": confidence_threshold,
+        "timeout_seconds": timeout_s,
+        "token_budget_total": token_budget_total,
+        "min_aggregator_seconds": min_aggregator_s,
+        "max_tokens_per_call": max_tokens,
+    }
+    thresholds_hash = stable_json_hash(thresholds)[:16]
+    # P0.6: Make prompt/model/thresholds traceable in every run.
+    try:
+        model_text = llm.silicon_model if provider == "silicon" else llm.ark_model
+        model_vision = (
+            llm.silicon_vision_model if provider == "silicon" else llm.ark_vision_model
+        )
+    except Exception:
+        model_text = None
+        model_vision = None
+    log_event(
+        logger,
+        "run_versions",
+        session_id=session_id,
+        request_id=request_id,
+        prompt_id="autonomous",
+        prompt_version=str(PROMPT_VERSION),
+        provider=provider,
+        model=str(model_text or ""),
+        vision_model=str(model_vision or ""),
+        thresholds=thresholds,
+        thresholds_hash=thresholds_hash,
+        experiments=experiments or {},
+    )
 
     state = SessionState(
         session_id=session_id,
@@ -453,17 +865,33 @@ async def run_autonomous_grade_agent(
         request_id=request_id,
         images=len(images or []),
     )
-
-    # P2.2: Use unified preprocessing pipeline
-    pipeline = PreprocessingPipeline(session_id=session_id)
+    # Use 3-tier preprocessing pipeline: A (qindex cache) → B (VLM locator) → C (OpenCV fallback)
+    pipeline = PreprocessingPipeline(session_id=session_id, request_id=request_id)
     for ref in images or []:
-        result = await pipeline.process_image(ref, prefix=f"autonomous/prep/{session_id}/", use_cache=True)
-        if result.figure_url:
-            state.slice_urls.setdefault("figure", []).append(result.figure_url)
-        if result.question_url:
-            state.slice_urls.setdefault("question", []).append(result.question_url)
+        result = await pipeline.process_image(
+            ref, prefix=f"autonomous/prep/{session_id}/", use_cache=True
+        )
+        # Add all figure slices
+        for fig_url in result.figure_urls or []:
+            state.slice_urls.setdefault("figure", []).append(fig_url)
+        # Add all question slices
+        for q_url in result.question_urls or []:
+            state.slice_urls.setdefault("question", []).append(q_url)
         if result.warnings:
             state.warnings.extend(result.warnings)
+        state.preprocess_meta.setdefault("results", []).append(result.to_dict())
+        if result.figure_too_small:
+            state.preprocess_meta["figure_too_small"] = True
+        # Log preprocessing source for observability
+    log_event(
+        logger,
+        "agent_preprocess_source",
+        session_id=session_id,
+        request_id=request_id,
+        source=result.source,
+        figures=len(result.figure_urls or []),
+        questions=len(result.question_urls or []),
+    )
 
     log_event(
         logger,
@@ -478,14 +906,31 @@ async def run_autonomous_grade_agent(
     store = get_session_store()
     store.save(session_id, state)
 
-    planner = PlannerAgent(llm=llm, provider=provider, max_tokens=max_tokens, timeout_s=timeout_s)
+    planner = PlannerAgent(
+        llm=llm, provider=provider, max_tokens=max_tokens, timeout_s=timeout_s
+    )
     executor = ExecutorAgent(provider=provider, session_id=session_id)
-    reflector = ReflectorAgent(llm=llm, provider=provider, max_tokens=max_tokens, timeout_s=timeout_s)
+    reflector = ReflectorAgent(
+        llm=llm, provider=provider, max_tokens=max_tokens, timeout_s=timeout_s
+    )
     aggregator = AggregatorAgent(
-        llm=llm, provider=provider, max_tokens=max_tokens, subject=subject, timeout_s=timeout_s
+        llm=llm,
+        provider=provider,
+        max_tokens=max_tokens,
+        subject=subject,
+        timeout_s=timeout_s,
     )
 
     for iteration in range(max_iterations):
+        if budget.is_time_exhausted():
+            state.warnings.append("budget_exhausted_needs_review")
+            break
+        if budget.is_token_exhausted():
+            state.warnings.append("token_budget_exhausted_needs_review")
+            break
+        if budget.remaining_seconds() <= min_aggregator_s + 1.0:
+            state.warnings.append("budget_low_reserving_for_finalize")
+            break
         log_event(
             planner_logger,
             "agent_plan_start",
@@ -496,7 +941,9 @@ async def run_autonomous_grade_agent(
             message="正在分析题目结构…",
         )
         plan_started = time.monotonic()
-        plan_payload = await planner.run(state)
+        plan_payload = await planner.run(
+            state, request_id=request_id, budget=budget, min_reserve_s=min_aggregator_s
+        )
         state.plan_history.append(
             {
                 "iteration": iteration + 1,
@@ -515,15 +962,25 @@ async def run_autonomous_grade_agent(
             duration_ms=int((time.monotonic() - plan_started) * 1000),
         )
 
-        await executor.run(state, plan_payload.plan or [])
+        await executor.run(state, plan_payload.plan or [], request_id=request_id)
 
         reflect_started = time.monotonic()
-        reflection = await reflector.run(state, plan_payload.plan or [])
+        reflection = await reflector.run(
+            state,
+            plan_payload.plan or [],
+            request_id=request_id,
+            budget=budget,
+            min_reserve_s=min_aggregator_s,
+        )
         state.partial_results["reflection"] = reflection.model_dump(by_alias=True)
         state.reflection_count += 1
         log_event(
             reflector_logger,
-            "agent_reflect_pass" if reflection.pass_ and reflection.confidence >= confidence_threshold else "agent_reflect_fail",
+            (
+                "agent_reflect_pass"
+                if reflection.pass_ and reflection.confidence >= confidence_threshold
+                else "agent_reflect_fail"
+            ),
             session_id=session_id,
             request_id=request_id,
             iteration=iteration + 1,
@@ -539,9 +996,12 @@ async def run_autonomous_grade_agent(
         if iteration == max_iterations - 1:
             state.warnings.append("Loop max iterations reached")
 
-    payload = await aggregator.run(state)
+    payload = await aggregator.run(state, request_id=request_id, budget=budget)
     status = (payload.status or "done").strip().lower()
     if status == "rejected":
+        needs_review = bool(
+            any(str(w) == "needs_review" for w in (payload.warnings or []))
+        )
         return AutonomousGradeResult(
             status="rejected",
             reason=payload.reason or "not_homework",
@@ -550,6 +1010,9 @@ async def run_autonomous_grade_agent(
             summary="输入非作业图片，已拒绝批改",
             warnings=payload.warnings or [],
             iterations=state.reflection_count,
+            tokens_used=getattr(budget, "tokens_used", None),
+            duration_ms=int((time.monotonic() - overall_start) * 1000),
+            needs_review=needs_review,
         )
 
     results: List[Dict[str, Any]] = []
@@ -565,6 +1028,64 @@ async def run_autonomous_grade_agent(
     warnings = list(payload.warnings or [])
     warnings.extend(state.warnings)
 
+    # P0.5: Promote tool-level HITL signals to run-level warnings.
+    tool_warning_codes: List[str] = []
+    run_needs_review = False
+    for tool_name, res in (state.tool_results or {}).items():
+        if not isinstance(res, dict):
+            continue
+        if bool(res.get("needs_review")):
+            run_needs_review = True
+        codes = res.get("warning_codes")
+        if isinstance(codes, list):
+            for c in codes:
+                s = str(c or "").strip()
+                if s:
+                    tool_warning_codes.append(s)
+        # High-signal degradation should be visible even if needs_review isn't set.
+        if str(res.get("status") or "").strip().lower() == "degraded":
+            tool_warning_codes.append(f"tool_degraded:{tool_name}")
+
+    # Budget / hard guardrails should also trigger HITL.
+    for w in state.warnings or []:
+        ws = str(w or "").strip().lower()
+        if not ws:
+            continue
+        if (
+            "needs_review" in ws
+            or "budget_exhausted" in ws
+            or "token_budget_exhausted" in ws
+        ):
+            run_needs_review = True
+            if "budget_exhausted" in ws:
+                tool_warning_codes.append("budget_exhausted")
+            if "token_budget_exhausted" in ws:
+                tool_warning_codes.append("token_budget_exhausted")
+
+    # Dedup tool warning codes (preserve order).
+    seen = set()
+    deduped_tool_codes: List[str] = []
+    for c in tool_warning_codes:
+        if c in seen:
+            continue
+        seen.add(c)
+        deduped_tool_codes.append(c)
+
+    safety_codes = [
+        c for c in deduped_tool_codes if c in {"pii_detected", "prompt_injection"}
+    ]
+    if run_needs_review or safety_codes:
+        if "needs_review" not in warnings:
+            warnings.append("needs_review")
+        for c in safety_codes:
+            if c not in warnings:
+                warnings.append(c)
+
+    if budget.is_token_exhausted():
+        warnings.append("⚠️ Token预算已耗尽，结果可能不完整，建议人工复核")
+    if budget.is_time_exhausted():
+        warnings.append("⚠️ 超时预算已耗尽，结果可能不完整，建议人工复核")
+
     # P1.3: Add explicit warning for missing figures
     if any("diagram_roi_not_found" in str(w) for w in state.warnings):
         warnings.append("⚠️ 图示识别失败，批改结果基于文本推断，建议人工复核")
@@ -577,8 +1098,41 @@ async def run_autonomous_grade_agent(
         total_iterations=state.reflection_count,
         results=len(results),
         warnings_count=len(warnings),
+        needs_review=bool(run_needs_review or safety_codes),
+        warning_codes=deduped_tool_codes,
+        tokens_used=getattr(budget, "tokens_used", None),
+        token_budget_total=getattr(budget, "token_budget_total", None),
+        remaining_s=budget.remaining_seconds(),
         duration_ms=int((time.monotonic() - overall_start) * 1000),
     )
+
+    # P2: enqueue review item for human-in-the-loop workflow (best-effort).
+    if bool(run_needs_review or safety_codes):
+        try:
+            from homework_agent.services.review_queue import enqueue_review_item
+
+            enqueue_review_item(
+                request_id=str(request_id or ""),
+                session_id=str(session_id or ""),
+                subject=(
+                    str(getattr(subject, "value", subject))
+                    if subject is not None
+                    else None
+                ),
+                warning_codes=deduped_tool_codes,
+                evidence_urls=[
+                    u for u in (state.image_urls or []) if isinstance(u, str)
+                ],
+                run_versions={
+                    "prompt_id": "autonomous",
+                    "prompt_version": str(PROMPT_VERSION),
+                    "provider": str(provider or ""),
+                    "model": str(model_text or ""),
+                },
+                note="autonomous_agent_needs_review",
+            )
+        except Exception:
+            pass
 
     return AutonomousGradeResult(
         status="done",
@@ -588,4 +1142,7 @@ async def run_autonomous_grade_agent(
         summary=payload.summary or "批改完成",
         warnings=warnings,
         iterations=state.reflection_count,
+        tokens_used=getattr(budget, "tokens_used", None),
+        duration_ms=int((time.monotonic() - overall_start) * 1000),
+        needs_review=bool(run_needs_review or safety_codes),
     )

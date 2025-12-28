@@ -22,13 +22,12 @@ import io
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from PIL import Image
 
-from homework_agent.utils.settings import get_settings
 from homework_agent.utils.supabase_client import get_storage_client
 from homework_agent.utils.observability import log_event, redact_url
 
@@ -120,8 +119,10 @@ def _extract_bbox_px(block: Dict[str, Any]) -> Optional[BBoxPx]:
             return (float(left), float(top), float(left + w), float(top + h))
 
     bbox = block.get("bbox") or block.get("box") or block.get("rect")
-    if isinstance(bbox, (list, tuple)) and len(bbox) == 4 and all(
-        isinstance(v, (int, float)) for v in bbox
+    if (
+        isinstance(bbox, (list, tuple))
+        and len(bbox) == 4
+        and all(isinstance(v, (int, float)) for v in bbox)
     ):
         x0, y0, x1, y1 = bbox
         return (float(x0), float(y0), float(x1), float(y1))
@@ -158,7 +159,9 @@ def _extract_bbox_px(block: Dict[str, Any]) -> Optional[BBoxPx]:
     return None
 
 
-_QNUM_RE = re.compile(r"^\s*(?:第\s*)?(\d{1,3}(?:\(\d+\))?(?:[①②③④⑤⑥⑦⑧⑨])?)\s*[题\.、:：]?\s*")
+_QNUM_RE = re.compile(
+    r"^\s*(?:第\s*)?(\d{1,3}(?:\(\d+\))?(?:[①②③④⑤⑥⑦⑧⑨])?)\s*[题\.、:：]?\s*"
+)
 
 
 def _detect_question_number(text: str) -> Optional[QuestionNumber]:
@@ -175,7 +178,8 @@ class QuestionLayout:
     question_number: QuestionNumber
     bboxes_norm: List[List[float]]  # list of [ymin,xmin,ymax,xmax]
     slice_image_urls: List[str]
-    warnings: List[str]
+    slice_sizes_px: List[Dict[str, int]] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
 
 
 def build_question_layouts_from_blocks(
@@ -189,14 +193,20 @@ def build_question_layouts_from_blocks(
     Group OCR blocks into question-level bounding boxes by detecting question-number anchors.
     """
     # Convert blocks to rows sorted by top-left y
-    rows: List[Tuple[float, Dict[str, Any], str, Optional[BBoxPx], Optional[QuestionNumber]]] = []
+    rows: List[
+        Tuple[float, Dict[str, Any], str, Optional[BBoxPx], Optional[QuestionNumber]]
+    ] = []
     for b in blocks or []:
         if not isinstance(b, dict):
             continue
         text = _extract_text(b)
         bbox = _extract_bbox_px(b)
         qn_val = b.get("question_number")
-        qn = qn_val.strip() if isinstance(qn_val, str) and qn_val.strip() else _detect_question_number(text)
+        qn = (
+            qn_val.strip()
+            if isinstance(qn_val, str) and qn_val.strip()
+            else _detect_question_number(text)
+        )
         y = bbox[1] if bbox else 0.0
         rows.append((y, b, text, bbox, qn))
     rows.sort(key=lambda x: x[0])
@@ -215,11 +225,15 @@ def build_question_layouts_from_blocks(
         warnings: List[str] = []
         if bbox_px is None:
             warnings.append("定位不确定，改用整页")
-            layouts[qn] = QuestionLayout(qn, bboxes_norm=[], slice_image_urls=[], warnings=warnings)
+            layouts[qn] = QuestionLayout(
+                qn, bboxes_norm=[], slice_image_urls=[], warnings=warnings
+            )
             continue
         bbox_norm = _px_to_norm_bbox(bbox_px, page_width, page_height)
         bbox_norm = _apply_padding_norm(bbox_norm, padding_ratio)
-        layouts[qn] = QuestionLayout(qn, bboxes_norm=[bbox_norm], slice_image_urls=[], warnings=warnings)
+        layouts[qn] = QuestionLayout(
+            qn, bboxes_norm=[bbox_norm], slice_image_urls=[], warnings=warnings
+        )
     return layouts
 
 
@@ -228,7 +242,9 @@ def download_image(url: str, timeout: float = 30.0) -> Image.Image:
     # If you rely on system proxies for other traffic, keep them for API calls, but downloads
     # used for bbox/slice should be direct.
     t0 = time.monotonic()
-    with httpx.Client(timeout=timeout, follow_redirects=True, trust_env=False) as client:
+    with httpx.Client(
+        timeout=timeout, follow_redirects=True, trust_env=False
+    ) as client:
         resp = client.get(url)
         resp.raise_for_status()
         img = Image.open(io.BytesIO(resp.content)).convert("RGB")
@@ -252,7 +268,6 @@ def crop_and_upload_slices(
     """
     For each question bbox, crop and upload to Supabase and populate slice_image_urls.
     """
-    settings = get_settings()
     storage = get_storage_client()
     img = download_image(page_image_url)
     width, height = img.size
@@ -264,10 +279,12 @@ def crop_and_upload_slices(
         if not layout.bboxes_norm:
             continue
         slice_urls: List[str] = []
+        slice_sizes: List[Dict[str, int]] = []
         for b_norm in layout.bboxes_norm:
             try:
                 bbox_px = _norm_to_px_bbox(b_norm, width, height)
                 crop = img.crop(bbox_px)
+                w, h = crop.size
                 out = io.BytesIO()
                 crop.save(out, format="JPEG", quality=90)
                 url = storage.upload_bytes(
@@ -277,6 +294,7 @@ def crop_and_upload_slices(
                     prefix=prefix,
                 )
                 slice_urls.append(url)
+                slice_sizes.append({"width": int(w), "height": int(h)})
                 total_uploaded += 1
             except Exception as e:
                 layout.warnings.append(f"切片上传失败：{e}")
@@ -290,6 +308,7 @@ def crop_and_upload_slices(
                     error=str(e),
                 )
         layout.slice_image_urls = slice_urls
+        layout.slice_sizes_px = slice_sizes
         if not slice_urls:
             layout.warnings.append("切片生成失败，改用整页")
         else:

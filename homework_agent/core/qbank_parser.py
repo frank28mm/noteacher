@@ -38,7 +38,9 @@ def build_question_bank_from_vision_raw_text(
     # Split by headings like "### 第28题" or numbered lines like "28."
     # NOTE: Use real whitespace escapes; avoid double-escaping (\\s) which would match a literal backslash.
     header_re = re.compile(r"^#{2,4}\s*第\s*([^题\s]+)\s*题\s*$")
-    num_re = re.compile(r"^\s*(\d{1,3}(?:\s*\(\s*\d+\s*\)\s*)?(?:[①②③④⑤⑥⑦⑧⑨])?)\s*[\.．]\s*$")
+    num_re = re.compile(
+        r"^\s*(\d{1,3}(?:\s*\(\s*\d+\s*\)\s*)?(?:[①②③④⑤⑥⑦⑧⑨])?)\s*[\.．]\s*$"
+    )
     current_qn: Optional[str] = None
     current_buf: List[str] = []
 
@@ -78,7 +80,9 @@ def build_question_bank_from_vision_raw_text(
                 break
 
         # Some vision formats emit 学生答案/答案 instead of 作答状态
-        m2 = re.search(r"(?:\*\*学生作答状态\*\*|学生作答状态|作答状态)\s*[:：]\s*(.+)", block)
+        m2 = re.search(
+            r"(?:\*\*学生作答状态\*\*|学生作答状态|作答状态)\s*[:：]\s*(.+)", block
+        )
         if m2:
             answer_status = m2.group(1).strip()
         if not student_ans:
@@ -93,7 +97,11 @@ def build_question_bank_from_vision_raw_text(
 
         # Extract choice options if present (A/B/C/D)
         # Common patterns: "A. xxx", "A、xxx", "A: xxx" (often under a line like "选项：").
-        if ("选项" in block) or ("A." in block and "B." in block) or ("A、" in block and "B、" in block):
+        if (
+            ("选项" in block)
+            or ("A." in block and "B." in block)
+            or ("A、" in block and "B、" in block)
+        ):
             for line in block.splitlines():
                 s = line.strip()
                 mopt = re.match(r"^[\-\*\s]*([A-D])[\.\、:：]\s*(.+)$", s)
@@ -104,7 +112,9 @@ def build_question_bank_from_vision_raw_text(
                         options[k] = v
             # Fallback: options may be in a single line, e.g. "选项：A. ... B. ... C. ... D. ..."
             if not options:
-                for k, v in re.findall(r"([A-D])[\.\、:：]\s*([^\n]+?)(?=(?:\s+[A-D][\.\、:：])|$)", block):
+                for k, v in re.findall(
+                    r"([A-D])[\.\、:：]\s*([^\n]+?)(?=(?:\s+[A-D][\.\、:：])|$)", block
+                ):
                     kk = str(k).strip()
                     vv = str(v).strip().rstrip(";；")
                     if kk and vv:
@@ -112,7 +122,9 @@ def build_question_bank_from_vision_raw_text(
 
         warnings: List[str] = []
         # Extract concrete misread warnings when present (avoid losing details).
-        for kind, detail in re.findall(r"(可能误读(?:公式|规律))\s*[:：]\s*([^\n]+)", block):
+        for kind, detail in re.findall(
+            r"(可能误读(?:公式|规律))\s*[:：]\s*([^\n]+)", block
+        ):
             d = str(detail).strip()
             if d:
                 warnings.append(f"{kind}：{d}")
@@ -122,8 +134,10 @@ def build_question_bank_from_vision_raw_text(
         questions[str(current_qn)] = {
             "question_number": str(current_qn),
             "verdict": "uncertain",
-            "question_content": q_content or "（批改未完成，题干请参考 vision_raw_text）",
-            "student_answer": student_ans or "（未提取到，题干/作答请参考 vision_raw_text）",
+            "question_content": q_content
+            or "（批改未完成，题干请参考 vision_raw_text）",
+            "student_answer": student_ans
+            or "（未提取到，题干/作答请参考 vision_raw_text）",
             "reason": "批改未完成（LLM 超时/失败），暂无法判定对错；可先基于识别原文进行辅导。",
             "warnings": warnings,
             "knowledge_tags": [],
@@ -173,4 +187,3 @@ def build_question_bank_from_vision_raw_text(
         "page_image_urls": [str(u) for u in (page_image_urls or []) if u],
         "questions": questions,
     }
-

@@ -53,21 +53,37 @@ def test_llm_grade_math_contract_hardening(monkeypatch: pytest.MonkeyPatch):
                 "question_number": "1",
                 "verdict": "correct",
                 "standard_answer": "secret",
-                "math_steps": [{"index": 1, "verdict": "correct"}, {"index": 2, "verdict": "incorrect"}],
+                "math_steps": [
+                    {"index": 1, "verdict": "correct"},
+                    {"index": 2, "verdict": "incorrect"},
+                ],
             },
             {
                 "question_number": "2",
                 "verdict": "incorrect",
                 "standard_answer": "secret2",
-                "math_steps": [{"index": 1, "verdict": "correct"}, {"index": 2, "verdict": "incorrect", "severity": "BOGUS"}],
+                "math_steps": [
+                    {"index": 1, "verdict": "correct"},
+                    {"index": 2, "verdict": "incorrect", "severity": "BOGUS"},
+                ],
             },
         ],
-        "wrong_items": [{"reason": "r", "standard_answer": "secret3", "math_steps": [{"index": 1, "verdict": "incorrect", "severity": "bogus"}]}],
+        "wrong_items": [
+            {
+                "reason": "r",
+                "standard_answer": "secret3",
+                "math_steps": [
+                    {"index": 1, "verdict": "incorrect", "severity": "bogus"}
+                ],
+            }
+        ],
     }
     content = json.dumps(payload, ensure_ascii=False)
 
     c = LLMClient()
-    monkeypatch.setattr(c, "_get_client", lambda provider="silicon": _FakeClient(content))
+    monkeypatch.setattr(
+        c, "_get_client", lambda provider="silicon": _FakeClient(content)
+    )
 
     out = c.grade_math("text", provider="silicon")
     assert out.summary == "ok"
@@ -94,7 +110,9 @@ def test_llm_grade_math_contract_hardening(monkeypatch: pytest.MonkeyPatch):
 
 def test_llm_grade_math_parse_failed_returns_fallback(monkeypatch: pytest.MonkeyPatch):
     c = LLMClient()
-    monkeypatch.setattr(c, "_get_client", lambda provider="silicon": _FakeClient("not-json"))
+    monkeypatch.setattr(
+        c, "_get_client", lambda provider="silicon": _FakeClient("not-json")
+    )
     out = c.grade_math("text", provider="silicon")
     assert out.summary == "批改结果解析失败"
     assert out.wrong_items == []

@@ -2,6 +2,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field, AnyUrl, field_validator
 
+
 # --- Basic Enums ---
 class Subject(str, Enum):
     MATH = "math"
@@ -73,12 +74,17 @@ class ImageRef(BaseModel):
             raise ValueError("Either url or base64 must be provided")
         return v
 
+
 # --- Math Specific Structures ---
 class MathStep(BaseModel):
     index: int = Field(..., description="Step number, 1-indexed")
     verdict: Verdict
-    expected: Optional[str] = Field(None, description="Expected calculation/logic for this step")
-    observed: Optional[str] = Field(None, description="Actual observed calculation/logic")
+    expected: Optional[str] = Field(
+        None, description="Expected calculation/logic for this step"
+    )
+    observed: Optional[str] = Field(
+        None, description="Actual observed calculation/logic"
+    )
     hint: Optional[str] = Field(None, description="Socratic hint if this step is wrong")
     severity: Optional[Severity] = None
     bbox: Optional[BBoxNormalized] = Field(
@@ -86,27 +92,40 @@ class MathStep(BaseModel):
         description="Optional normalized bbox for the step region, used for future highlighters",
     )
 
+
 class GeometryElement(BaseModel):
     type: str = Field(..., description="line, angle, point, etc.")
     label: str = Field(..., description="Label like A, B, C, AB, etc.")
     status: Literal["correct", "missing", "misplaced"]
     description: Optional[str] = None
 
+
 class GeometryInfo(BaseModel):
-    description: str = Field(..., description="Natural language judgment, e.g., 'Auxiliary line BE is correct'")
+    description: str = Field(
+        ...,
+        description="Natural language judgment, e.g., 'Auxiliary line BE is correct'",
+    )
     elements: List[GeometryElement] = Field(default_factory=list)
+
 
 # --- Core Item Structures ---
 class WrongItem(BaseModel):
     # Page & slice references
     page_image_url: Optional[AnyUrl] = Field(None, description="Full page image URL")
-    slice_image_url: Optional[AnyUrl] = Field(None, description="Cropped review slice URL")
-    page_bbox: Optional[BBoxNormalized] = Field(None, description="BBox on full page [0-1]")
-    review_slice_bbox: Optional[BBoxNormalized] = Field(None, description="BBox of the review slice [0-1]")
+    slice_image_url: Optional[AnyUrl] = Field(
+        None, description="Cropped review slice URL"
+    )
+    page_bbox: Optional[BBoxNormalized] = Field(
+        None, description="BBox on full page [0-1]"
+    )
+    review_slice_bbox: Optional[BBoxNormalized] = Field(
+        None, description="BBox of the review slice [0-1]"
+    )
 
     # Stable identifiers (optional, from upstream grader/DB)
     item_id: Optional[str] = Field(
-        None, description="Stable wrong-item id from upstream storage (preferred over index)"
+        None,
+        description="Stable wrong-item id from upstream storage (preferred over index)",
     )
     image_id: Optional[str] = Field(
         None, description="Optional image/page id to validate context binding"
@@ -114,7 +133,9 @@ class WrongItem(BaseModel):
 
     # Core Feedback
     reason: str = Field(..., description="Explanation of why it is wrong")
-    standard_answer: Optional[str] = Field(None, description="The correct answer (not always shown to student)")
+    standard_answer: Optional[str] = Field(
+        None, description="The correct answer (not always shown to student)"
+    )
     question_number: Optional[str] = Field(
         None,
         description="Original question number as on the paper (e.g., '27' or '15(2)')",
@@ -123,9 +144,12 @@ class WrongItem(BaseModel):
         None, description="Short question stem/content (for UI display and routing)"
     )
     student_answer: Optional[str] = Field(
-        None, description="Student answer (for UI display; chat will not directly reveal standard answers)"
+        None,
+        description="Student answer (for UI display; chat will not directly reveal standard answers)",
     )
-    warnings: List[str] = Field(default_factory=list, description="Per-item warnings (e.g., OCR ambiguity)")
+    warnings: List[str] = Field(
+        default_factory=list, description="Per-item warnings (e.g., OCR ambiguity)"
+    )
 
     @field_validator("question_number", mode="before")
     @classmethod
@@ -134,13 +158,16 @@ class WrongItem(BaseModel):
             return None
         s = str(v).strip()
         return s or None
-    
+
     # Categorization
-    knowledge_tags: List[str] = Field(default_factory=list, description="L2/L3 knowledge points, e.g., ['Math', 'Geometry', 'Triangle']")
+    knowledge_tags: List[str] = Field(
+        default_factory=list,
+        description="L2/L3 knowledge points, e.g., ['Math', 'Geometry', 'Triangle']",
+    )
     cross_subject_flag: Optional[bool] = Field(
         None, description="Flag if content seems cross-subject/mismatched"
     )
-    
+
     # Subject Specific Details
     math_steps: Optional[List[MathStep]] = None
     geometry_check: Optional[GeometryInfo] = None
@@ -155,25 +182,29 @@ class WrongItem(BaseModel):
         None,
         description="Internal extracted keywords used in strict mode (for audit/debug)",
     )
-    
+
     # Judgment basis - LLM's reasoning for the verdict
     judgment_basis: Optional[List[str]] = Field(
         None,
         description="判定依据：LLM 说明它是如何判断的（中文短句列表）",
     )
 
-    
     # English specific could be added here if needed, but 'reason' usually suffices for MVP or 'semantic_score'
 
+
 class GradeRequest(BaseModel):
-    images: List[ImageRef] = Field(..., description="List of image references (url or base64)")
+    images: List[ImageRef] = Field(
+        ..., description="List of image references (url or base64)"
+    )
     upload_id: Optional[str] = Field(
         None,
         description="Optional upload id returned by /api/v1/uploads; when present, backend will resolve images from storage for this user",
     )
     subject: Subject
     batch_id: Optional[str] = Field(None, description="Client-side batch identifier")
-    session_id: Optional[str] = Field(None, description="Session identifier for the batch")
+    session_id: Optional[str] = Field(
+        None, description="Session identifier for the batch"
+    )
     vision_provider: VisionProvider = Field(
         VisionProvider.DOUBAO,
         description="Vision provider selection, default doubao (URL preferred; may use data-url(base64) fallback); qwen3 is optional fallback (URL or data-url)",
@@ -186,12 +217,15 @@ class GradeRequest(BaseModel):
         None, description="normal/strict (applies to English grading)"
     )
 
+
 class GradeResponse(BaseModel):
     wrong_items: List[WrongItem]
     summary: str = Field(..., description="Overall summary of the page/batch")
     subject: Subject
     job_id: Optional[str] = Field(None, description="Asynchronous job identifier")
-    session_id: Optional[str] = Field(None, description="Session identifier for context continuation")
+    session_id: Optional[str] = Field(
+        None, description="Session identifier for context continuation"
+    )
     status: Optional[Literal["processing", "done", "failed", "rejected"]] = None
     total_items: Optional[int] = Field(None, description="Total questions detected")
     wrong_count: Optional[int] = Field(None, description="Number of wrong items")
@@ -209,7 +243,8 @@ class GradeResponse(BaseModel):
         None, description="题目是否包含图像（按题号聚合，true/false/unknown）"
     )
     questions: Optional[List[Dict[str, Any]]] = Field(
-        None, description="全题列表（含正确题目），每题包含 verdict、judgment_basis 等字段"
+        None,
+        description="全题列表（含正确题目），每题包含 verdict、judgment_basis 等字段",
     )
 
 
@@ -218,12 +253,17 @@ class Message(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: str
 
+
 class ChatRequest(BaseModel):
     history: List[Message]
     question: str
     subject: Subject
-    session_id: Optional[str] = Field(None, description="Session identifier for context continuation")
-    mode: Optional[SimilarityMode] = Field(None, description="normal/strict, aligns with grading mode")
+    session_id: Optional[str] = Field(
+        None, description="Session identifier for context continuation"
+    )
+    mode: Optional[SimilarityMode] = Field(
+        None, description="normal/strict, aligns with grading mode"
+    )
     llm_model: Optional[str] = Field(
         None,
         description="Optional LLM reasoning model override for chat (debug/demo only).",

@@ -45,7 +45,9 @@ def _verify_supabase_jwt(token: str) -> Optional[str]:
     endpoint = f"{base}/auth/v1/user"
     try:
         with httpx.Client(timeout=5.0, follow_redirects=True) as client:
-            r = client.get(endpoint, headers={"apikey": key, "Authorization": f"Bearer {token}"})
+            r = client.get(
+                endpoint, headers={"apikey": key, "Authorization": f"Bearer {token}"}
+            )
         if r.status_code != 200:
             return None
         data = r.json() if r.content else {}
@@ -63,7 +65,9 @@ def _verify_supabase_jwt(token: str) -> Optional[str]:
         return None
 
 
-def require_user_id(*, authorization: Optional[str], x_user_id: Optional[str] = None) -> str:
+def require_user_id(
+    *, authorization: Optional[str], x_user_id: Optional[str] = None
+) -> str:
     """
     Phase A (backend-first auth): if Authorization Bearer token exists, verify it via Supabase and
     return the authenticated user_id; otherwise fall back to dev user id (unless AUTH_REQUIRED=1).
@@ -73,10 +77,15 @@ def require_user_id(*, authorization: Optional[str], x_user_id: Optional[str] = 
         uid = _verify_supabase_jwt(token)
         if uid:
             return uid
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid auth token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid auth token"
+        )
 
     settings = get_settings()
     if bool(getattr(settings, "auth_required", False)):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="missing Authorization bearer token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="missing Authorization bearer token",
+        )
 
     return get_user_id(x_user_id)

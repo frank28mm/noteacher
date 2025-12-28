@@ -9,21 +9,25 @@ Notes:
 - Do not allow arbitrary base_url/model injection; use env-configured endpoints.
 """
 
+import logging
 import re
+from functools import partial
 from typing import List, Optional
 
-from pydantic import BaseModel
-from openai import OpenAI, APIConnectionError, APITimeoutError
 import httpx
+from openai import APIConnectionError, APITimeoutError, OpenAI
+from pydantic import BaseModel
 from tenacity import (
     retry,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
-    before_sleep_log,
 )
-import logging
-from functools import partial
+
+from homework_agent.models.schemas import ImageRef, VisionProvider
+from homework_agent.services.image_preprocessor import maybe_preprocess_for_vision
+from homework_agent.utils.observability import trace_span
+from homework_agent.utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +53,6 @@ def _log_retry(op: str, retry_state):
         exc,
     )
 
-from homework_agent.models.schemas import ImageRef, VisionProvider
-from homework_agent.utils.settings import get_settings
-from homework_agent.services.image_preprocessor import maybe_preprocess_for_vision
-from homework_agent.utils.observability import trace_span
-
 
 class VisionResult(BaseModel):
     text: str
@@ -77,7 +76,9 @@ class VisionClient:
         )
 
     def _build_openai_client(self, base_url: str, api_key: str) -> OpenAI:
-        return OpenAI(base_url=base_url, api_key=api_key, timeout=float(self.timeout_seconds))
+        return OpenAI(
+            base_url=base_url, api_key=api_key, timeout=float(self.timeout_seconds)
+        )
 
     def _strip_base64_prefix(self, data: str) -> str:
         return re.sub(r"^data:image/[^;]+;base64,", "", data, flags=re.IGNORECASE)
@@ -98,18 +99,26 @@ class VisionClient:
         for ref in refs:
             if ref.url:
                 if not self._is_public_url(str(ref.url)):
-                    raise ValueError("Image URL must be public HTTP/HTTPS (no localhost/127)")
+                    raise ValueError(
+                        "Image URL must be public HTTP/HTTPS (no localhost/127)"
+                    )
                 preprocessed = maybe_preprocess_for_vision(str(ref.url))
                 if preprocessed:
                     if provider == VisionProvider.DOUBAO:
-                        blocks.append({"type": "input_image", "image_url": preprocessed})
+                        blocks.append(
+                            {"type": "input_image", "image_url": preprocessed}
+                        )
                     else:
-                        blocks.append({"type": "image_url", "image_url": {"url": preprocessed}})
+                        blocks.append(
+                            {"type": "image_url", "image_url": {"url": preprocessed}}
+                        )
                     continue
                 if provider == VisionProvider.DOUBAO:
                     blocks.append({"type": "input_image", "image_url": str(ref.url)})
                 else:
-                    blocks.append({"type": "image_url", "image_url": {"url": str(ref.url)}})
+                    blocks.append(
+                        {"type": "image_url", "image_url": {"url": str(ref.url)}}
+                    )
             elif ref.base64:
                 # Prefer URL uploads when possible, but allow Data URI fallback:
                 # - Qwen3 (SiliconFlow) expects full Data URI in 'url' field.
@@ -123,13 +132,20 @@ class VisionClient:
                 if provider == VisionProvider.DOUBAO:
                     blocks.append({"type": "input_image", "image_url": ref.base64})
                 else:
-                    blocks.append({"type": "image_url", "image_url": {"url": ref.base64}})
+                    blocks.append(
+                        {"type": "image_url", "image_url": {"url": ref.base64}}
+                    )
         return blocks
 
     @trace_span("vision.analyze")
     @retry(
         retry=retry_if_exception_type(
-            (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)
+            (
+                APIConnectionError,
+                APITimeoutError,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            )
         ),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         stop=stop_after_attempt(3),
@@ -150,7 +166,9 @@ class VisionClient:
         if provider == VisionProvider.QWEN3:
             if not self.silicon_api_key:
                 raise RuntimeError("SILICON_API_KEY not configured")
-            client = self._build_openai_client(self.silicon_base_url, self.silicon_api_key)
+            client = self._build_openai_client(
+                self.silicon_base_url, self.silicon_api_key
+            )
             messages = [
                 {
                     "role": "user",

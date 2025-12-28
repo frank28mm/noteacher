@@ -1,0 +1,18 @@
+{
+  "sample_id": "sample_001_math_arithmetic",
+  "description": "Minimal offline replay sample (arithmetic). Embedded 1x1 PNG to keep repo text-only.",
+  "subject": "math",
+  "input": {
+    "or_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6nP0UAAAAASUVORK5CYII=",
+    "mode": "embedded_base64"
+  },
+  "expected_output": {
+    "must_have_fields": ["results", "summary", "warnings"]
+  },
+  "metadata": {
+    "difficulty": "easy",
+    "category": "arithmetic",
+    "allow_uncertain": true
+  },
+  "tags": ["offline", "arithmetic"]
+}

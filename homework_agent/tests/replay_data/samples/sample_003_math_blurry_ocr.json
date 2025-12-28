@@ -1,0 +1,20 @@
+{
+  "sample_id": "sample_003_math_blurry_ocr",
+  "description": "Minimal offline replay sample (low OCR quality). Embedded 1x1 PNG placeholder.",
+  "subject": "math",
+  "input": {
+    "or_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6nP0UAAAAASUVORK5CYII=",
+    "mode": "embedded_base64"
+  },
+  "expected_output": {
+    "must_have_fields": ["results", "summary", "warnings"],
+    "allow_uncertain": true
+  },
+  "metadata": {
+    "difficulty": "hard",
+    "category": "ocr_quality",
+    "requires_ocr_fallback": true,
+    "allow_uncertain": true
+  },
+  "tags": ["offline", "ocr"]
+}

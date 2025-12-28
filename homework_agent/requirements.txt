@@ -8,7 +8,10 @@ pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
 gradio>=4.0.0
 python-multipart
-httpx
+# Pin httpx to stay compatible with gotrue/supabase stack.
+httpx>=0.24,<0.26
+# Realtime client requires websockets.asyncio (websockets>=13; keep >=15 to match other tooling).
+websockets>=15.0.1
 tenacity>=8.0.0
 supabase>=2.0.0
 pillow

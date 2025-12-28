@@ -32,7 +32,9 @@ def test_grade_records_qindex_skipped_when_redis_unavailable(monkeypatch):
     client = TestClient(app)
     session_id = "sess_qindex_skip_redis"
 
-    async def fake_perform_grading(req, provider_str):  # noqa: ARG001
+    async def fake_perform_grading(
+        req, provider_str, *, experiment_key=None
+    ):  # noqa: ARG001
         _seed_qbank(session_id, subject=req.subject.value, visual_risk=True)
         return GradeResponse(
             wrong_items=[],
@@ -50,7 +52,11 @@ def test_grade_records_qindex_skipped_when_redis_unavailable(monkeypatch):
 
     monkeypatch.setattr(grade_api, "perform_grading", fake_perform_grading)
     monkeypatch.setattr(grade_api, "enqueue_qindex_job", lambda *a, **k: False)
-    monkeypatch.setattr(grade_api, "qindex_is_configured", lambda: (True, "ok (OCR_PROVIDER=siliconflow_qwen3_vl)"))
+    monkeypatch.setattr(
+        grade_api,
+        "qindex_is_configured",
+        lambda: (True, "ok (OCR_PROVIDER=siliconflow_qwen3_vl)"),
+    )
 
     resp = client.post(
         "/api/v1/grade",
@@ -72,7 +78,9 @@ def test_grade_records_qindex_skipped_when_ocr_disabled(monkeypatch):
     client = TestClient(app)
     session_id = "sess_qindex_skip_ocr"
 
-    async def fake_perform_grading(req, provider_str):  # noqa: ARG001
+    async def fake_perform_grading(
+        req, provider_str, *, experiment_key=None
+    ):  # noqa: ARG001
         _seed_qbank(session_id, subject=req.subject.value, visual_risk=True)
         return GradeResponse(
             wrong_items=[],
@@ -89,7 +97,11 @@ def test_grade_records_qindex_skipped_when_ocr_disabled(monkeypatch):
         )
 
     monkeypatch.setattr(grade_api, "perform_grading", fake_perform_grading)
-    monkeypatch.setattr(grade_api, "qindex_is_configured", lambda: (False, "ocr_disabled (OCR_PROVIDER=disabled)"))
+    monkeypatch.setattr(
+        grade_api,
+        "qindex_is_configured",
+        lambda: (False, "ocr_disabled (OCR_PROVIDER=disabled)"),
+    )
 
     resp = client.post(
         "/api/v1/grade",
@@ -115,7 +127,11 @@ def test_chat_records_qindex_skipped_when_redis_unavailable(monkeypatch):
 
     # Avoid real provider calls during tests.
     monkeypatch.setattr(chat_api, "enqueue_qindex_job", lambda *a, **k: False)
-    monkeypatch.setattr(chat_api, "qindex_is_configured", lambda: (True, "ok (OCR_PROVIDER=siliconflow_qwen3_vl)"))
+    monkeypatch.setattr(
+        chat_api,
+        "qindex_is_configured",
+        lambda: (True, "ok (OCR_PROVIDER=siliconflow_qwen3_vl)"),
+    )
 
     def fake_stream(self, **kwargs):  # noqa: ARG001
         yield "你好"
@@ -137,4 +153,3 @@ def test_chat_records_qindex_skipped_when_redis_unavailable(monkeypatch):
     qindex = session_api.get_question_index(session_id)
     assert isinstance(qindex, dict)
     assert any("redis_unavailable" in str(w) for w in (qindex.get("warnings") or []))
-

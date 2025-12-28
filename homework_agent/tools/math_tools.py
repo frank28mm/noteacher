@@ -40,12 +40,21 @@ def _safe_eval(expr: str) -> float:
         if not isinstance(node, _ALLOWED_NODES):
             raise ValueError("unsupported_expression")
         if isinstance(node, ast.Call):
-            if not isinstance(node.func, ast.Name) or node.func.id not in _ALLOWED_FUNCS:
+            if (
+                not isinstance(node.func, ast.Name)
+                or node.func.id not in _ALLOWED_FUNCS
+            ):
                 raise ValueError("unsupported_function")
         if isinstance(node, ast.Name) and node.id not in _ALLOWED_FUNCS:
             raise ValueError("variables_not_supported")
     compiled = compile(tree, "<expr>", "eval")
-    return float(eval(compiled, {"__builtins__": {}}, dict(_ALLOWED_FUNCS)))
+    return float(
+        eval(  # nosec B307
+            compiled,
+            {"__builtins__": {}},
+            dict(_ALLOWED_FUNCS),
+        )
+    )
 
 
 @tool(
@@ -101,4 +110,3 @@ def verify_calculation(expression: str, expected: str) -> Dict[str, Any]:
         "computed": expr_val,
         "difference": diff,
     }
-

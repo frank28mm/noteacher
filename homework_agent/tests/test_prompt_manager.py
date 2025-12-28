@@ -11,4 +11,3 @@ def test_prompt_manager_loads_socratic_prompt():
     pm = get_prompt_manager()
     text = pm.render("socratic_tutor_system.yaml")
     assert "苏格拉底式" in text or "辅导" in text
-

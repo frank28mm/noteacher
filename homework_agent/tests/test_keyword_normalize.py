@@ -31,4 +31,3 @@ def test_normalize_tokens_position_words():
 def test_normalize_tokens_diagram_missing():
     assert "DIAGRAM_MISSING" in vf._normalize_tokens("diagram_missing")
     assert "DIAGRAM_MISSING" in vf._normalize_tokens("未见图形区域")
-

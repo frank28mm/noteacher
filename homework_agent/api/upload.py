@@ -4,10 +4,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Header, HTTPException, UploadFile, status, Request
 
 from homework_agent.utils.supabase_client import get_storage_client
-from homework_agent.utils.observability import log_event
+from homework_agent.utils.observability import get_request_id_from_headers, log_event
 from homework_agent.utils.user_context import require_user_id
 from homework_agent.utils.submission_store import create_submission_on_upload
 
@@ -20,6 +20,7 @@ router = APIRouter()
 
 @router.post("/uploads", status_code=status.HTTP_200_OK)
 async def upload_files(
+    request: Request,
     file: UploadFile = File(...),
     session_id: Optional[str] = None,
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
@@ -34,6 +35,9 @@ async def upload_files(
     - Returns public URLs (bucket may be public during development).
     """
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    request_id = getattr(
+        getattr(request, "state", None), "request_id", None
+    ) or get_request_id_from_headers(request.headers)
     upload_id = f"upl_{uuid.uuid4().hex[:16]}"
     filename = (file.filename or "").strip() or "upload"
 
@@ -45,12 +49,18 @@ async def upload_files(
     try:
         raw = await file.read()
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"read upload failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"read upload failed: {e}"
+        )
 
     if not raw:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="empty file")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="empty file"
+        )
     if len(raw) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file exceeds 20MB")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="file exceeds 20MB"
+        )
 
     tmp_path = None
     try:
@@ -66,7 +76,22 @@ async def upload_files(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        log_event(
+            logger,
+            "upload_failed",
+            level="error",
+            request_id=request_id,
+            user_id=user_id,
+            upload_id=upload_id,
+            session_id=session_id,
+            filename=filename,
+            error_type=e.__class__.__name__,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        )
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:
@@ -97,6 +122,7 @@ async def upload_files(
             submission_id=upload_id,
             user_id=user_id,
             session_id=session_id,
+            request_id=request_id,
             page_image_urls=urls,
             filename=filename,
             content_type=file.content_type,
@@ -109,6 +135,7 @@ async def upload_files(
         log_event(
             logger,
             "upload_done",
+            request_id=request_id,
             user_id=user_id,
             upload_id=upload_id,
             session_id=session_id,

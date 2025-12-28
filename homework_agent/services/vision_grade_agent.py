@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from homework_agent.core.prompts import (
     VISION_GRADE_SYSTEM_PROMPT_MATH,
@@ -17,7 +17,8 @@ from homework_agent.models.schemas import Subject, ImageRef
 from homework_agent.services.llm import LLMClient, _repair_json_text
 from homework_agent.services.opencv_pipeline import run_opencv_pipeline, upload_slices
 from homework_agent.utils.settings import get_settings
-from homework_agent.utils.observability import log_event, trace_span
+from homework_agent.utils.observability import log_event, log_llm_usage, trace_span
+from homework_agent.utils.versioning import stable_json_hash, stable_text_hash
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +58,12 @@ def _ensure_judgment_basis(result: Dict[str, Any], *, min_len: int) -> None:
         return
     has_source = any(isinstance(b, str) and "依据来源" in b for b in basis)
     if not has_source:
-        result["judgment_basis"] = ["依据来源：OCR+图像理解"] + [b for b in basis if isinstance(b, str)]
+        result["judgment_basis"] = ["依据来源：OCR+图像理解"] + [
+            b for b in basis if isinstance(b, str)
+        ]
     # Ensure minimum length
     if min_len > 0 and len(result["judgment_basis"]) < min_len:
-        result["judgment_basis"] = result["judgment_basis"] + [
-            "依据题干与作答进行判断"
-        ]
+        result["judgment_basis"] = result["judgment_basis"] + ["依据题干与作答进行判断"]
 
 
 def _select_prompt(subject: Subject) -> str:
@@ -102,7 +103,9 @@ def _repair_with_llm(
         f"解析错误：{error}\n\n"
         f"原始内容：\n{raw_text}\n"
     )
-    resp = llm.generate(prompt=prompt, provider=provider, max_tokens=max_tokens, temperature=0.0)
+    resp = llm.generate(
+        prompt=prompt, provider=provider, max_tokens=max_tokens, temperature=0.0
+    )
     return _parse_unified_json(resp.text or "")
 
 
@@ -119,7 +122,6 @@ def _prepare_image_inputs(
     images: List[ImageRef],
     session_id: str,
 ) -> Tuple[List[ImageRef], List[str]]:
-    settings = get_settings()
     prefix = f"preprocessed/grade/{session_id}/"
     final_refs: List[ImageRef] = []
     warnings: List[str] = []
@@ -169,6 +171,33 @@ async def run_unified_grade_agent(
     timeout_s = float(getattr(settings, "unified_agent_timeout_seconds", 600))
     repair_attempts = int(getattr(settings, "json_repair_max_attempts", 1))
 
+    thresholds = {
+        "timeout_seconds": timeout_s,
+        "max_tokens_per_call": max_tokens,
+        "json_repair_max_attempts": repair_attempts,
+    }
+    thresholds_hash = stable_json_hash(thresholds)[:16]
+    try:
+        model = (
+            llm.silicon_vision_model if provider == "silicon" else llm.ark_vision_model
+        )
+    except Exception:
+        model = None
+    prompt_id = f"unified.{str(getattr(subject, 'value', subject))}"
+    prompt_version = stable_text_hash(prompt)[:16]
+    log_event(
+        logger,
+        "run_versions",
+        session_id=session_id,
+        request_id=request_id,
+        prompt_id=prompt_id,
+        prompt_version=prompt_version,
+        provider=provider,
+        model=str(model or ""),
+        thresholds=thresholds,
+        thresholds_hash=thresholds_hash,
+    )
+
     prep_start = time.monotonic()
     log_event(
         logger,
@@ -201,7 +230,7 @@ async def run_unified_grade_agent(
         images=len(refs),
     )
 
-    async def _call_llm() -> str:
+    async def _call_llm():
         return llm.generate_with_images(
             system_prompt=prompt,
             user_prompt=user_prompt,
@@ -210,7 +239,7 @@ async def run_unified_grade_agent(
             max_tokens=max_tokens,
             temperature=0.2,
             use_tools=True,
-        ).text
+        )
 
     llm_start = time.monotonic()
     log_event(
@@ -223,7 +252,7 @@ async def run_unified_grade_agent(
         images=len(refs),
     )
     try:
-        raw_text = await asyncio.wait_for(_call_llm(), timeout=timeout_s)
+        res = await asyncio.wait_for(_call_llm(), timeout=timeout_s)
     except Exception as e:
         log_event(
             logger,
@@ -237,19 +266,36 @@ async def run_unified_grade_agent(
         )
         raise RuntimeError(f"unified_agent_failed: {e}") from e
 
+    try:
+        log_llm_usage(
+            logger,
+            request_id=str(request_id or ""),
+            session_id=str(session_id or ""),
+            provider=str(provider or ""),
+            model=str(
+                llm.silicon_vision_model
+                if provider == "silicon"
+                else llm.ark_vision_model
+            ),
+            usage=getattr(res, "usage", None) or {},
+            stage="unified.llm",
+        )
+    except Exception:
+        pass
+
     log_event(
         logger,
         "unified_agent_llm_done",
         request_id=request_id,
         session_id=session_id,
         elapsed_ms=int((time.monotonic() - llm_start) * 1000),
-        raw_len=len(raw_text or ""),
+        raw_len=len(getattr(res, "text", "") or ""),
     )
 
     parse_path = "fail"
     repaired_json = False
     payload: Optional[UnifiedGradePayload] = None
-    raw = str(raw_text or "")
+    raw = str(getattr(res, "text", "") or "")
     try:
         data = json.loads(raw)
         payload = UnifiedGradePayload.model_validate(data)
@@ -271,7 +317,7 @@ async def run_unified_grade_agent(
         payload = _repair_with_llm(
             llm=llm,
             provider=provider,
-            raw_text=raw_text,
+            raw_text=raw,
             error="json_parse_failed",
             max_tokens=max_tokens,
         )

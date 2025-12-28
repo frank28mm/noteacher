@@ -58,7 +58,9 @@ def redact_url(
             else:
                 q.append((k, v))
         new_query = urlencode(q, doseq=True)
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, new_query, parts.fragment)
+        )
     except Exception:
         try:
             return str(url)
@@ -72,15 +74,80 @@ def log_event(logger, event: str, *, level: str = "info", **fields: Any) -> None
     This is best-effort and must never raise.
     """
     try:
+        # Import lazily to avoid coupling/security overhead in hot paths.
+        from homework_agent.security.safety import sanitize_value_for_log
+
+        # Rule alignment: ensure non-loop events still carry an explicit `iteration`
+        # when a session_id exists (use 0 as the stable default).
+        if "session_id" in fields and "iteration" not in fields:
+            fields = dict(fields)
+            fields["iteration"] = 0
+
         payload: Dict[str, Any] = {"event": event}
         for k, v in fields.items():
             if v is None:
                 continue
-            payload[str(k)] = _safe_value(v)
+            payload[str(k)] = sanitize_value_for_log(_safe_value(v))
         line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         fn = getattr(logger, level, None) or getattr(logger, "info", None)
         if fn:
             fn(line)
+    except Exception:
+        return
+
+
+def log_llm_usage(
+    logger,
+    *,
+    request_id: str,
+    session_id: str,
+    model: str,
+    provider: str,
+    usage: Any,
+    stage: str,
+    level: str = "info",
+) -> None:
+    """
+    Convenience helper to emit a stable, structured LLM usage event for cost/tokens tracing.
+    Best-effort and must never raise.
+
+    Expected `usage` shape (best-effort):
+      {"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
+    """
+    try:
+        u = _safe_value(usage) if usage is not None else {}
+        if not isinstance(u, dict):
+            u = {"usage": u}
+        # Best-effort metrics export (Prometheus-style endpoint).
+        try:
+            from homework_agent.utils.metrics import inc_counter
+
+            total = u.get("total_tokens")
+            if total is not None:
+                inc_counter(
+                    "llm_tokens_total",
+                    labels={
+                        "provider": str(provider or ""),
+                        "model": str(model or ""),
+                        "stage": str(stage or ""),
+                    },
+                    value=float(total),
+                )
+        except Exception:
+            pass
+        log_event(
+            logger,
+            "llm_usage",
+            level=level,
+            request_id=str(request_id or ""),
+            session_id=str(session_id or ""),
+            provider=str(provider or ""),
+            model=str(model or ""),
+            stage=str(stage or ""),
+            prompt_tokens=u.get("prompt_tokens"),
+            completion_tokens=u.get("completion_tokens"),
+            total_tokens=u.get("total_tokens"),
+        )
     except Exception:
         return
 
@@ -119,7 +186,9 @@ def trace_span(
                 start = time.monotonic()
                 payload: Dict[str, Any] = {"span": name}
                 if include_args:
-                    safe_args = args[1:] if args and hasattr(args[0], "__class__") else args
+                    safe_args = (
+                        args[1:] if args and hasattr(args[0], "__class__") else args
+                    )
                     payload["args"] = _truncate(safe_args)
                     payload["kwargs"] = _truncate(kwargs)
                 log_event(logger, "trace_start", **payload)
@@ -193,7 +262,12 @@ def get_request_id_from_headers(headers: Any) -> Optional[str]:
     Returns stripped string or None.
     """
     try:
-        for key in ("x-request-id", "x-request-id".upper(), "x-correlation-id", "x-correlation-id".upper()):
+        for key in (
+            "x-request-id",
+            "x-request-id".upper(),
+            "x-correlation-id",
+            "x-correlation-id".upper(),
+        ):
             v = headers.get(key) if hasattr(headers, "get") else None
             if not v:
                 continue

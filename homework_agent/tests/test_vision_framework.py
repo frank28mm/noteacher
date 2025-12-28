@@ -28,7 +28,13 @@ def test_extract_visual_facts_repairs_wrapped_json(monkeypatch):
                 "scene_type": "math.geometry_2d",
                 "confidence": 0.9,
                 "facts": {
-                    "lines": [{"name": "AD", "direction": "horizontal", "relative": "above BC"}],
+                    "lines": [
+                        {
+                            "name": "AD",
+                            "direction": "horizontal",
+                            "relative": "above BC",
+                        }
+                    ],
                     "points": [],
                     "angles": [],
                     "labels": [],
@@ -38,7 +44,9 @@ def test_extract_visual_facts_repairs_wrapped_json(monkeypatch):
                 "unknowns": [],
                 "warnings": [],
             }
-            return DummyRes("some header\n" + json.dumps(payload, ensure_ascii=False) + "\ntrailer")
+            return DummyRes(
+                "some header\n" + json.dumps(payload, ensure_ascii=False) + "\ntrailer"
+            )
 
     monkeypatch.setattr(vf, "VisionClient", DummyVisionClient)
 
@@ -110,11 +118,26 @@ def test_extract_visual_facts_coerces_object_arrays(monkeypatch):
                 "confidence": 0.8,
                 "facts": {
                     "lines": [
-                        {"name": "AD", "direction": "horizontal", "relative": "above BC"},
-                        {"name": "BC", "direction": "horizontal", "relative": "below AD"},
+                        {
+                            "name": "AD",
+                            "direction": "horizontal",
+                            "relative": "above BC",
+                        },
+                        {
+                            "name": "BC",
+                            "direction": "horizontal",
+                            "relative": "below AD",
+                        },
                     ],
                     "points": [{"name": "A", "relative": "left of D"}],
-                    "angles": [{"name": "∠2", "at": "D", "between": "AD", "transversal_side": "left"}],
+                    "angles": [
+                        {
+                            "name": "∠2",
+                            "at": "D",
+                            "between": "AD",
+                            "transversal_side": "left",
+                        }
+                    ],
                     "labels": ["A", "B", "C", "D"],
                     "spatial": [],
                 },
@@ -140,7 +163,9 @@ def test_extract_visual_facts_coerces_object_arrays(monkeypatch):
 
 
 def test_gate_visual_facts_low_confidence():
-    facts = VisualFacts(scene_type=SceneType.MATH_GEOMETRY_2D, confidence=0.2, unknowns=["∠2 UNKNOWN"])
+    facts = VisualFacts(
+        scene_type=SceneType.MATH_GEOMETRY_2D, confidence=0.2, unknowns=["∠2 UNKNOWN"]
+    )
     gate = vf.gate_visual_facts(
         facts=facts,
         scene_type=SceneType.MATH_GEOMETRY_2D,
@@ -178,7 +203,9 @@ def test_gate_visual_facts_passes_when_confident_and_no_unknowns():
         scene_type=SceneType.MATH_GEOMETRY_2D,
         confidence=0.95,
         facts={
-            "lines": [{"name": "AD", "direction": "horizontal", "relative": "above BC"}],
+            "lines": [
+                {"name": "AD", "direction": "horizontal", "relative": "above BC"}
+            ],
             "angles": [
                 {"name": "∠2", "transversal_side": "left", "between_lines": True},
                 {"name": "∠BCD", "transversal_side": "right", "between_lines": True},
