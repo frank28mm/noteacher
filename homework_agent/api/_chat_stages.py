@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from homework_agent.core.qbank import _normalize_question_number
@@ -24,6 +25,7 @@ from homework_agent.api.session import (
     _now_ts,
 )
 from homework_agent.utils.observability import log_event, trace_span
+from homework_agent.utils.settings import get_settings
 from homework_agent.utils.submission_store import (
     load_qindex_image_refs,
     resolve_submission_for_session,
@@ -43,6 +45,9 @@ from homework_agent.api.chat import (  # noqa: E402
 import homework_agent.api.chat as chat_api  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+def _now_iso_utc() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _load_qindex_refs_from_db(
@@ -600,10 +605,12 @@ async def _stream_socratic_llm_to_sse(
     current_turn: int,
     provider_str: str,
     model_override: Optional[str],
+    prompt_variant: Optional[str],
     request_id: str,
     started_m: float,
 ) -> AsyncIterator[bytes]:
     """True streaming: LLM token stream -> SSE chat events (preserves existing behavior)."""
+    settings = get_settings()
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
     DONE = object()
@@ -639,6 +646,7 @@ async def _stream_socratic_llm_to_sse(
                 provider=provider_str,
                 model_override=model_override,
                 history=llm_history,
+                prompt_variant=prompt_variant,
             ):
                 asyncio.run_coroutine_threadsafe(q.put(chunk), loop)
             asyncio.run_coroutine_threadsafe(q.put(DONE), loop)
@@ -668,16 +676,42 @@ async def _stream_socratic_llm_to_sse(
 
     buffer = ""
     last_emit = time.monotonic()
+    heartbeat_interval = float(getattr(settings, "chat_heartbeat_interval_seconds", 30.0) or 30.0)
+    idle_disconnect_seconds = float(
+        getattr(settings, "chat_idle_disconnect_seconds", 0.0) or 0.0
+    )
+    producer_join_timeout_seconds = float(
+        getattr(settings, "chat_producer_join_timeout_seconds", 1.0) or 1.0
+    )
+    last_llm_item_m = time.monotonic()
+    idle_disconnected = False
     while True:
         try:
-            item = await asyncio.wait_for(q.get(), timeout=10.0)
+            item = await asyncio.wait_for(q.get(), timeout=heartbeat_interval)
         except asyncio.TimeoutError:
             # keep connection alive during long thinking
-            yield b"event: heartbeat\ndata: {}\n\n"
+            if (
+                idle_disconnect_seconds > 0
+                and (time.monotonic() - last_llm_item_m) >= idle_disconnect_seconds
+            ):
+                idle_disconnected = True
+                log_event(
+                    logger,
+                    "chat_sse_idle_disconnect",
+                    request_id=request_id,
+                    session_id=session_id,
+                    idle_ms=int((time.monotonic() - last_llm_item_m) * 1000),
+                    idle_disconnect_seconds=idle_disconnect_seconds,
+                )
+                break
+            yield f'event: heartbeat\ndata: {{"timestamp":"{_now_iso_utc()}"}}\n\n'.encode(
+                "utf-8"
+            )
             continue
 
         if item is DONE:
             break
+        last_llm_item_m = time.monotonic()
         if isinstance(item, dict) and item.get("event"):
             evt = item.get("event")
             data = json.dumps(item.get("data") or {}, ensure_ascii=False)
@@ -733,9 +767,21 @@ async def _stream_socratic_llm_to_sse(
         request_id=request_id,
         session_id=session_id,
         status="continue",
+        idle_disconnected=bool(idle_disconnected),
         elapsed_ms=int((time.monotonic() - started_m) * 1000),
     )
     yield f'event: done\ndata: {{"status":"continue","session_id":"{session_id}"}}\n\n'.encode(
         "utf-8"
     )
-    await producer_task
+    try:
+        await asyncio.wait_for(producer_task, timeout=producer_join_timeout_seconds)
+    except asyncio.TimeoutError:
+        producer_task.cancel()
+        log_event(
+            logger,
+            "chat_sse_producer_join_timeout",
+            request_id=request_id,
+            session_id=session_id,
+            timeout_seconds=producer_join_timeout_seconds,
+            level="warning",
+        )

@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import base64
+import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
+from fastapi.testclient import TestClient
+
+from homework_agent.main import create_app
 
 
 REPLAY_ROOT = Path(__file__).resolve().parent / "replay_data"
@@ -115,11 +120,55 @@ def test_replay_dataset_present_or_skipped() -> None:
     os.environ.get("RUN_REPLAY_LIVE") != "1",
     reason="set RUN_REPLAY_LIVE=1 to run live replay",
 )
-def test_replay_live_placeholder() -> None:
+def test_replay_live_smoke_one_sample() -> None:
     """
-    Placeholder for future live replay runs (calls real providers / requires secrets).
-    Keeping this explicit avoids accidental network/provider calls in CI.
+    Live replay smoke (calls real providers / requires secrets).
+
+    This is intentionally gated behind RUN_REPLAY_LIVE=1 to avoid accidental
+    network/provider calls in CI.
     """
-    pytest.skip(
-        "Live replay runner not implemented yet (requires provider stubs or secrets)."
-    )
+    samples = _load_samples()
+    if not samples:
+        pytest.skip("No replay samples found.")
+
+    # Pick a sample with existing local images (CI won't have images; local runs can).
+    sample = None
+    for s in samples:
+        _assert_sample_schema(s)
+        paths = _get_local_image_paths(s)
+        if paths and all(p.exists() for p in paths):
+            sample = s
+            break
+    if sample is None:
+        pytest.skip("No replay samples with local images present.")
+
+    subject = str(sample.payload.get("subject") or "").strip().lower()
+    paths = _get_local_image_paths(sample)
+
+    vision_provider = os.environ.get("LIVE_VISION_PROVIDER", "doubao").strip().lower()
+    if vision_provider == "doubao" and not os.environ.get("ARK_API_KEY"):
+        pytest.skip("ARK_API_KEY not set for LIVE_VISION_PROVIDER=doubao")
+    if vision_provider == "qwen3" and not os.environ.get("SILICON_API_KEY"):
+        pytest.skip("SILICON_API_KEY not set for LIVE_VISION_PROVIDER=qwen3")
+
+    def _to_data_url(p: Path) -> str:
+        mime, _ = mimetypes.guess_type(str(p))
+        mime = mime or "application/octet-stream"
+        raw = p.read_bytes()
+        b64 = base64.b64encode(raw).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+
+    images = [{"base64": _to_data_url(p)} for p in paths[:1]]
+    payload = {
+        "images": images,
+        "subject": subject,
+        "session_id": f"live_{sample.payload.get('sample_id')}",
+        "vision_provider": vision_provider,
+    }
+
+    client = TestClient(create_app())
+    resp = client.post("/api/v1/grade", json=payload, headers={"X-User-Id": "live"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("status") in {"done", "failed", "processing", None}
+    assert "warnings" in data

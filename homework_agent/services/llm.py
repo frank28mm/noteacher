@@ -965,6 +965,7 @@ class LLMClient:
         provider: str = "silicon",
         model_override: Optional[str] = None,
         history: Optional[List[Dict[str, Any]]] = None,
+        prompt_variant: Optional[str] = None,
     ) -> SocraticTutorResult:
         """
         苏格拉底式辅导
@@ -996,7 +997,17 @@ class LLMClient:
             "interaction_count": interaction_count,
             "strategy": strategy,
         }
-        messages = [{"role": "system", "content": SOCRATIC_TUTOR_SYSTEM_PROMPT}]
+        system_prompt = SOCRATIC_TUTOR_SYSTEM_PROMPT
+        try:
+            from homework_agent.utils.prompt_manager import get_prompt_manager
+
+            pm = get_prompt_manager()
+            rendered = pm.render("socratic_tutor_system.yaml", variant=prompt_variant)
+            if rendered:
+                system_prompt = rendered
+        except Exception:
+            pass
+        messages = [{"role": "system", "content": system_prompt}]
         if wrong_item_context:
             messages.append(
                 {
@@ -1167,6 +1178,7 @@ class LLMClient:
         provider: str = "silicon",
         model_override: Optional[str] = None,
         history: Optional[List[Dict[str, Any]]] = None,
+        prompt_variant: Optional[str] = None,
     ) -> Iterable[Any]:
         """
         Stream 苏格拉底式辅导输出（同步生成器，供 SSE 透传）。
@@ -1187,9 +1199,18 @@ class LLMClient:
             "interaction_count": interaction_count,
             "strategy": strategy,
         }
-        messages: List[Dict[str, str]] = [
-            {"role": "system", "content": SOCRATIC_TUTOR_SYSTEM_PROMPT}
-        ]
+        system_prompt = SOCRATIC_TUTOR_SYSTEM_PROMPT
+        try:
+            from homework_agent.utils.prompt_manager import get_prompt_manager
+
+            pm = get_prompt_manager()
+            rendered = pm.render("socratic_tutor_system.yaml", variant=prompt_variant)
+            if rendered:
+                system_prompt = rendered
+        except Exception:
+            pass
+
+        messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
         # For visually risky questions, force the model to anchor on the image first (facts before reasoning).
         try:
             focus_q = (

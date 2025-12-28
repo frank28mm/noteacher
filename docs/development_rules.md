@@ -200,7 +200,20 @@ python3 scripts/check_baseline.py \
 **Baseline 初始化**:
 - baseline 文件位置：`.github/baselines/metrics_baseline.json`
 - 更新 baseline（需要在 PR 里说明原因，并附 replay/metrics 产物）：
-  - `python3 scripts/check_baseline.py --current qa_metrics/metrics_summary.json --baseline .github/baselines/metrics_baseline.json --update-baseline`
+  - 推荐（带校验与留痕）：`python3 scripts/check_baseline.py --current qa_metrics/metrics_summary.json --baseline .github/baselines/metrics_baseline.json --update-baseline`
+  - 手工（等价覆盖）：`cp qa_metrics/metrics_summary.json .github/baselines/metrics_baseline.json`
+
+**Baseline 更新规则（团队口径）**：
+1. **允许更新的情况**：
+   - 新功能导致指标合理变化
+   - Bug 修复导致指标提升
+   - 模型/Prompt 升级带来预期变化
+2. **更新要求**：
+   - PR 必须附上 replay 报告（`qa_metrics/report.html`）
+   - PR 描述必须说明指标变化原因
+   - 使用 PR 模板中的 baseline checklist（`.github/pull_request_template.md`）
+3. **更新方式**：
+   - `cp qa_metrics/metrics_summary.json .github/baselines/metrics_baseline.json`
 
 **检查清单**:
 - [ ] PR触发CI后自动运行replay测试
@@ -247,6 +260,48 @@ results = run_tests()
 **实现约定（当前仓库）**：
 - Offline replay（CI-safe）：`python3 scripts/collect_replay_metrics.py` 会在 `qa_metrics/metrics_summary.json` 中写入 `eval_id/generated_at/git_commit/git_branch`。
 - Live replay（本机私有样本集）：`python3 scripts/collect_inventory_live_metrics.py` 会在 `qa_metrics/inventory_live_metrics_summary.json` 中写入同样字段。
+
+---
+
+### 规则2.4: 代码变更必须配套测试（Unit / Contract / Integration / E2E）
+
+**要求**: 任何“行为变更”（代码、prompt、工具策略、阈值、接口契约）都必须在合适层级补齐测试，避免“只靠线上反馈”。
+
+**测试分层（从快到慢）**：
+1. **Unit（单元）**：纯函数/小模块逻辑；不依赖网络与外部服务。
+2. **Contract（契约）**：FastAPI 路由/Schema/错误码/SSE 事件序列的形状与最小不变量（可用 TestClient + stub/mocks）。
+3. **Integration（集成）**：依赖 Redis 等基础设施（可在 CI service 启动 redis）。
+4. **E2E（端到端）**：`/uploads → /grade → /chat` 的全链路冒烟（可本地脚本；CI 可选）。
+
+**必须满足的最低要求（P0）**：
+- Bug 修复：至少新增/更新 1 个 Unit 或 Contract 用例，能复现并防回归。
+- prompt/阈值/策略变更：至少新增/更新 1 个 replay case（`homework_agent/tests/test_replay.py` 覆盖）。
+- API 契约变更（字段/事件/错误码）：至少新增/更新 1 个 Contract 测试（例如 SSE 序列、响应字段存在性）。
+
+**建议要求（P1）**：
+- 涉及 Redis/队列/worker：补 Integration 测试（或在 CI redis job 中覆盖）。
+- 涉及“跨模块行为”变更：补 1 个 E2E 冒烟脚本或测试（可先本地跑，CI 后置）。
+
+**检查清单**:
+- [ ] 新增功能/修复至少有 1 个可自动运行的测试用例
+- [ ] 不在 Unit/Contract 测试中调用真实 provider/网络（避免 CI 不稳定）
+- [ ] 如需真实 provider 验证：使用显式开关（例如 `RUN_REPLAY_LIVE=1`）并提供本地运行说明
+
+**推荐命令**:
+```bash
+# 单元/契约测试（CI 默认）
+python3 -m pytest -q
+
+# 仅 replay（行为回归）
+python3 -m pytest homework_agent/tests/test_replay.py -v
+python3 scripts/collect_replay_metrics.py --output qa_metrics/metrics.json
+
+# Redis 集成（CI service 提供 REDIS_URL）
+REDIS_URL=redis://localhost:6379/0 python3 -m pytest homework_agent/tests/test_review_queue_redis_integration.py -q
+
+# E2E 冒烟（本地）
+python3 scripts/e2e_grade_chat.py
+```
 
 ---
 

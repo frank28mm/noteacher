@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, status, Request, Header, BackgroundTasks
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    status,
+    Request,
+    Header,
+    BackgroundTasks,
+    Response,
+)
 
 from homework_agent.models.schemas import (
     GradeRequest,
@@ -21,6 +30,7 @@ from homework_agent.services.vision_grade_agent import UnifiedGradeResult
 from homework_agent.services.llm import MathGradingResult, EnglishGradingResult
 from homework_agent.services.autonomous_agent import run_autonomous_grade_agent
 from homework_agent.services.qindex_queue import enqueue_qindex_job
+from homework_agent.services.grade_queue import enqueue_grade_job
 from homework_agent.utils.settings import get_settings
 from homework_agent.core.qindex import qindex_is_configured
 from homework_agent.core.qbank import (
@@ -902,6 +912,7 @@ def _resolve_images_from_upload_id(upload_id: str, *, user_id: str) -> List[str]
 async def grade_homework(
     req: GradeRequest,
     request: Request,
+    response: Response,
     background_tasks: BackgroundTasks,
     x_idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key"),
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
@@ -1019,26 +1030,72 @@ async def grade_homework(
     )
 
     if is_large_batch:
+        response.status_code = status.HTTP_202_ACCEPTED
         job_id = generate_job_id()
-        cache_store.set(
-            f"job:{job_id}",
-            {
-                "status": "processing",
-                "created_at": datetime.now().isoformat(),
-                "request": req.model_dump(),
-                "result": None,
-            },
-            ttl_seconds=IDP_TTL_HOURS * 3600,
-        )
-        background_tasks.add_task(background_grade, job_id, req, provider_str)
-        log_event(
-            logger,
-            "grade_async_enqueued",
-            request_id=request_id,
-            session_id=session_for_ctx,
-            job_id=job_id,
-            images=len(req.images or []),
-        )
+        ttl_seconds = int(IDP_TTL_HOURS * 3600)
+        queued = False
+        require_redis = os.getenv("REQUIRE_REDIS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        try:
+            queued = enqueue_grade_job(
+                job_id=job_id,
+                grade_request=req.model_dump(),
+                provider=provider_str,
+                request_id=request_id,
+                session_id=session_for_ctx,
+                user_id=user_id,
+                ttl_seconds=ttl_seconds,
+            )
+        except Exception as e:
+            if require_redis:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Redis grade queue unavailable (REQUIRE_REDIS=1): {e}",
+                )
+            logger.debug(f"enqueue_grade_job failed: {e}")
+            queued = False
+
+        if require_redis and not queued:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Redis grade queue unavailable (REQUIRE_REDIS=1)",
+            )
+
+        if not queued:
+            # Dev fallback: keep old in-process BackgroundTasks behavior when Redis is unavailable.
+            cache_store.set(
+                f"job:{job_id}",
+                {
+                    "status": "processing",
+                    "created_at": datetime.now().isoformat(),
+                    "request": req.model_dump(),
+                    "result": None,
+                },
+                ttl_seconds=ttl_seconds,
+            )
+            background_tasks.add_task(background_grade, job_id, req, provider_str)
+            log_event(
+                logger,
+                "grade_async_enqueued",
+                request_id=request_id,
+                session_id=session_for_ctx,
+                job_id=job_id,
+                images=len(req.images or []),
+                mode="background_tasks_fallback",
+            )
+        else:
+            log_event(
+                logger,
+                "grade_async_enqueued",
+                request_id=request_id,
+                session_id=session_for_ctx,
+                job_id=job_id,
+                images=len(req.images or []),
+                mode="redis_queue",
+            )
         return GradeResponse(
             wrong_items=[],
             summary="任务已创建，正在处理中...",

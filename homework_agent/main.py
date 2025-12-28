@@ -9,6 +9,10 @@ from fastapi.responses import PlainTextResponse
 from fastapi import Header
 
 from homework_agent.api import routes
+from homework_agent.api.middleware.request_context import (
+    request_context_middleware,
+    get_session_id_from_request,
+)
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.logging_setup import setup_file_logging, silence_noisy_loggers
 from contextlib import asynccontextmanager
@@ -19,45 +23,9 @@ from homework_agent.utils.errors import (
     ErrorCode,
 )
 from homework_agent.utils.observability import get_request_id_from_headers
-from homework_agent.utils.metrics import (
-    Timer,
-    inc_counter,
-    observe_histogram,
-    render_prometheus,
-)
+from homework_agent.utils.metrics import render_prometheus
 
 logger = logging.getLogger(__name__)
-
-
-def _get_session_id_from_request(request: Request) -> str | None:
-    """
-    Best-effort session_id extraction for early failures (401/422/middleware errors).
-    We intentionally avoid reading request body in middleware.
-    """
-    try:
-        sid = getattr(getattr(request, "state", None), "session_id", None)
-        if sid:
-            return str(sid).strip() or None
-    except Exception:
-        sid = None
-
-    try:
-        sid = request.headers.get("X-Session-Id")
-        if sid and str(sid).strip():
-            return str(sid).strip()
-    except Exception:
-        pass
-
-    try:
-        sid = request.query_params.get("session_id") or request.query_params.get(
-            "sessionId"
-        )
-        if sid and str(sid).strip():
-            return str(sid).strip()
-    except Exception:
-        pass
-
-    return None
 
 
 def _validate_cors(settings) -> None:
@@ -74,9 +42,20 @@ def _validate_cors(settings) -> None:
             )
 
 
+def _validate_prod_security(settings) -> None:
+    env = str(getattr(settings, "app_env", "dev") or "dev").strip().lower()
+    if env not in {"prod", "production"}:
+        return
+    if not bool(getattr(settings, "auth_required", False)):
+        raise RuntimeError(
+            "AUTH_REQUIRED must be enabled for production (set AUTH_REQUIRED=1)."
+        )
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     _validate_cors(settings)
+    _validate_prod_security(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # noqa: ARG001
@@ -92,56 +71,8 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Homework Agent", version="1.0.0", lifespan=lifespan)
 
     @app.middleware("http")
-    async def _request_id_middleware(request: Request, call_next):
-        t = Timer()
-        request_id = getattr(
-            getattr(request, "state", None), "request_id", None
-        ) or get_request_id_from_headers(request.headers)
-        if not request_id:
-            import uuid
-
-            request_id = f"req_{uuid.uuid4().hex[:12]}"
-        try:
-            request.state.request_id = str(request_id)
-        except Exception:
-            pass
-
-        session_id = _get_session_id_from_request(request)
-        if session_id:
-            try:
-                request.state.session_id = str(session_id)
-            except Exception:
-                pass
-
-        response = await call_next(request)
-        try:
-            response.headers["X-Request-Id"] = str(request_id)
-        except Exception:
-            pass
-        if session_id:
-            try:
-                response.headers["X-Session-Id"] = str(session_id)
-            except Exception:
-                pass
-
-        # Best-effort request metrics (do not raise).
-        try:
-            path = str(request.url.path or "")
-            method = str(request.method or "")
-            status_code = str(getattr(response, "status_code", 0))
-            inc_counter(
-                "http_requests_total",
-                labels={"path": path, "method": method, "status": status_code},
-            )
-            observe_histogram(
-                "http_request_duration_seconds",
-                value=t.elapsed_seconds(),
-                buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30),
-                labels={"path": path, "method": method},
-            )
-        except Exception:
-            pass
-        return response
+    async def _request_context_middleware(request: Request, call_next):
+        return await request_context_middleware(request, call_next)
 
     @app.get("/metrics")
     async def metrics(
@@ -171,7 +102,7 @@ def create_app() -> FastAPI:
         request_id = getattr(
             getattr(request, "state", None), "request_id", None
         ) or get_request_id_from_headers(request.headers)
-        session_id = _get_session_id_from_request(request)
+        session_id = get_session_id_from_request(request)
         payload = {"detail": detail}
         payload.update(
             build_error_payload(
@@ -191,7 +122,7 @@ def create_app() -> FastAPI:
         request_id = getattr(
             getattr(request, "state", None), "request_id", None
         ) or get_request_id_from_headers(request.headers)
-        session_id = _get_session_id_from_request(request)
+        session_id = get_session_id_from_request(request)
         payload = {"detail": exc.errors()}
         payload.update(
             build_error_payload(
@@ -210,7 +141,7 @@ def create_app() -> FastAPI:
         request_id = getattr(
             getattr(request, "state", None), "request_id", None
         ) or get_request_id_from_headers(request.headers)
-        session_id = _get_session_id_from_request(request)
+        session_id = get_session_id_from_request(request)
         payload = build_error_payload(
             code=ErrorCode.SERVICE_ERROR,
             message="Internal server error",

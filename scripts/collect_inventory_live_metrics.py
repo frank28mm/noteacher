@@ -14,6 +14,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Register HEIF/HEIC opener for PIL (iPhone photos often use HEIC even with .jpg extension)
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pass  # pillow-heif not available; HEIC files will fail gracefully
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INVENTORY = REPO_ROOT / "homework_agent" / "tests" / "replay_data" / "samples_inventory.csv"

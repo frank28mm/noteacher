@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple
 import re
 
@@ -21,6 +21,7 @@ from homework_agent.models.schemas import (
 )
 from homework_agent.services.llm import LLMClient
 from homework_agent.utils.settings import get_settings
+from homework_agent.utils.feature_flags import decide as decide_feature_flag
 from homework_agent.core.qbank import _normalize_question_number
 from homework_agent.core.qindex import qindex_is_configured  # noqa: F401
 from homework_agent.api.session import (
@@ -1353,7 +1354,19 @@ def _emit_initial_events(
     except Exception as e:
         logger.debug(f"History formatting failed (best-effort): {e}")
 
-    chunks: List[bytes] = [_sse_event("heartbeat", "{}")]
+    chunks: List[bytes] = [
+        _sse_event(
+            "heartbeat",
+            json.dumps(
+                {
+                    "timestamp": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                },
+                ensure_ascii=False,
+            ),
+        )
+    ]
     if (
         last_event_id
         and (not has_explicit_session_id)
@@ -1698,6 +1711,7 @@ async def _stream_socratic_llm_to_sse(
     current_turn: int,
     provider_str: str,
     model_override: Optional[str],
+    prompt_variant: Optional[str],
     request_id: str,
     started_m: float,
 ) -> AsyncIterator[bytes]:
@@ -1712,6 +1726,7 @@ async def _stream_socratic_llm_to_sse(
         current_turn=current_turn,
         provider_str=provider_str,
         model_override=model_override,
+        prompt_variant=prompt_variant,
         request_id=request_id,
         started_m=started_m,
     ):
@@ -1730,6 +1745,44 @@ async def _run_chat_turn(
 ) -> AsyncIterator[bytes]:
     provider_str, model_override = _select_chat_model_or_raise(req)
     current_turn = session_data["interaction_count"]
+    prompt_variant: Optional[str] = None
+    prompt_version: Optional[str] = None
+    try:
+        settings = get_settings()
+        flags_json = str(getattr(settings, "feature_flags_json", "{}") or "{}")
+        salt = str(getattr(settings, "feature_flags_salt", "ff_v1") or "ff_v1")
+        key = (user_id or session_id or "").strip() or "anonymous"
+        d = decide_feature_flag(
+            flags_json=flags_json,
+            name="prompt.socratic_tutor_system",
+            key=key,
+            salt=salt,
+        )
+        if d.enabled and d.variant:
+            prompt_variant = str(d.variant)
+        try:
+            from homework_agent.utils.prompt_manager import get_prompt_manager
+
+            pm = get_prompt_manager()
+            meta = pm.meta("socratic_tutor_system.yaml", variant=prompt_variant)
+            prompt_version = str(meta.get("version") or "").strip() or None
+        except Exception:
+            prompt_version = None
+    except Exception:
+        prompt_variant = None
+        prompt_version = None
+
+    log_event(
+        logger,
+        "run_versions",
+        request_id=request_id,
+        session_id=session_id,
+        prompt_id="socratic_tutor_system",
+        prompt_version=prompt_version or "unknown",
+        prompt_variant=prompt_variant,
+        provider=provider_str,
+        model=model_override or None,
+    )
     try:
         from homework_agent.services.context_compactor import compact_session_history
 
@@ -1791,7 +1844,28 @@ async def _run_chat_turn(
             done_status="error",
         )
 
-    # Stable mode: chat does not run real-time VFE/relook.
+    settings = get_settings()
+    if bool(getattr(settings, "chat_relook_enabled", False)):
+        await _best_effort_relook_if_needed(
+            req=req,
+            session_id=session_id,
+            request_id=request_id,
+            wrong_item_context=wrong_item_context,
+        )
+        _fail_closed_if_vfe_failed_this_turn(
+            req=req,
+            session_id=session_id,
+            session_data=session_data,
+            wrong_item_context=wrong_item_context,
+        )
+
+        # Guardrail: if user is challenging diagram relations but we still have no visual evidence, stop guessing.
+        _diagram_guardrail_abort_if_needed(
+            req=req,
+            session_id=session_id,
+            session_data=session_data,
+            wrong_item_context=wrong_item_context,
+        )
 
     async for chunk in _stream_socratic_llm_to_sse(
         llm_client=llm_client,
@@ -1802,6 +1876,7 @@ async def _run_chat_turn(
         current_turn=current_turn,
         provider_str=provider_str,
         model_override=model_override,
+        prompt_variant=prompt_variant,
         request_id=request_id,
         started_m=started_m,
     ):
