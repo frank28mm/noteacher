@@ -51,14 +51,14 @@ homework_agent/
 #### 1.0.4 会话/幂等/异步
 - 幂等：`X-Idempotency-Key` 头，24h 生命周期；冲突返回 409。
 - 同步/异步：小批量/预估 <60s 尽量同步；预估超时/大批量返回 202+job_id，GET /jobs 查询（或回调）。
-- 会话（chat_history）：对话历史保留 7 天（定期清理）；辅导链只读当前 Submission（单次上传）上下文，不读历史画像/历史错题；报告链可读取历史用于长期分析。
+- 会话（chat_history）：对话历史按 `session_id` **24 小时生命周期**（与契约一致）；辅导链只读当前 Submission（单次上传）上下文，不读历史画像/历史错题。
 
 #### 1.0.5 存储与坐标
 - 坐标统一归一化 `[ymin, xmin, ymax, xmax]`，原点左上。
 - bbox/切片为可选增强能力：允许 `bbox=None` / `slice_image_url=None`，但必须在 `warnings` 说明“定位不确定，改用整页”。
 - bbox 对象（MVP）：整题区域（题干 + 学生作答）；允许多 bbox 列表（题干/作答分离时）。
 - 裁剪策略（MVP）：默认 5% padding；裁剪前 clamp 到 [0,1]；裁剪失败回退为整页。
-- 图像/切片存 Supabase Storage：切片 TTL 固定 7 天（可配置）；原始图片 + 识别原文 + 批改结果长期保留（除非用户删除或静默 180 天清理）；对话历史 7 天。
+- 图像/切片存 Supabase Storage：切片默认 TTL=24 小时（`SLICE_TTL_SECONDS` 可配）；原始图片/识别原文/批改结果的长期生命周期由上层“用户与数据管理后台”决定（本服务不实现静默清理）。
 
 ### 1.1 核心流程图
 
@@ -109,7 +109,7 @@ graph TD
   - upload_id: 可选（推荐；一次上传=一次 Submission；images 为空时由后端反查补齐）
   - subject: math 或 english
   - mode: normal (默认) 或 strict
-  - session_id: 可选；为空时后端生成用于 grade→chat 交付（chat 对话历史保留 7 天）
+  - session_id: 可选；为空时后端生成用于 grade→chat 交付（会话/对话历史按 24 小时生命周期）
   - batch_id: 可选
   - header: X-Idempotency-Key（推荐）
 
@@ -137,11 +137,11 @@ graph TD
   - history: 最多20条消息，role/content 格式
   - question: 非空字符串
   - subject: math 或 english
-  - session_id: 必需，来自已完成批改的批次（即便全对也允许辅导）；对话历史保留 7 天
+  - session_id: 必需，来自已完成批改的批次（即便全对也允许辅导）；会话/对话历史按 24 小时生命周期
 
 ✅ 会话状态检查:
   - 检查 session_id 是否存在于活跃会话中
-  - 验证会话是否超时（>7天；超时不恢复对话，仅允许查看该次批改结果/识别原文）
+  - 验证会话是否超时（>24小时；超时不恢复对话，仅允许查看该次批改结果/识别原文）
   - 记录当前交互次数（默认不限轮；如需可在错题上下文场景下设置软性上限）
 
 ✅ 上下文关联:
@@ -152,7 +152,7 @@ graph TD
 
 ✅ 看图策略（稳定优先）:
   - Chat **不实时看图**：只读取 `/grade` 产出的 `judgment_basis + vision_raw_text`。
-  - 若视觉信息不足：仍给出结论，但必须提示“依据不足，可能误读”，并在 `judgment_basis` 写明依据来源。
+  - 若视觉信息不足：不强行下结论，必须提示“依据不足/不确定”，并在 `judgment_basis` 写明依据来源；必要时建议用户补充清晰局部图。
   - 如用户仍要求看图：提示“切片生成中/请稍后或补充清晰局部图”，不在 chat 中发起额外视觉调用。
 ```
 
@@ -265,7 +265,7 @@ graph TD
 
 ### 2.4 阶段4：辅导对话
 
-#### SOP-4.1: 报告式对话启动
+#### SOP-4.1: 苏格拉底式对话启动
 **触发条件**: 学生进入对话或追问具体题目
 
 **前置准备**:
@@ -276,23 +276,23 @@ graph TD
   - 初始化interaction_count = 0
 
 ✅ 输出策略:
-  - 默认直接给出结论 + 解释（报告式）
+  - 默认以提问与提示为主（苏格拉底式），不直接给最终答案
   - 必须基于识别文本/judgment_basis，避免凭空补图
   - 若视觉信息不足：给出结论，但明确标注“依据不足，可能误读”
 ```
 
-#### SOP-4.2: 对话循环（报告式输出 + 允许追问）
-**调用prompt**: 以“结论 + 解释”为主（不再要求苏格拉底式引导）
+#### SOP-4.2: 对话循环（苏格拉底式 + 递进提示）
+**调用prompt**: 以“提问 → 学生回答 → 纠偏/提示递进”为主（与当前主 prompt 一致）
 
 **策略要点**:
 ```python
   - 仅在完成批改后使用（即便全对也可对话），不做纯闲聊。
-  - 默认不限轮；用户可持续追问细节与依据。
+  - 默认不限轮；按 interaction_count 递进提示（轻提示/方向提示/重提示，循环或按策略推进）。
   - 回答必须引用 vision_raw_text / judgment_basis 的事实描述。
   - 若视觉信息不足：加“依据不足，可能误读”的明确提示。
 ```
 
-> SSE 心跳/断线：心跳建议 30s；若 90s 内无数据可断开；客户端可用 last-event-id 续接。
+> SSE 心跳/断线：心跳建议 30s；生产可启用 `CHAT_IDLE_DISCONNECT_SECONDS`（建议初始 120s）作为“LLM 长时间无输出时主动关闭 SSE”的兜底；上线后按日志事件 `chat_llm_first_output` 的 p99 回调阈值；客户端可用 last-event-id 续接。
 
 ### 2.5 阶段5：结果输出
 
@@ -526,14 +526,14 @@ graph TD
 #### 敏感数据处理
 ```python
 ✅ 图像数据:
-  - 原始图片（Submission）长期保留（除非用户删除（未来）或静默 180 天清理）
-  - qindex 切片仅保留 7 天（可重建）
+  - 原始图片（Submission）的长期生命周期由上层“用户与数据管理后台”决定（本服务不实现静默清理）
+  - qindex 切片默认仅保留 24 小时（`SLICE_TTL_SECONDS` 可配；可重建）
   - 传输中加密（HTTPS）
   - 存储加密（AES-256）
 
 ✅ 对话历史:
   - session_id关联存储
-  - 7天后自动清理（不保证恢复旧对话上下文）
+  - 24 小时后自动过期（不保证恢复旧对话上下文）
 
 ✅ 批改结果:
   - 错题数据用于个性化分析
@@ -589,7 +589,7 @@ graph TD
 
 ✅ 结果缓存:
   - 相同作业ID返回缓存结果
-  - 缓存有效期：按业务配置（幂等键默认 24h；chat_history 7d；切片 7d）
+  - 缓存有效期：按业务配置（幂等键默认 24h；chat_history 24h；切片 24h）
   - 缓存键：session_id / upload_id + subject + mode
 ```
 
@@ -612,13 +612,12 @@ graph TD
 ```python
 ✅ 会话生命周期:
   - 活跃会话: 常驻内存
-  - 7天后: 清理对话历史（chat_history）
-  - 静默180天: 清理用户数据（定时任务；以 last_active_at 为准）
+  - 24小时后: 清理对话历史（chat_history）
 
 ✅ 图像缓存:
   - 处理中: 内存缓存
   - 处理完: 写入 Supabase Storage
-  - 切片: 7天后自动清理（原始图片按 Submission 策略保留）
+  - 切片: 24小时后自动清理（原始图片按 Submission 策略保留）
 ```
 
 ---
@@ -728,9 +727,8 @@ python3 -m homework_agent.workers.qindex_worker
 ```python
 # 参考 .env.template / .env.example（节选）
 DEV_USER_ID=dev_user
-SLICE_TTL_SECONDS=604800  # 切片 7 天
-CHAT_HISTORY_TTL_DAYS=7
-SUBMISSION_INACTIVITY_PURGE_DAYS=180
+SLICE_TTL_SECONDS=86400  # 切片默认 24h（与契约一致）
+CHAT_IDLE_DISCONNECT_SECONDS=0  # SSE 兜底断线阈值（默认关闭；生产建议 120）
 ```
 
 ### A.3 故障排除

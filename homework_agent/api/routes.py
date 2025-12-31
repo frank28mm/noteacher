@@ -16,6 +16,8 @@ from homework_agent.api import session as session_api
 from homework_agent.api import upload as upload_api
 from homework_agent.api import review as review_api
 from homework_agent.api import reviewer_ui as reviewer_ui_api
+from homework_agent.api import mistakes as mistakes_api
+from homework_agent.api import reports as reports_api
 
 router = APIRouter()
 router.include_router(grade_api.router)
@@ -24,6 +26,8 @@ router.include_router(session_api.router)
 router.include_router(upload_api.router)
 router.include_router(review_api.router)
 router.include_router(reviewer_ui_api.router)
+router.include_router(mistakes_api.router)
+router.include_router(reports_api.router)
 
 # Backward-compatible re-exports (tests/scripts/worker rely on these names)
 cache_store = session_api.cache_store

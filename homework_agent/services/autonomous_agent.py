@@ -30,6 +30,7 @@ from homework_agent.services.autonomous_tools import (
     math_verify,
     ocr_fallback,
     _compress_image_if_needed,
+    _compress_image_if_needed_with_metrics,
     _compute_image_hash,
 )
 from homework_agent.models.tool_result import ToolResult
@@ -37,6 +38,7 @@ from homework_agent.utils.observability import log_event, log_llm_usage, trace_s
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.budget import RunBudget
 from homework_agent.utils.versioning import stable_json_hash
+from homework_agent.utils.url_image_helpers import _download_as_data_uri
 
 logger = logging.getLogger("homework_agent.autonomous")
 planner_logger = logging.getLogger("homework_agent.autonomous.planner")
@@ -101,6 +103,8 @@ class AutonomousGradeResult:
     tokens_used: Optional[int] = None
     duration_ms: Optional[int] = None
     needs_review: Optional[bool] = None
+    llm_trace: Optional[Dict[str, Any]] = None
+    timings_ms: Optional[Dict[str, int]] = None
 
 
 def _normalize_verdict(v: Any) -> str:
@@ -446,6 +450,16 @@ class ExecutorAgent:
 
             # Normalize to unified ToolResult (while keeping legacy keys for compatibility).
             duration_ms = int((time.monotonic() - start) * 1000)
+            try:
+                timings = state.partial_results.setdefault("timings_ms", {})
+                if isinstance(timings, dict):
+                    timings["tools_total_ms"] = int(timings.get("tools_total_ms", 0)) + int(
+                        duration_ms
+                    )
+                    key = f"tool_{str(tool_name).strip().lower()}_ms"
+                    timings[key] = int(timings.get(key, 0)) + int(duration_ms)
+            except Exception:
+                pass
             tr = ToolResult.from_legacy(
                 tool_name=str(tool_name),
                 stage=f"autonomous.tool.{tool_name}",
@@ -640,6 +654,13 @@ class AggregatorAgent:
 
         # Determine image source and apply P0.2 compression
         image_source = "unknown"
+        grade_variant = (
+            str(state.preprocess_meta.get("grade_image_input_variant") or "auto")
+            .strip()
+            .lower()
+            or "auto"
+        )
+        image_input_mode = "url"
         if figure_urls and not figure_too_small:
             image_urls = _dedupe_images(
                 figure_urls + (question_urls if question_urls else [])
@@ -649,13 +670,71 @@ class AggregatorAgent:
             # P0.2: Compress original images if needed
             original_urls = _dedupe_images(state.image_urls or [])[:1]
             image_urls = []
+            compress_totals = {
+                "compress_total_ms": 0,
+                "compress_download_ms": 0,
+                "compress_decode_ms": 0,
+                "compress_resize_ms": 0,
+                "compress_encode_ms": 0,
+                "compress_upload_ms": 0,
+            }
             for url in original_urls:
-                compressed_url = _compress_image_if_needed(url, max_side=1280)
+                compressed_url, metrics = _compress_image_if_needed_with_metrics(
+                    url, max_side=1280
+                )
                 image_urls.append(compressed_url)
+                try:
+                    for src_k, dst_k in (
+                        ("total_ms", "compress_total_ms"),
+                        ("download_ms", "compress_download_ms"),
+                        ("decode_ms", "compress_decode_ms"),
+                        ("resize_ms", "compress_resize_ms"),
+                        ("encode_ms", "compress_encode_ms"),
+                        ("upload_ms", "compress_upload_ms"),
+                    ):
+                        v = metrics.get(src_k)
+                        if isinstance(v, int):
+                            compress_totals[dst_k] = int(compress_totals[dst_k]) + int(
+                                v
+                            )
+                except Exception:
+                    pass
             if figure_too_small:
                 image_source = "original_fallback_small_figure"
             else:
                 image_source = "original_fallback_no_figure"
+            try:
+                timings = state.partial_results.setdefault("timings_ms", {})
+                if isinstance(timings, dict):
+                    for k, v in compress_totals.items():
+                        timings[k] = int(timings.get(k, 0)) + int(v)
+            except Exception:
+                pass
+
+        # T2: A/B/C variant for Ark image input (URL vs Data URL).
+        if self.provider == "ark" and image_urls:
+            use_data_url = False
+            if grade_variant == "data_url_first_page":
+                use_data_url = True
+            elif grade_variant == "data_url_on_small_figure" and figure_too_small:
+                use_data_url = True
+            if use_data_url:
+                src0 = str(image_urls[0] or "")
+                if src0 and not src0.startswith("data:image/"):
+                    t_data = time.monotonic()
+                    data_url = _download_as_data_uri(src0)
+                    data_ms = int((time.monotonic() - t_data) * 1000)
+                    try:
+                        timings = state.partial_results.setdefault("timings_ms", {})
+                        if isinstance(timings, dict):
+                            timings["image_data_url_download_encode_ms"] = int(
+                                timings.get("image_data_url_download_encode_ms", 0)
+                            ) + int(data_ms)
+                    except Exception:
+                        pass
+                    if data_url:
+                        image_urls[0] = data_url
+                        image_input_mode = "data_url"
 
         image_refs = [
             ImageRef(url=u) if not u.startswith("data:image/") else ImageRef(base64=u)
@@ -669,6 +748,8 @@ class AggregatorAgent:
             session_id=state.session_id,
             request_id=request_id,
             image_source=image_source,
+            grade_image_input_variant=grade_variant,
+            image_input_mode=image_input_mode,
             image_count=len(image_refs),
             original_image_count=len(state.image_urls or []),
             figure_count=len(figure_urls),
@@ -696,6 +777,11 @@ class AggregatorAgent:
             else self.llm.ark_vision_model
         )
         try:
+            settings = get_settings()
+            use_image_tools = bool(
+                self.provider == "ark"
+                and bool(getattr(settings, "ark_image_process_enabled", False))
+            )
             text = await _call_llm_with_backoff(
                 lambda: self.llm.generate_with_images(
                     system_prompt=system_prompt,
@@ -704,7 +790,7 @@ class AggregatorAgent:
                     provider=self.provider,
                     max_tokens=self.max_tokens,
                     temperature=0.2,
-                    use_tools=False,
+                    use_tools=use_image_tools,
                 ),
                 timeout_s=effective_timeout,
             )
@@ -726,12 +812,46 @@ class AggregatorAgent:
                 summary="批改暂时失败，建议稍后重试或人工复核",
                 warnings=["autonomous_agent_llm_failed", "needs_review"],
             )
+        response_id = None
+        try:
+            response_id = getattr(text, "response_id", None)
+        except Exception:
+            response_id = None
+        response_id = (
+            str(response_id).strip()
+            if response_id is not None and str(response_id).strip()
+            else None
+        )
+        if response_id:
+            state.partial_results.setdefault("llm_trace", {})[
+                "ark_response_id"
+            ] = response_id
+        state.partial_results.setdefault("llm_trace", {})[
+            "ark_image_process_requested"
+        ] = bool(use_image_tools)
+        state.partial_results.setdefault("llm_trace", {})[
+            "grade_image_input_variant"
+        ] = grade_variant
+        state.partial_results.setdefault("llm_trace", {})[
+            "ark_image_input_mode"
+        ] = image_input_mode
+        llm_call_ms = int((time.monotonic() - start) * 1000)
+        try:
+            timings = state.partial_results.setdefault("timings_ms", {})
+            if isinstance(timings, dict):
+                timings["llm_aggregate_call_ms"] = int(
+                    timings.get("llm_aggregate_call_ms", 0)
+                ) + int(llm_call_ms)
+        except Exception:
+            pass
         log_event(
             aggregator_logger,
             "agent_aggregate_done",
             session_id=state.session_id,
             request_id=request_id,
-            duration_ms=int((time.monotonic() - start) * 1000),
+            duration_ms=llm_call_ms,
+            response_id=response_id,
+            ark_image_process_requested=bool(use_image_tools),
         )
         usage = getattr(text, "usage", None)
         if budget is not None:
@@ -746,7 +866,17 @@ class AggregatorAgent:
             stage="autonomous.aggregator",
         )
         raw_text = text.text if hasattr(text, "text") else str(text)
+        parse_start = time.monotonic()
         parsed = _parse_json(raw_text, AutonomousPayload)
+        parse_ms = int((time.monotonic() - parse_start) * 1000)
+        try:
+            timings = state.partial_results.setdefault("timings_ms", {})
+            if isinstance(timings, dict):
+                timings["llm_aggregate_parse_ms"] = int(
+                    timings.get("llm_aggregate_parse_ms", 0)
+                ) + int(parse_ms)
+        except Exception:
+            pass
         if not parsed:
             logger.error(
                 f"Aggregator parse failed for {state.session_id}. Raw response (first 500 chars): {raw_text[:500]}"
@@ -775,6 +905,7 @@ async def run_autonomous_grade_agent(
     timeout_seconds_override: Optional[float] = None,
     token_budget_total_override: Optional[int] = None,
     experiments: Optional[Dict[str, Any]] = None,
+    grade_image_input_variant: Optional[str] = None,
 ) -> AutonomousGradeResult:
     settings = get_settings()
     llm = LLMClient()
@@ -856,6 +987,10 @@ async def run_autonomous_grade_agent(
         session_id=session_id,
         image_urls=[str(ref.url or ref.base64 or "") for ref in images or []],
     )
+    if isinstance(grade_image_input_variant, str) and grade_image_input_variant.strip():
+        state.preprocess_meta["grade_image_input_variant"] = (
+            grade_image_input_variant.strip().lower()
+        )
 
     prep_start = time.monotonic()
     log_event(
@@ -882,17 +1017,35 @@ async def run_autonomous_grade_agent(
         state.preprocess_meta.setdefault("results", []).append(result.to_dict())
         if result.figure_too_small:
             state.preprocess_meta["figure_too_small"] = True
-        # Log preprocessing source for observability
+        # Per-image preprocess details already logged inside preprocessing pipeline.
+
+    # Aggregate preprocess sources + timings across pages (for T1 timing breakdown).
+    source_counts: Dict[str, int] = {}
+    preprocess_stage_ms: Dict[str, int] = {}
+    for r in state.preprocess_meta.get("results") or []:
+        if not isinstance(r, dict):
+            continue
+        src = str(r.get("source") or "unknown").strip().lower() or "unknown"
+        source_counts[src] = int(source_counts.get(src, 0)) + 1
+        tms = r.get("timings_ms")
+        if isinstance(tms, dict):
+            for k, v in tms.items():
+                if not isinstance(k, str) or not k.strip():
+                    continue
+                if not isinstance(v, int):
+                    continue
+                preprocess_stage_ms[k] = int(preprocess_stage_ms.get(k, 0)) + int(v)
+
     log_event(
         logger,
-        "agent_preprocess_source",
+        "agent_preprocess_breakdown",
         session_id=session_id,
         request_id=request_id,
-        source=result.source,
-        figures=len(result.figure_urls or []),
-        questions=len(result.question_urls or []),
+        sources=source_counts,
+        timings_ms=preprocess_stage_ms,
     )
 
+    preprocess_total_ms = int((time.monotonic() - prep_start) * 1000)
     log_event(
         logger,
         "agent_preprocess_done",
@@ -900,8 +1053,13 @@ async def run_autonomous_grade_agent(
         request_id=request_id,
         figure=len(state.slice_urls.get("figure") or []),
         question=len(state.slice_urls.get("question") or []),
-        elapsed_ms=int((time.monotonic() - prep_start) * 1000),
+        elapsed_ms=preprocess_total_ms,
     )
+    state.partial_results.setdefault("timings_ms", {})["preprocess_total_ms"] = (
+        preprocess_total_ms
+    )
+    for k, v in preprocess_stage_ms.items():
+        state.partial_results.setdefault("timings_ms", {})[f"preprocess_{k}"] = int(v)
 
     store = get_session_store()
     store.save(session_id, state)
@@ -997,6 +1155,24 @@ async def run_autonomous_grade_agent(
             state.warnings.append("Loop max iterations reached")
 
     payload = await aggregator.run(state, request_id=request_id, budget=budget)
+    timings_ms_out: Optional[Dict[str, int]] = None
+    try:
+        t0 = state.partial_results.get("timings_ms")
+        if isinstance(t0, dict):
+            cleaned: Dict[str, int] = {}
+            for k, v in t0.items():
+                if not isinstance(k, str) or not k.strip():
+                    continue
+                if isinstance(v, bool):
+                    continue
+                if isinstance(v, int):
+                    cleaned[k] = int(v)
+            cleaned["grade_total_duration_ms"] = int(
+                (time.monotonic() - overall_start) * 1000
+            )
+            timings_ms_out = cleaned
+    except Exception:
+        timings_ms_out = None
     status = (payload.status or "done").strip().lower()
     if status == "rejected":
         needs_review = bool(
@@ -1013,6 +1189,12 @@ async def run_autonomous_grade_agent(
             tokens_used=getattr(budget, "tokens_used", None),
             duration_ms=int((time.monotonic() - overall_start) * 1000),
             needs_review=needs_review,
+            llm_trace=(
+                state.partial_results.get("llm_trace")
+                if isinstance(state.partial_results, dict)
+                else None
+            ),
+            timings_ms=timings_ms_out,
         )
 
     results: List[Dict[str, Any]] = []
@@ -1145,4 +1327,10 @@ async def run_autonomous_grade_agent(
         tokens_used=getattr(budget, "tokens_used", None),
         duration_ms=int((time.monotonic() - overall_start) * 1000),
         needs_review=bool(run_needs_review or safety_codes),
+        llm_trace=(
+            state.partial_results.get("llm_trace")
+            if isinstance(state.partial_results, dict)
+            else None
+        ),
+        timings_ms=timings_ms_out,
     )

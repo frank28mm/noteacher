@@ -397,12 +397,25 @@ You MUST output a valid JSON object with this exact structure:
   "results": [
     {
       "question_number": "string",
+      "question_type": "string - choice/fill_blank/calc/proof/unknown",
+      "difficulty": "string - 1-5 or easy/medium/hard/unknown",
       "verdict": "correct|incorrect|uncertain",
       "question_content": "string - the question text",
       "student_answer": "string - student's response",
       "reason": "string - brief explanation",
       "judgment_basis": ["string list - follows observation-rule-conclusion format"],
-      "warnings": ["string list - any warnings for this question"]
+      "warnings": ["string list - any warnings for this question"],
+      "knowledge_tags": ["string list - knowledge points"],
+      "math_steps": [
+        {
+          "index": 1,
+          "verdict": "correct|incorrect|uncertain",
+          "expected": "string|null",
+          "observed": "string|null",
+          "hint": "string|null",
+          "severity": "calculation|concept|format|unknown"
+        }
+      ]
     }
   ],
   "summary": "string - overall grading summary",

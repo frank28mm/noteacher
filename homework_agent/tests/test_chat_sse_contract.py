@@ -1,4 +1,5 @@
 import json
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -40,16 +41,35 @@ def _parse_sse_events(body: str) -> list[tuple[str, str]]:
     return events
 
 
-def test_chat_sse_sequence_contract():
+def test_chat_sse_sequence_contract(monkeypatch: pytest.MonkeyPatch):
     """
     Canary: chat must emit at least one `chat` event and end with a `done` event.
     We use a request that does not require LLM/network and returns quickly.
     """
+    monkeypatch.setattr(
+        "homework_agent.services.llm.LLMClient.socratic_tutor_stream",
+        lambda *args, **kwargs: iter(["stub response"]),
+    )
+
+    session_id = f"sess_sse_contract_{uuid.uuid4().hex[:8]}"
+    save_session(
+        session_id,
+        {"history": [], "focus_question_number": "1", "interaction_count": 0},
+    )
+    save_question_bank(
+        session_id,
+        {
+            "session_id": session_id,
+            "subject": "math",
+            "page_image_urls": [],
+            "questions": {"1": {"question_content": "1+1=?"}},
+        },
+    )
     payload = {
         "history": [],
         "question": "你好",
         "subject": "math",
-        "session_id": "sess_sse_contract",
+        "session_id": session_id,
     }
     resp = client.post("/api/v1/chat", json=payload)
     assert resp.status_code == 200

@@ -13,9 +13,9 @@
 
 ### 1.2 交互模式 (Interaction Mode)
 *   **使用前提**：必须先完成一次批改（即便全对也行），基于该次 Submission 进入辅导；不做“纯闲聊”。
-*   **指导风格**：**报告式输出（直接结论 + 解释）**。
-    *   默认直接给出结论与理由（更像“批改报告”），用户可继续追问细节。
-    *   仍可保留“提示/引导”的语气，但不再禁止给答案。
+*   **指导风格**：**苏格拉底式辅导（以提问与提示为主）**（以当前主 prompt 为准）。
+    *   默认不直接给最终答案，优先用连续提问引导学生自己发现错误；必要时按轮次递进提示（轻提示/方向提示/重提示）。
+    *   回答必须基于 `/grade` 产出的题干/作答/`judgment_basis`/`vision_raw_text` 摘要等证据；证据不足时必须明确标注“不确定/依据不足”。
     *   结构化反馈：`steps` 中用 `verdict` 标记 correct/incorrect/uncertain，可选 `severity`（计算错误/概念错误/格式）。
 *   **判定透明度**：批改结果需覆盖每道题，返回学生作答/标准答案/判定（选项题注明 student_choice/correct_choice），判定枚举受限（verdict 仅 correct/incorrect/uncertain；severity 仅 calculation/concept/format/unknown/medium/minor）；不确定要标记，禁止编造 bbox。返回 `vision_raw_text` 便于审计，并输出 `judgment_basis` 作为用户可读依据。
 *   **题目定位体验**：用户可用数字题号或非数字题名（如“思维与拓展/旋转题”）发起辅导；若无法定位，必须返回候选题目列表，并在 UI 中提供可点击按钮进行切题。
@@ -23,7 +23,7 @@
     *   识别原文（vision_raw_text）
     *   判定依据（judgment_basis，中文短句清单）
     *   批改结果（结论 + 解释）
-    *   对话历史仅保留 7 天（定期清理）；超过 7 天再次进入仅展示该次 Submission 的批改结果与识别原文，不保证恢复旧对话上下文。
+    *   会话/对话历史按 `session_id` 的 **24 小时生命周期**（与契约一致）；超过 24 小时再次进入仅展示该次 Submission 的批改结果与识别原文，不保证恢复旧对话上下文。
 
 ### 1.2.1 图形题一致性（产品要求：看图要可信）
 *   **目标**：几何/图表/示意图这类题，**答案必须基于视觉理解**；允许“有依据地错”，但必须可复盘、可解释。
@@ -45,10 +45,10 @@
 ### 1.4 数据保留与清理 (Retention & Cleanup)
 *   **长期保留（默认）**：原始图片 + 批改结果 + 识别原文，除非用户主动删除（未来）或触发系统级清理策略。
 *   **短期保留（固定）**：
-    *   Chat 对话历史：7 天（定期清理）
-    *   qindex 切片：7 天（定期清理）
+    *   会话/对话历史：默认 24 小时（与 `session_id` 生命周期一致）
+    *   qindex 切片：默认 24 小时（由 `SLICE_TTL_SECONDS` 控制）
     *   judgment_basis：随 qbank/Submission 快照保存（结构化短句列表），用于审计/复盘；若未来对 qbank 做 TTL，随之清理。
-*   **静默清理（系统策略）**：用户长时间静默后清除其数据，阈值为 **180 天**（以 last_active_at 为准；由后台定时任务执行）。
+*   **用户数据治理（不在本服务范围）**：静默清理/长期数据生命周期属于上层“用户与数据管理后台”的职责，本服务仅按契约处理会话/切片等短期数据。
 
 ## 2. Agent 能力边界 (Agent Capabilities)
 
@@ -78,7 +78,7 @@
 *   **范围（辅导链）**：仅限于 **当前 Submission（单次上传）** 的批改上下文。
     *   能够识别本次作业中的重复错误模式并进行提示。
     *   不跨 Submission 调用历史记忆进行辅导（避免“拿旧作业推新作业”）。
-*   **会话生命周期（对话历史）**：chat 对话历史保留 7 天；超过 7 天不保证可恢复对话，只保证可查看该次 Submission 的批改结果与识别原文。
+*   **会话生命周期（对话历史）**：按 `session_id` 的 24 小时生命周期；超过 24 小时不保证可恢复对话，只保证可查看该次 Submission 的批改结果与识别原文。
 *   **长期画像读写边界**：
     *   辅导链：默认只读本次 Submission（不读长期画像/历史错题）。
     *   报告链：可读取历史 submissions + 错题排除记录，用于长期分析与报告生成。
@@ -94,7 +94,7 @@
 *   **双重存储策略**：
     *   **权威原图 (Authoritative Pages)**：保留整页原始快照（page_image_urls），用于审计/复核与后续再处理。
     *   **识别与判定快照 (Grading Snapshot)**：保留 vision_raw_text + 批改结果，用于 chat 首屏展示与长期追溯。
-    *   **可选增强 (Review Slice)**：qindex 生成的题目切片（slice_image_urls），用于“看图辅导/定位/复习卡片”；切片仅保留 7 天，可重建但需算力与时间。
+    *   **可选增强 (Review Slice)**：qindex 生成的题目切片（slice_image_urls），用于“看图辅导/定位/复习卡片”；切片默认仅保留 **24 小时**（可配置），过期可重建但需算力与时间。
     *   **坐标系标准**：统一采用 **归一化坐标 (Normalized [0-1])** `[ymin, xmin, ymax, xmax]`，原点左上，y 向下，独立于分辨率，便于多端适配。
     *   **错题存储字段参考**：`page_image_url`（整页）、`slice_image_url`（裁剪片）、`page_bbox`（整页中的 bbox）、`review_slice_bbox`（题干+错答切片 bbox）；如需步骤级高亮，可在 steps/geometry 里使用相同归一化 bbox。
 
@@ -111,10 +111,10 @@
     *   安全边距：默认在 bbox 四周加 5% padding；
     *   越界处理：裁剪前先 clamp 到 [0,1]；
     *   裁剪失败回退：不生成切片，只保留整页 URL + `warnings`。
-*   **隐私与存储**：
-    *   Demo 允许 public bucket；
-    *   生产建议 signed URL（短期有效）；
-    *   切片会增加存储量，必须有 TTL/清理策略（例如 24h 或 7d，按环境配置）。
+    *   **隐私与存储**：
+        *   Demo 允许 public bucket；
+        *   生产建议 signed URL（短期有效）；
+        *   切片会增加存储量，必须有 TTL/清理策略（默认 24h，可按环境配置）。
 
 ### 3.2 学生画像粒度 (Student Profile Granularity)
 *   **L2 知识点分类 (Knowledge Graph Tagging)**：
@@ -127,14 +127,14 @@
 ### 4.1 通信协议 (Protocol)
 *   **流式交互 (Streaming)**：采用 **SSE (Server-Sent Events)** 协议。
     *   目的：支持 Agent 较长的思考推理过程，实现“打字机”即时反馈效果，避免客户端超时等待。
-    *   实时/流式场景（报告式对话、小批量批改）：客户端/BFF ⇄ Python 直连 HTTP + SSE，单次超时 60s，可重试 1 次，需携带 idempotency-key 防重复；SSE 保持心跳，断线可选用 last-event-id 续接。
+    *   实时/流式场景（苏格拉底式辅导、小批量批改）：客户端/BFF ⇄ Python 直连 HTTP + SSE，单次超时 60s，可重试 1 次，需携带 idempotency-key 防重复；SSE 保持心跳，断线可选用 last-event-id 续接。
     *   异步长任务（批量/多页批改）：客户端/BFF 通过 HTTP 提交任务，Python 接收后内部入队（Redis）。状态回传可用 webhook 回调（失败重试 ≤3 次，指数退避）或轮询任务状态接口；任务创建请求超时 60s，可重试 1 次，需 idempotency-key。
     *   本仓库实现以 Python Agent + Redis worker 为主；BFF/前端可后续接入，不影响后端契约。
 
 ### 4.2 数据同步策略 (Data Sync)
 *   **云端为本 (Cloud-First)**：
     *   核心数据（Submission：原始图片/识别原文/批改结果）存储在云端（Supabase Storage + Postgres），支持按时间查询与长期追溯。
-    *   对话历史与切片为短期数据（默认 7 天），允许清理后不可恢复；客户端应优先展示 Submission 的批改结果与识别原文以保证可解释性。
+    *   对话历史与切片为短期数据（默认 24h），允许清理后不可恢复；客户端应优先展示 Submission 的批改结果与识别原文以保证可解释性。
 
 ### 4.3 服务形态 (Service Topology)
 *   **独立 Agent 服务 (Microservice)**：

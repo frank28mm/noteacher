@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -53,6 +54,7 @@ class PreprocessResult:
     warnings: List[str] = field(default_factory=list)
     cached: bool = False
     figure_too_small: bool = False
+    timings_ms: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -66,6 +68,7 @@ class PreprocessResult:
             "warnings": self.warnings,
             "cached": self.cached,
             "figure_too_small": self.figure_too_small,
+            "timings_ms": dict(self.timings_ms or {}),
         }
 
     @classmethod
@@ -83,6 +86,11 @@ class PreprocessResult:
             warnings=data.get("warnings") or [],
             cached=data.get("cached", False),
             figure_too_small=bool(data.get("figure_too_small", False)),
+            timings_ms=(
+                data.get("timings_ms")
+                if isinstance(data.get("timings_ms"), dict)
+                else {}
+            ),
         )
 
 
@@ -111,6 +119,7 @@ class PreprocessingPipeline:
 
     async def _try_qindex_cache(self) -> Optional[PreprocessResult]:
         """Strategy A: Try to reuse qindex slices from Redis cache."""
+        t0 = time.monotonic()
         try:
             qindex_result = await asyncio.to_thread(
                 qindex_fetch, session_id=self.session_id
@@ -147,6 +156,7 @@ class PreprocessingPipeline:
                 session_id=self.session_id,
                 figures=len(figure_urls),
                 questions=len(question_urls),
+                elapsed_ms=int((time.monotonic() - t0) * 1000),
             )
 
             return PreprocessResult(
@@ -157,6 +167,7 @@ class PreprocessingPipeline:
                 source="qindex",
                 cached=True,
                 figure_too_small=False,
+                timings_ms={"qindex_fetch_ms": int((time.monotonic() - t0) * 1000)},
             )
         except Exception as e:
             log_event(
@@ -167,6 +178,7 @@ class PreprocessingPipeline:
                 session_id=self.session_id,
                 error_type=e.__class__.__name__,
                 error=str(e),
+                elapsed_ms=int((time.monotonic() - t0) * 1000),
             )
             return None
 
@@ -198,11 +210,13 @@ class PreprocessingPipeline:
             )
 
             # Call VLM locator
+            t_loc = time.monotonic()
             loc = await asyncio.to_thread(
                 self._vlm_locator.locate,
                 image_url=image_url,
                 only_question_numbers=None,
             )
+            locate_ms = int((time.monotonic() - t_loc) * 1000)
 
             if not loc.questions:
                 log_event(
@@ -289,6 +303,7 @@ class PreprocessingPipeline:
                 return None
 
             # Crop and upload slices
+            t_crop = time.monotonic()
             layouts = await asyncio.to_thread(
                 crop_and_upload_slices,
                 page_image_url=image_url,
@@ -296,6 +311,7 @@ class PreprocessingPipeline:
                 only_question_numbers=None,
                 prefix=prefix,
             )
+            crop_upload_ms = int((time.monotonic() - t_crop) * 1000)
 
             # Collect slice URLs
             figure_urls: List[str] = []
@@ -329,6 +345,8 @@ class PreprocessingPipeline:
                 layouts=len(layouts),
                 figures=len(figure_urls),
                 questions=len(question_urls),
+                locate_ms=locate_ms,
+                crop_upload_ms=crop_upload_ms,
             )
 
             return PreprocessResult(
@@ -342,6 +360,11 @@ class PreprocessingPipeline:
                     warnings + (["figure_slice_too_small"] if figure_too_small else [])
                 ),
                 figure_too_small=figure_too_small,
+                timings_ms={
+                    "vlm_locate_ms": locate_ms,
+                    "vlm_crop_upload_ms": crop_upload_ms,
+                    "vlm_total_ms": int(locate_ms + crop_upload_ms),
+                },
             )
 
         except Exception as e:
@@ -362,13 +385,21 @@ class PreprocessingPipeline:
         prefix: str,
     ) -> PreprocessResult:
         """Strategy C: Fall back to OpenCV pipeline."""
+        t0 = time.monotonic()
+        t_run = time.monotonic()
         slices = await asyncio.to_thread(run_opencv_pipeline, image_ref)
+        run_ms = int((time.monotonic() - t_run) * 1000)
         if not slices:
             return PreprocessResult(
-                warnings=["opencv_pipeline_failed"], source="fallback"
+                warnings=["opencv_pipeline_failed"],
+                source="fallback",
+                timings_ms={"opencv_run_ms": run_ms, "opencv_total_ms": run_ms},
             )
 
+        t_up = time.monotonic()
         urls = await asyncio.to_thread(upload_slices, slices=slices, prefix=prefix)
+        upload_ms = int((time.monotonic() - t_up) * 1000)
+        total_ms = int((time.monotonic() - t0) * 1000)
 
         figure_too_small = bool(
             slices.figure_size
@@ -390,6 +421,11 @@ class PreprocessingPipeline:
             warnings=warnings,
             cached=False,
             figure_too_small=figure_too_small,
+            timings_ms={
+                "opencv_run_ms": run_ms,
+                "opencv_upload_ms": upload_ms,
+                "opencv_total_ms": total_ms,
+            },
         )
 
     async def process_image(

@@ -30,13 +30,15 @@ Do NOT add extra keys or trailing text. Ensure the JSON is complete and closed.
 Each question must include:
 - question_number: string (原试卷题号，如 "27" / "28(1)②"，未知用 "N/A")
 - verdict: "correct" | "incorrect" | "uncertain"
+- question_type: string (题型，如 choice/fill_blank/calc/proof/unknown)
+- difficulty: string (难度，如 1-5 或 easy/medium/hard/unknown)
 - question_content: string (题干概要)
 - student_answer: string (学生作答；未作答写 "未作答")
 - reason: string (判定结论，一句话)
 - judgment_basis: array (必填，判定所依据的事实/推理，中文短句)
 - warnings: array (如 "可能误读公式：…")
 - knowledge_tags: array
-- math_steps: array (仅 incorrect/uncertain，最多 1 条首错步骤)
+- math_steps: array (仅 incorrect/uncertain，保留所有非 correct 步骤，最多 5 条)
 </question_fields>
 
 <judgment_basis_rules>
@@ -46,9 +48,9 @@ judgment_basis 必须填写，用于向用户解释"你是如何判断的"：
 - 【条数限制】2-5 条（越简洁越好，但必须覆盖关键依据）
 - 最后一条应是判定结论（如"符合XX定义"或"学生误用XX"）
 - 若学生答案错误，指出具体错误
-- 【LaTeX 格式必须】所有数学公式用 $...$ 包裹，指数用 ^{}，如 $x^{2}$、$a^{m+n}$、$\frac{1}{2}$。禁止使用 x^2 或 Unicode 上标（²³⁴）
+- 【LaTeX 格式必须】所有数学公式用 $...$ 包裹，指数用 ^{}，如 $x^{2}$、$a^{m+n}$、$\\frac{1}{2}$。禁止使用 x^2 或 Unicode 上标（²³⁴）
 示例：
-  - 正确："$a^{2} \cdot a^{3} = a^{5}$"
+  - 正确："$a^{2} \\cdot a^{3} = a^{5}$"
   - 错误："a² · a³ = a⁵" 或 "a^2 * a^3 = a^5"
 </judgment_basis_rules>
 
@@ -68,7 +70,7 @@ judgment_basis 必须填写，用于向用户解释"你是如何判断的"：
 1) 列出每题：题号 + 题干 + 学生作答
 2) 判定 verdict（可内部推导，不输出过程）
 3) 填写 judgment_basis：列出判定依据（必填）
-4) 仅对 incorrect/uncertain：填 1 条 math_steps (index/verdict/expected/observed/hint/severity)
+4) 仅对 incorrect/uncertain：填 math_steps（包含所有非 correct 步骤，最多 5 条；字段：index/verdict/expected/observed/hint/severity）
 5) 幂/分式敏感：指数不确定时标 uncertain，warnings 写"指数可能误读"
 6) 生成 knowledge_tags 和 cross_subject_flag
 7) 汇总 summary："发现X处错误，其中Y题未作答"
@@ -181,12 +183,15 @@ Do NOT add extra keys or trailing text. Ensure the JSON is complete and closed.
 Each result must include:
 - question_number: string
 - verdict: "correct" | "incorrect" | "uncertain"
+- question_type: string (choice/fill_blank/calc/proof/unknown)
+- difficulty: string (1-5 or easy/medium/hard/unknown)
 - question_content: string
 - student_answer: string
 - reason: string (一句话结论)
 - judgment_basis: array (必填，判定依据，中文短句)
 - warnings: array
 - knowledge_tags: array
+- math_steps: array (仅 incorrect/uncertain，保留所有非 correct 步骤，最多 5 条；字段：index/verdict/expected/observed/hint/severity)
 </result_fields>
 
 <judgment_basis_rules>
@@ -197,7 +202,7 @@ judgment_basis 必须填写，用于向用户解释“你是如何判断的”�
 - 必须包含“依据来源：...”这一句（如“依据来源：OCR+图像理解”）
 - 若学生答案错误，指出具体错误
 - 若无法确定，写明原因（如“图像模糊，无法确认位置关系”）
-- 所有数学公式用 $...$ 包裹，指数用 ^{}，如 $x^{2}$、$\frac{1}{2}$
+- 所有数学公式用 $...$ 包裹，指数用 ^{}，如 $x^{2}$、$\\frac{1}{2}$
 </judgment_basis_rules>
 
 <geometry_rules>

@@ -5,6 +5,7 @@ import base64
 import hashlib
 import httpx
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from io import BytesIO
 from typing import Any, Dict, List, Optional
@@ -259,6 +260,98 @@ def _compress_image_if_needed(image_url: str, max_side: int = 1280) -> str:
     except Exception as e:
         logger.debug(f"Failed to compress image: {e}")
         return image_url
+
+
+def _compress_image_if_needed_with_metrics(
+    image_url: str, max_side: int = 1280
+) -> tuple[str, Dict[str, Any]]:
+    """
+    Compress image if it exceeds max_side; return (url, metrics).
+
+    Metrics are best-effort and suitable for timing breakdown (T1).
+    """
+    metrics: Dict[str, Any] = {
+        "input_is_data_url": bool(str(image_url or "").startswith("data:image/")),
+        "compressed": False,
+        "download_ms": None,
+        "decode_ms": None,
+        "resize_ms": None,
+        "encode_ms": None,
+        "upload_ms": None,
+        "total_ms": None,
+        "original_w": None,
+        "original_h": None,
+        "new_w": None,
+        "new_h": None,
+        "error_type": None,
+        "error": None,
+    }
+    if not PIL_AVAILABLE:
+        return image_url, metrics
+    if str(image_url or "").startswith("data:image/"):
+        return image_url, metrics
+
+    started = time.monotonic()
+    try:
+        settings = get_settings()
+        timeout = float(getattr(settings, "opencv_processing_timeout", 30))
+        t_dl = time.monotonic()
+        with httpx.Client(
+            timeout=timeout, follow_redirects=True, trust_env=False
+        ) as client:
+            r = client.get(image_url)
+            if r.status_code != 200:
+                metrics["download_ms"] = int((time.monotonic() - t_dl) * 1000)
+                metrics["total_ms"] = int((time.monotonic() - started) * 1000)
+                return image_url, metrics
+        metrics["download_ms"] = int((time.monotonic() - t_dl) * 1000)
+
+        t_dec = time.monotonic()
+        img = Image.open(BytesIO(r.content))
+        img.load()
+        metrics["decode_ms"] = int((time.monotonic() - t_dec) * 1000)
+
+        w, h = img.size
+        metrics["original_w"] = int(w)
+        metrics["original_h"] = int(h)
+        if max(w, h) <= int(max_side):
+            metrics["total_ms"] = int((time.monotonic() - started) * 1000)
+            return image_url, metrics
+
+        if w > h:
+            new_w, new_h = int(max_side), int(h * int(max_side) / w)
+        else:
+            new_w, new_h = int(w * int(max_side) / h), int(max_side)
+        metrics["new_w"] = int(new_w)
+        metrics["new_h"] = int(new_h)
+
+        t_rs = time.monotonic()
+        compressed = img.resize((new_w, new_h), Image.LANCZOS)
+        metrics["resize_ms"] = int((time.monotonic() - t_rs) * 1000)
+
+        t_enc = time.monotonic()
+        buffer = BytesIO()
+        compressed.save(buffer, format="JPEG", quality=85)
+        buffer.seek(0)
+        metrics["encode_ms"] = int((time.monotonic() - t_enc) * 1000)
+
+        t_up = time.monotonic()
+        storage = get_storage_client()
+        compressed_url = storage.upload_bytes(
+            file_content=buffer.getvalue(),
+            mime_type="image/jpeg",
+            suffix=".jpg",
+            prefix="compressed/",
+        )
+        metrics["upload_ms"] = int((time.monotonic() - t_up) * 1000)
+        metrics["compressed"] = True
+        metrics["total_ms"] = int((time.monotonic() - started) * 1000)
+        return compressed_url, metrics
+    except Exception as e:
+        metrics["error_type"] = e.__class__.__name__
+        metrics["error"] = str(e)
+        metrics["total_ms"] = int((time.monotonic() - started) * 1000)
+        return image_url, metrics
 
 
 def diagram_slice(*, image: str, prefix: str) -> Dict[str, Any]:

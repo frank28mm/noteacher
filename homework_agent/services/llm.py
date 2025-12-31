@@ -208,6 +208,10 @@ class LLMResult(BaseModel):
     text: str = Field(..., description="模型返回的文本内容")
     raw: Dict[str, Any] = Field(default_factory=dict, description="原始API响应")
     usage: Optional[Dict[str, int]] = Field(None, description="token使用统计")
+    response_id: Optional[str] = Field(
+        None,
+        description="Provider-side response_id (Ark Responses API). Used for audit via GET /responses/{response_id}.",
+    )
 
 
 class MathGradingResult(BaseModel):
@@ -253,6 +257,12 @@ class SocraticTutorResult(BaseModel):
     session_id: Optional[str] = Field(None, description="会话ID")
     status: str = Field(..., description="状态: continue/limit_reached/explained")
     interaction_count: int = Field(default=0, description="交互次数")
+
+
+class ReportResult(BaseModel):
+    """学情报告生成结果"""
+    narrative_md: str = Field(..., description="Markdown报告正文")
+    summary_json: Dict[str, Any] = Field(default_factory=dict, description="结构化摘要")
 
 
 class LLMClient:
@@ -608,6 +618,8 @@ class LLMClient:
                         if not isinstance(q, dict):
                             continue
                         q.pop("standard_answer", None)
+                        q["question_type"] = str(q.get("question_type") or "unknown")
+                        q["difficulty"] = str(q.get("difficulty") or "unknown")
                         verdict = (q.get("verdict") or "").strip().lower()
                         steps = q.get("math_steps") or q.get("steps")
                         q["judgment_basis"] = self._normalize_judgment_basis(
@@ -618,18 +630,32 @@ class LLMClient:
                             q.pop("steps", None)
                         else:
                             if isinstance(steps, list) and steps:
-                                first_bad = None
+                                allowed = {s.value for s in Severity}
+                                max_steps = int(
+                                    getattr(get_settings(), "max_math_steps_per_question", 5)
+                                )
+                                non_correct = []
                                 for s in steps:
-                                    if (
-                                        isinstance(s, dict)
-                                        and (s.get("verdict") or "").strip().lower()
-                                        != "correct"
-                                    ):
-                                        first_bad = s
+                                    if not isinstance(s, dict):
+                                        continue
+                                    v = (s.get("verdict") or "").strip().lower()
+                                    if v == "correct":
+                                        continue
+                                    sev = s.get("severity")
+                                    if isinstance(sev, str):
+                                        sev_norm = sev.strip().lower()
+                                        s["severity"] = (
+                                            sev_norm
+                                            if sev_norm in allowed
+                                            else Severity.UNKNOWN.value
+                                        )
+                                    non_correct.append(s)
+                                    if max_steps > 0 and len(non_correct) >= max_steps:
                                         break
-                                first_bad = first_bad or steps[0]
-                                if isinstance(first_bad, dict):
-                                    q["math_steps"] = [first_bad]
+                                if non_correct:
+                                    q["math_steps"] = non_correct
+                                else:
+                                    q.pop("math_steps", None)
                             else:
                                 q.pop("math_steps", None)
                                 q.pop("steps", None)
@@ -1417,10 +1443,13 @@ class LLMClient:
     ) -> LLMResult:
         """
         Multimodal generation with images + text prompt.
-        Uses chat.completions for SiliconFlow; Ark uses responses API when tools are off.
+        Uses chat.completions for SiliconFlow; Ark uses Responses API.
+        Notes:
+        - For Ark, we optionally enable built-in `image_process` via Responses `tools` when configured.
         """
         client = self._get_client(provider)
-        use_tools = bool(use_tools and provider != "ark")
+        use_tools = bool(use_tools)
+        settings = get_settings()
 
         if provider == "silicon":
             model = self.silicon_vision_model or self.silicon_model
@@ -1464,22 +1493,118 @@ class LLMClient:
                 {"type": "input_text", "text": user_prompt}
             ]
             content_blocks += self._image_blocks_from_refs(images, provider)
-            # responses API does not support tool calls; use direct call.
-            resp = client.responses.create(
-                model=model,
-                input=[
-                    {
-                        "role": "system",
-                        "content": [{"type": "input_text", "text": system_prompt}],
-                    },
-                    {"role": "user", "content": content_blocks},
-                ],
-            )
+            tools = None
+            if use_tools and bool(getattr(settings, "ark_image_process_enabled", False)):
+                tools = [{"type": "image_process"}]
+            try:
+                resp = client.responses.create(
+                    model=model,
+                    instructions=system_prompt,
+                    input=[{"role": "user", "content": content_blocks}],
+                    tools=tools,
+                )
+            except Exception:
+                # Best-effort fallback: if tool-enabled call fails, retry without tools.
+                if tools:
+                    resp = client.responses.create(
+                        model=model,
+                        instructions=system_prompt,
+                        input=[{"role": "user", "content": content_blocks}],
+                    )
+                else:
+                    raise
+            resp_dict = resp.to_dict()
+            response_id = None
+            try:
+                response_id = str(getattr(resp, "id", None) or resp_dict.get("id") or "")
+            except Exception:
+                response_id = None
+            response_id = response_id if (response_id and response_id.strip()) else None
             text_parts: List[str] = []
             for item in getattr(resp, "output", []) or []:
                 for c in getattr(item, "content", []) or []:
                     if getattr(c, "type", None) == "output_text":
                         text_parts.append(getattr(c, "text", ""))
-            return LLMResult(text="\n".join(text_parts), raw=resp.to_dict())
+            return LLMResult(
+                text="\n".join(text_parts),
+                raw=resp_dict,
+                response_id=response_id,
+            )
 
         raise ValueError(f"Unsupported provider for generate_with_images: {provider}")
+
+    @trace_span("generate_report")
+    @retry(
+        retry=retry_if_exception_type(
+            (
+                APIConnectionError,
+                APITimeoutError,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            )
+        ),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(3),
+        before_sleep=partial(_log_retry, "generate_report"),
+        reraise=True,
+    )
+    def generate_report(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        provider: str = "ark",
+    ) -> ReportResult:
+        """
+        生成学情诊断报告
+        """
+        client = self._get_client(provider)
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            # Default to ark_report_model if available, else ark_reasoning_model
+            settings = get_settings()
+            model = getattr(settings, "ark_report_model", None) or self.ark_model
+            
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=4000,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            logger.info(f"[generate_report] content_len={len(content or '')}")
+            
+            try:
+                data = json.loads(content)
+                return ReportResult(**data)
+            except Exception as e:
+                repaired = _repair_json_text(content or "")
+                if repaired:
+                    try:
+                        data = json.loads(repaired)
+                        return ReportResult(**data)
+                    except Exception:
+                        pass
+                
+                logger.error(f"Report parse error: {e}, content: {content[:200]}")
+                # Fallback empty
+                return ReportResult(
+                    narrative_md=f"# Report Generation Failed\n\nError: {e}",
+                    summary_json={"error": str(e)}
+                )
+
+        except Exception as e:
+            # Let tenacity retry network errors
+            if isinstance(e, (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)):
+                raise e
+            logger.error(f"Report generation failed: {e}")
+            return ReportResult(
+                narrative_md=f"# Report Generation Error\n\n{e}",
+                summary_json={"error": str(e)}
+            )

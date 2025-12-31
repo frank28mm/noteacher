@@ -8,8 +8,8 @@ from pathlib import Path
 
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
-UP_RE = re.compile(r"^(?P<num>\\d{4})_[a-z0-9_]+\\.up\\.sql$")
-DOWN_RE = re.compile(r"^(?P<num>\\d{4})_[a-z0-9_]+\\.down\\.sql$")
+UP_RE = re.compile(r"^(?P<num>\d{4})_[a-z0-9_]+\.up\.sql$")
+DOWN_RE = re.compile(r"^(?P<num>\d{4})_[a-z0-9_]+\.down\.sql$")
 
 
 def list_migrations() -> tuple[list[Path], list[Path]]:
@@ -64,4 +64,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

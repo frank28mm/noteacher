@@ -262,7 +262,7 @@ data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"
 > 心跳间隔建议 30s；若 90s 内无任何数据（含 heartbeat），服务器或反向代理可主动断开，客户端需重连。另：可用 `CHAT_IDLE_DISCONNECT_SECONDS` 配置“LLM 长时间无输出时主动关闭 SSE”（安全兜底，默认关闭；生产建议先取 120s，上线后按 `chat_llm_first_output` 日志的 p99 再回调）。客户端重连时可携带 `Last-Event-Id`，服务端会恢复 session 并按时间顺序重放最近最多 3 条 assistant 消息（仅当前 session）。
 
 **SSE事件类型**:
-1. `heartbeat`: 心跳事件，每30秒发送一次，保持连接
+1. `heartbeat`: 心跳事件（默认每 30 秒一次；可用 `CHAT_HEARTBEAT_INTERVAL_SECONDS` 配置），保持连接
    ```json
    {"timestamp": "2025-01-06T10:31:00Z"}
    ```
@@ -316,9 +316,128 @@ data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"
 
 ---
 
-## 5. 错误处理 (Error Handling)
+## 5. 错题本接口（Mistakes API，Phase 2）
 
-### 5.1 HTTP状态码
+> 目的：支持“历史错题页 / 排除-恢复 / 基础统计（知识点薄弱）”。  
+> 数据来源：以 `submissions.grade_result.wrong_items` 作为 durable snapshot；`mistake_exclusions` 只影响统计/报告，不改历史事实。
+
+### 5.1 GET /mistakes
+**描述**：按用户聚合历史错题（跨 submission）。
+
+**Query**：
+- `limit_submissions`：默认 20，最大 50（按 submission 分页）
+- `before_created_at`：可选，ISO 时间字符串；用于向前翻页（取 `< before_created_at`）
+- `include_excluded`：默认 false；为 true 时包含被排除的错题
+
+**响应**：
+```json
+{
+  "items": [
+    {
+      "submission_id": "upl_xxx",
+      "session_id": "sess_xxx",
+      "subject": "math",
+      "created_at": "2025-12-29T10:00:00Z",
+      "item_id": "item-1",
+      "question_number": "2",
+      "reason": "计算错误…",
+      "severity": "calculation",
+      "knowledge_tags": ["数学", "代数"],
+      "raw": {}
+    }
+  ],
+  "next_before_created_at": "2025-12-28T10:00:00Z"
+}
+```
+
+### 5.2 GET /mistakes/stats
+**描述**：基础统计（当前仅按 `knowledge_tags` 聚合）。
+
+**响应**：
+```json
+{
+  "next_before_created_at": "2025-12-28T10:00:00Z",
+  "knowledge_tag_counts": [
+    {"tag": "代数", "count": 12},
+    {"tag": "几何", "count": 8}
+  ]
+}
+```
+
+### 5.3 POST /mistakes/exclusions
+**描述**：排除错题（只影响统计/报告，不改历史事实）。
+
+**请求**：
+```json
+{
+  "submission_id": "upl_xxx",
+  "item_id": "item-1",
+  "reason": "误判"
+}
+```
+
+**响应**：
+```json
+{"ok": true}
+```
+
+### 5.4 DELETE /mistakes/exclusions/{submission_id}/{item_id}
+**描述**：恢复错题（撤销排除）。
+
+**响应**：
+```json
+{"ok": true}
+```
+
+---
+
+## 6. 学习报告接口（Reports API，Phase 2）
+
+> 目的：生成可审计、可追溯的学情分析报告（先 Features Layer，后续再接 Narrative Layer）。  
+> 数据来源：`question_attempts`（含正确题，提供分母）+ `question_steps`（过程诊断）+ `mistake_exclusions`（排除语义）。
+
+### 6.1 POST /reports
+**描述**：创建异步报告生成任务，返回 `job_id`。
+
+**请求**：
+```json
+{
+  "window_days": 7,
+  "subject": "math"
+}
+```
+
+**响应（202）**：
+```json
+{
+  "job_id": "uuid",
+  "status": "pending"
+}
+```
+
+### 6.2 GET /reports/jobs/{job_id}
+**描述**：查询报告任务状态（pending/running/done/failed）。
+
+**响应**：直接返回 `report_jobs` 行（字段可能随实现演进，以 `status/report_id/error` 为主）。
+
+### 6.3 GET /reports/{report_id}
+**描述**：获取报告内容（Features Layer 为主）。
+
+**响应**：直接返回 `reports` 行（重点字段：`features_json/evidence_refs/report_version`）。
+
+### 6.4 GET /reports
+**描述**：列出历史报告（按 `created_at desc`）。
+
+**响应**：
+```json
+{"items": []}
+```
+
+---
+
+## 7. 错误处理 (Error Handling)
+
+### 7.1 HTTP状态码
 
 | 状态码 | 说明 | 场景 |
 |--------|------|------|
@@ -338,7 +457,7 @@ data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"
 | 500 | Internal Server Error | 内部错误 |
 | 503 | Service Unavailable | 服务不可用 |
 
-### 5.2 错误响应格式
+### 7.2 错误响应格式
 ```json
 {
   "error": {
@@ -353,7 +472,7 @@ data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"
 }
 ```
 
-### 5.3 错误码详细说明
+### 7.3 错误码详细说明
 
 #### 认证相关 (4xx)
 - `UNAUTHORIZED` (401): 缺少或无效的认证令牌

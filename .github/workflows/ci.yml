@@ -16,6 +16,8 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           pip install -r requirements-dev.txt
+      - name: Dependency sanity (pip check)
+        run: pip check
       - name: Compile
         run: python3 -m compileall -q homework_agent
       - name: Test

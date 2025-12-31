@@ -39,6 +39,29 @@
 
 > 说明：每项包含：为什么做 → 交付物 → 验收标准 → 伪代码/接口草案。
 
+### P0‑Product（1–2 周）：把“错题→复盘→报告”闭环打通到可用
+
+#### WL‑P0‑010：错题本 MVP（历史检索 + 排除/恢复 + 知识点基础统计）
+
+**为什么**：闭环不是“批改一次就结束”，必须能沉淀错题、允许纠偏、支持长期复盘。
+
+**实施方案（Design Doc）**：`docs/design/mistakes_reports_learning_analyst_design.md`
+
+**交付物**：
+- 数据层：`submissions`（批改快照）+ `mistake_exclusions`（排除语义）可回滚迁移（`migrations/*.sql`）
+- API：
+  - `GET /mistakes`：按 `user_id` 聚合历史错题
+  - `POST /mistakes/exclusions`：排除误判
+  - `DELETE /mistakes/exclusions/{submission_id}/{item_id}`：恢复错题
+  - `GET /mistakes/stats`：按 `knowledge_tags` 聚合（MVP）
+
+**验收标准**：
+- 不依赖 Redis 也能查询历史错题（以 submission 快照为真源）
+- 排除/恢复只影响统计/报告，不修改历史事实
+- 有契约文档与最小测试覆盖
+
+---
+
 ### P0（1–2 周）：把“可回归 + 可观测 + 可控”做成日常
 
 #### WL‑P0‑001：Replay Golden Set v0 扩充（最优先）
@@ -318,6 +341,28 @@ def log_run_versions(request_ctx, *, prompt_meta, model_meta, thresholds):
 ---
 
 ### P1（2–4 周）：让“更聪明”的改动可被评估、可被周报驱动
+
+#### WL‑P1‑010：学情分析报告（Report Jobs + 学情分析师 subagent）
+
+**为什么**：报告是“复盘→运营”的核心交付物，必须从 grade/chat 解耦为独立链路（异步、可重跑、可审计）。
+
+**实施方案（Design Doc）**：`docs/design/mistakes_reports_learning_analyst_design.md`
+
+**交付物**：
+- 数据表（建议）：
+  - `report_jobs`：异步任务（pending/running/done/failed）
+  - `reports`：报告内容（JSON + 可读摘要），可按 `user_id/time_range` 查询
+- Subagent（学情分析师）：
+  - 输入：一段时间范围内 submissions（含 wrong_items/knowledge_tags/severity/judgment_basis）+ `mistake_exclusions`
+  - 输出：结构化报告（薄弱点 TopN、错误类型画像、趋势、复习建议、7/14 天计划）+ evidence refs
+- API（建议）：
+  - `POST /reports` 创建任务
+  - `GET /reports/{report_id}` 查询
+  - `GET /reports?user_id=...` 列表
+
+**验收标准**：
+- 报告生成不阻塞主请求；失败可重跑；产物可追溯到输入 submissions
+- 报告输出字段固定（schema），并可用回归样本评估（避免 prompt 漂移）
 
 #### WL‑P1‑001：Baseline 阈值治理（从“允许缺失”→“强阻断”）
 

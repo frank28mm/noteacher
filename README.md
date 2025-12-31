@@ -9,8 +9,8 @@
 
 ### 1. 智能批改 (Smart Grading)
 - **双模态支持（Vision 可选）**：
-  - **Doubao-Vision（默认 Vision）**：高可用视觉识别；**仅支持公网 URL 输入**。
-  - **Qwen3-VL（备用 Vision）**：擅长复杂手写体与几何图形识别；支持 URL 或 Base64（兜底）。
+  - **Doubao-Vision（默认 Vision）**：高可用视觉识别；**优先公网 URL**，支持 Data-URL(base64) 兜底。
+  - **Qwen3-VL（备用 Vision）**：擅长复杂手写体与几何图形识别；支持 URL 或 Data-URL(base64) 兜底。
 - **深度分析**：输出结构化 JSON，包含分数、错题位置 (bbox)、错误原因及详细解析。
 - **鲁棒性设计**：
   - **Fail Fast**: 遇到 RateLimit 立即报错，不盲目重试。
@@ -23,6 +23,12 @@
 - **上下文注入**：基于 `/grade` 生成的 session（即便全对也可聊），进行针对性辅导；不做纯闲聊。
 - **推理模型**：当 Chat 走 Ark provider 时，使用 `ARK_REASONING_MODEL` 指定的模型（测试环境可指向 `doubao-seed-1-6-vision-250815`）；`ARK_REASONING_MODEL_THINKING` 非必需。
 - **会话管理**：支持 SSE 流式输出、断线续接 (Last-Event-ID) 和会话状态持久化 (InMemory/Redis)。
+
+---
+
+## 📌 文档入口
+
+- `docs/INDEX.md`（唯一导航入口：真源/契约/路线图/Backlog）
 
 ---
 
@@ -39,12 +45,12 @@ git clone https://github.com/frank28mm/noteacher.git
 cd noteacher
 
 # 2. 创建环境
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate  # macOS/Linux
 # .venv\Scripts\activate   # Windows
 
 # 3. 安装依赖
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 
 # 4. 配置环境变量 (参考 .env.template)
 cp .env.template .env
@@ -62,7 +68,7 @@ uvicorn homework_agent.main:app --host 0.0.0.0 --port 8000 --reload
 ### 6. 启动 QIndex Worker（可选，但推荐）
 用于 **Baidu OCR + 题目 bbox/切片** 的后台生成（避免拖慢主进程），需要 Redis（`REDIS_URL`）：
 ```bash
-python -m homework_agent.workers.qindex_worker
+python3 -m homework_agent.workers.qindex_worker
 ```
 
 > 说明：
@@ -95,6 +101,7 @@ python -m homework_agent.workers.qindex_worker
 - [ ] **Live Inventory 验收**（可选）：`python3 scripts/collect_inventory_live_metrics.py --limit 5` 验证真实样本
 - [ ] **CI 全绿**：确认 GitHub Actions 所有 job 通过
 - [ ] **SSE 兜底断线（B 方案）**：生产建议设置 `CHAT_IDLE_DISCONNECT_SECONDS=120`，上线后按日志事件 `chat_llm_first_output` 的 p99 回调（如调到 90/120/180）
+  - 回调口径：用 `python3 scripts/analyze_chat_llm_first_output.py logs/backend.log` 统计 `first_output_ms` 的 p99，再决定 90/120/180
 
 ---
 
@@ -154,7 +161,7 @@ python -m homework_agent.workers.qindex_worker
     - [ ] Redis 队列集成
     - [ ] 批处理任务状态管理
     - [ ] Submission 持久化（原始图片/识别原文/批改结果按时间可查）
-    - [ ] 对话历史 7 天、切片 7 天、静默 180 天清理策略
+    - [ ] 会话/切片的短期数据 TTL（默认 24h；切片由 `SLICE_TTL_SECONDS` 控制）；长期数据清理归属上层“用户与数据管理后台”
     - [ ] 错题排除（只影响统计/报告）+ 异步学业报告（可下载/历史报告）
 
 ---

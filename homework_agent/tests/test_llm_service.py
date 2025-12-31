@@ -44,7 +44,7 @@ def test_llm_grade_math_contract_hardening(monkeypatch: pytest.MonkeyPatch):
     grade_math should:
     - parse JSON
     - drop `standard_answer`
-    - drop steps for `correct`, and keep only first non-correct step for others
+    - drop steps for `correct`, and keep non-correct steps (up to K) for others
     """
     payload = {
         "summary": "ok",
@@ -65,6 +65,7 @@ def test_llm_grade_math_contract_hardening(monkeypatch: pytest.MonkeyPatch):
                 "math_steps": [
                     {"index": 1, "verdict": "correct"},
                     {"index": 2, "verdict": "incorrect", "severity": "BOGUS"},
+                    {"index": 3, "verdict": "incorrect", "severity": "calculation"},
                 ],
             },
         ],
@@ -97,11 +98,10 @@ def test_llm_grade_math_contract_hardening(monkeypatch: pytest.MonkeyPatch):
     # Q2 incorrect: only keep first non-correct step, and normalize severity
     q2 = out.questions[1]
     assert "standard_answer" not in q2
-    assert isinstance(q2.get("math_steps"), list) and len(q2["math_steps"]) == 1
-    assert (q2["math_steps"][0].get("verdict") or "").lower() != "correct"
-    # NOTE: llm.py only normalizes severity for `wrong_items`; question-level `math_steps`
-    # are treated as best-effort and may contain non-enum severities.
-    assert q2["math_steps"][0].get("severity") == "BOGUS"
+    assert isinstance(q2.get("math_steps"), list) and len(q2["math_steps"]) == 2
+    assert all((s.get("verdict") or "").lower() != "correct" for s in q2["math_steps"])
+    assert q2["math_steps"][0].get("severity") == "unknown"
+    assert q2["math_steps"][1].get("severity") == "calculation"
 
     # wrong_items standard_answer stripped
     assert out.wrong_items and "standard_answer" not in out.wrong_items[0]

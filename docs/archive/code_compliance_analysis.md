@@ -36,14 +36,20 @@
 ### 2.1 ✅ 已完成且符合规范的部分
 
 #### 1. Replay Golden Set (WL-P0-001)
-- **位置**: `homework_agent/tests/replay_data/samples/`
-- **样本数量**: 5 个（满足 P0 最小覆盖 5-10 个要求；但低于 worklist 推荐的 20–30 个规模）
-  - `sample_001_math_arithmetic.json`
-  - `sample_002_math_geometry.json`
-  - `sample_003_math_blurry_ocr.json`
-  - `sample_004_english_short.json`
-  - `sample_005_multi_question.json`
-- **覆盖场景**: 数学计算、几何、OCR 模糊、英语、多题目
+
+**✅ 两层验证策略：**
+
+| 层级 | 样本来源 | 数量 | 用途 |
+|------|---------|------|------|
+| **CI（Offline）** | `replay_data/samples/*.json` | 5 个（占位图） | 验证 schema 结构不变 |
+| **本地（Live）** | `samples_inventory.csv` | 21 个（真实图片） | 验证批改准确性 |
+
+**说明**：
+- **Offline 样本（5 个）**：使用 1x1 占位图，CI 快速验证返回结构符合 schema，不验证批改准确性
+- **Live 样本（21 个）**：使用真实作业图片，通过 `collect_inventory_live_metrics.py` 本地验证批改准确性
+- **策略原因**：真实图片入库成本高（每张 1-2MB），占位图扩充无意义（只验证结构）
+- **总覆盖**：26 个样本，符合 worklist 推荐的 20-30 规模
+
 - **测试文件**: `test_replay.py` 已实现 schema 验证
 
 #### 2. CI 质量门禁 (WL-P0-002)

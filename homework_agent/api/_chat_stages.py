@@ -397,25 +397,39 @@ def _prepare_chat_context_or_abort(
                 user_input=req.question,
                 matched_qn=mentioned or "none",
                 match_type=match_type,
+                explicit_intent=explicit_intent,
                 available_qns=available_qnums[:10],
             )
             if mentioned:
                 session_data["focus_question_number"] = str(mentioned)
             else:
-                _abort_with_assistant_message(
-                    session_id=session_id,
-                    session_data=session_data,
-                    message=(
-                        "这个题目没有找到呢。你可以直接说题号或题名。"
-                        + (
-                            f" 当前可聊题目：{', '.join(available_qnums[:30])}。"
-                            if available_qnums
-                            else ""
-                        )
-                    ),
-                    done_status="continue",
-                    question_candidates=available_qnums[:30],
+                wants_switch = any(
+                    k in (req.question or "") for k in ("换一题", "下一题", "换个", "换个题")
                 )
+                if wants_switch or not session_data.get("focus_question_number"):
+                    _abort_with_assistant_message(
+                        session_id=session_id,
+                        session_data=session_data,
+                        message=(
+                            "这个题目没有找到呢。你可以直接说题号或题名。"
+                            + (
+                                f" 当前可聊题目：{', '.join(available_qnums[:30])}。"
+                                if available_qnums
+                                else ""
+                            )
+                        ),
+                        done_status="continue",
+                        question_candidates=available_qnums[:30],
+                    )
+                else:
+                    log_event(
+                        logger,
+                        "chat_focus_retained_on_implicit_intent",
+                        request_id=request_id,
+                        session_id=session_id,
+                        focus_question_number=session_data.get("focus_question_number"),
+                        user_input=req.question,
+                    )
 
     focus_q = session_data.get("focus_question_number")
     focus_q = str(focus_q) if focus_q is not None else None

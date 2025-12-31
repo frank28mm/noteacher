@@ -124,6 +124,7 @@ def resolve_page_image_urls(
     *,
     user_id: str,
     submission_id: str,
+    prefer_proxy: bool = True,
 ) -> List[str]:
     """Lookup page_image_urls for a submission (used by /grade when images are omitted)."""
     if not user_id or not submission_id:
@@ -142,9 +143,10 @@ def resolve_page_image_urls(
             return []
         row = rows[0] if isinstance(rows[0], dict) else {}
         # Prefer proxy urls if present (stable lightweight copies).
-        proxy = row.get("proxy_page_image_urls")
-        if isinstance(proxy, list) and any(str(u).strip() for u in proxy):
-            return [str(u).strip() for u in proxy if str(u).strip()]
+        if bool(prefer_proxy):
+            proxy = row.get("proxy_page_image_urls")
+            if isinstance(proxy, list) and any(str(u).strip() for u in proxy):
+                return [str(u).strip() for u in proxy if str(u).strip()]
         urls = row.get("page_image_urls")
         if isinstance(urls, list):
             return [str(u).strip() for u in urls if str(u).strip()]
@@ -260,7 +262,7 @@ def persist_qindex_slices(
     request_id: Optional[str] = None,
 ) -> None:
     """
-    Persist per-question qindex image refs to Postgres with TTL (7d by default).
+    Persist per-question qindex image refs to Postgres with TTL (24h by default).
     This allows chat to find slices even if Redis lost/restarted within the TTL window.
     """
     if not user_id or not submission_id or not session_id:
@@ -272,7 +274,7 @@ def persist_qindex_slices(
         return
 
     settings = get_settings()
-    ttl_s = int(getattr(settings, "slice_ttl_seconds", 7 * 24 * 3600) or 7 * 24 * 3600)
+    ttl_s = int(getattr(settings, "slice_ttl_seconds", 24 * 3600) or 24 * 3600)
     expires_at = _iso(_utc_now() + timedelta(seconds=ttl_s))
 
     try:

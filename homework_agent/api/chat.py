@@ -131,9 +131,25 @@ def _select_question_number_from_text(
         if not term:
             return []
         if numeric:
-            # Avoid matching "2" inside "28".
-            pat = re.compile(rf"(?<!\\d){re.escape(term)}(?!\\d)")
+            # Stricter check for numeric terms to avoid math expressions
+            # e.g. "3" should not match in "3x", "x^3", "3+5", "5-3"
+            
+            # Check if term is just digits (simple number case)
+            is_simple_number = re.fullmatch(r"\d+", term) is not None
+            
+            if is_simple_number:
+                # For simple numbers, enforce stricter boundaries:
+                # Not preceded/followed by digits, letters, or math operators (+-*/^=)
+                # We do NOT include () in exclusion because "20(1)" is valid context for "20",
+                # and "Question (3)" is valid for "3".
+                exclusion = r"[A-Za-z0-9+\-*/^=]"
+                pat = re.compile(rf"(?<!{exclusion}){re.escape(term)}(?!{exclusion})")
+                return [(m.start(), m.end()) for m in pat.finditer(msg_norm)]
+            
+            # For complex numbers like "20(1)", standard digit boundaries are sufficient
+            pat = re.compile(rf"(?<!\d){re.escape(term)}(?!\d)")
             return [(m.start(), m.end()) for m in pat.finditer(msg_norm)]
+
         # Generic substring scan.
         out: List[tuple[int, int]] = []
         start = 0
@@ -1004,51 +1020,8 @@ def _format_math_for_display(text: str) -> str:
         s = s.replace("\\(", "$").replace("\\)", "$")
         s = re.sub(r"\\boldsymbol\{([^{}]+)\}", r"\1", s)
 
-        # Some providers/models return *double-escaped* LaTeX commands inside $...$,
-        # e.g. `\\frac{3}{8}` which breaks MathJax (treated as a newline `\\` + text).
-        # Fix ONLY inside math blocks to avoid mangling normal text.
-        def _fix_latex_inner(inner: str) -> str:
-            if not inner:
-                return inner
-            # Convert "\\frac" -> "\frac", "\\pm" -> "\pm", etc. (only when a command name follows).
-            inner = re.sub(r"\\\\([A-Za-z]+)", r"\\\1", inner)
-            # Spacing commands: "\\," "\\;" "\\!" -> "\," "\;" "\!"
-            inner = re.sub(r"\\\\([,;!])", r"\\\1", inner)
-            # Improve mixed-number readability: 99\frac{3}{8} -> 99\,\frac{3}{8}
-            inner = re.sub(r"(\d)(\\(?:frac|tfrac)\b)", r"\1\\,\2", inner)
-            return inner
-
-        def _fix_display(m: re.Match) -> str:
-            inner = _fix_latex_inner(m.group(1))
-            # Also remove nested single-$ markers inside display blocks.
-            inner = inner.replace("$", "")
-            return "$$" + inner + "$$"
-
-        def _fix_inline(m: re.Match) -> str:
-            return "$" + _fix_latex_inner(m.group(1)) + "$"
-
-        # Fix display first, then inline (avoid $$ being caught by inline regex).
-        s = re.sub(r"\$\$(.*?)\$\$", _fix_display, s, flags=re.S)
-        s = re.sub(r"(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)", _fix_inline, s, flags=re.S)
-
-        # Best-effort: convert programming-style powers outside math blocks, e.g. x^(6n) -> $x^{6n}$.
-        # This is intentionally conservative (avoid touching already-formatted LaTeX).
-        def _protect_math(m: re.Match) -> str:
-            idx = len(_protected)
-            _protected.append(m.group(0))
-            return f"@@MATH{idx}@@"
-
-        _protected: List[str] = []
-        s2 = re.sub(r"\$\$.*?\$\$", _protect_math, s, flags=re.S)
-        s2 = re.sub(r"(?<!\$)\$(?!\$).*?(?<!\$)\$(?!\$)", _protect_math, s2, flags=re.S)
-        s2 = re.sub(
-            r"\b([A-Za-z][A-Za-z0-9]*)\s*\^\s*\(\s*([0-9A-Za-z+\-*/ ]{1,12})\s*\)",
-            lambda m: f"${m.group(1)}^{{{m.group(2).strip().replace(' ', '')}}}$",
-            s2,
-        )
-        for i, chunk in enumerate(_protected):
-            s2 = s2.replace(f"@@MATH{i}@@", chunk)
-        s = s2
+        # Removed aggressive "smart" fixes (double-escaped LaTeX, programming powers)
+        # because they were causing issues with valid text and creating display artifacts.
 
         # Re-apply tilde ban in case the model emitted it inside math blocks.
         s = s.replace("~", "").replace("～", "")
@@ -1204,11 +1177,12 @@ def _format_session_history_for_display(session_data: Dict[str, Any]) -> None:
         session_data["history"] = hist
 
 
-@dataclass(frozen=True)
 class _ChatAbort(Exception):
     """Internal control-flow: terminate chat_stream with pre-built SSE chunks."""
 
-    chunks: List[bytes]
+    def __init__(self, *, chunks: List[bytes]):
+        super().__init__("chat aborted")
+        self.chunks = chunks
 
 
 def _sse_event(event: str, data: str) -> bytes:
@@ -1891,7 +1865,7 @@ async def chat_stream(
     """
     SSE流式苏格拉底辅导:
     - heartbeat/chat/done/error事件
-    - 5轮对话上限
+    - 默认不限轮（按交互轮次递进提示；是否限制由上层产品/前端控制）
     - Session 24小时TTL
     - last-event-id支持断线续接(仅用于恢复session)
     """

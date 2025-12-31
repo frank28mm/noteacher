@@ -1,5 +1,7 @@
 # Agent 智能提升路线图（与门禁/约束对齐）
 
+> 文档状态：归档/仅供参考（已移动到 `docs/reports/archived/agent_intelligence_improvement_plan.md`）。主 Backlog 已迁移至 `docs/agent/next_development_worklist_and_pseudocode.md`；阅读入口见 `docs/INDEX.md`。
+
 > **文档定位**：这是“智能提升”的路线图与 Backlog 归口，用于提升仓库文档质量与执行一致性。  
 > **近期执行主计划（真源）**：`docs/agent/next_development_worklist_and_pseudocode.md`（P0/P1/P2 + 迭代模板 + 伪代码）。  
 > **本路线图的原则**：任何“变聪明”的改动，必须先满足 **可回归（replay+metrics）/可观测（request_id+usage）/可控成本（budget+timeout）/可回滚（版本可追溯）**。
@@ -11,7 +13,7 @@
 本计划以以下文档为约束与验收口径（优先级从高到低）：
 
 1. `product_requirements.md`：产品边界与行为要求。
-2. `API_CONTRACT.md`：接口契约（字段、幂等、错误码、SSE 等）。
+2. `homework_agent/API_CONTRACT.md`：接口契约（字段、幂等、错误码、SSE 等）。
 3. `agent_sop.md`：执行流程与关键约束（尤其是**记忆边界**与降级策略）。
 4. `docs/engineering_guidelines.md`：工程约束与真源入口。
 5. `docs/development_rules.md` + `docs/development_rules_quickref.md`：团队开发规则（门禁、日志、回滚、安全、可观测性）。
@@ -215,4 +217,3 @@
   - “为什么做”（智能提升目标与风险）
   - “何时做”（6 周节奏与阶段边界）
   - “哪些后置”（P3+ 的能力库）
-

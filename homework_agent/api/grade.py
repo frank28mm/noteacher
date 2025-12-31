@@ -31,6 +31,7 @@ from homework_agent.services.llm import MathGradingResult, EnglishGradingResult
 from homework_agent.services.autonomous_agent import run_autonomous_grade_agent
 from homework_agent.services.qindex_queue import enqueue_qindex_job
 from homework_agent.services.grade_queue import enqueue_grade_job
+from homework_agent.services.facts_queue import enqueue_facts_job
 from homework_agent.utils.settings import get_settings
 from homework_agent.core.qindex import qindex_is_configured
 from homework_agent.core.qbank import (
@@ -73,6 +74,7 @@ from homework_agent.utils.url_image_helpers import (
     _normalize_public_url,
     _strip_base64_prefix,
 )
+from homework_agent.services.high_risk import enforce_conservative_grading
 
 logger = logging.getLogger(__name__)
 
@@ -557,6 +559,9 @@ def _build_grading_result_from_unified(
                     "judgment_basis": r.get("judgment_basis"),
                     "warnings": r.get("warnings") or [],
                     "knowledge_tags": r.get("knowledge_tags") or [],
+                    "math_steps": r.get("math_steps") or r.get("steps"),
+                    "geometry_check": r.get("geometry_check"),
+                    "cross_subject_flag": r.get("cross_subject_flag"),
                 }
             )
 
@@ -612,6 +617,9 @@ def _build_grading_result_from_autonomous(
                 "judgment_basis": r.get("judgment_basis"),
                 "warnings": r.get("warnings") or [],
                 "knowledge_tags": r.get("knowledge_tags") or [],
+                "math_steps": r.get("math_steps") or r.get("steps"),
+                "geometry_check": r.get("geometry_check"),
+                "cross_subject_flag": r.get("cross_subject_flag"),
             }
         )
 
@@ -710,6 +718,9 @@ async def _perform_autonomous_grading(
         session_id=ctx.session_id,
     )
     ctx.meta_base["experiments"] = experiments_meta
+    grade_variant = getattr(req, "_grade_image_input_variant", None)
+    if isinstance(grade_variant, str) and grade_variant.strip():
+        ctx.meta_base["grade_image_input_variant"] = grade_variant.strip()
     save_grade_progress(
         ctx.session_id, "vision_start", "自主阅卷中（规划→工具→反思）…", None
     )
@@ -732,8 +743,36 @@ async def _perform_autonomous_grading(
                 session_id=ctx.session_id,
                 request_id=ctx.request_id,
                 experiments=experiments_meta,
+                grade_image_input_variant=(
+                    grade_variant.strip()
+                    if isinstance(grade_variant, str) and grade_variant.strip()
+                    else None
+                ),
                 **overrides,
             )
+            tms = getattr(autonomous, "timings_ms", None)
+            if isinstance(tms, dict):
+                ctx.timings_ms.update({k: v for k, v in tms.items() if v is not None})
+            llm_trace = getattr(autonomous, "llm_trace", None)
+            if isinstance(llm_trace, dict):
+                ark_response_id = llm_trace.get("ark_response_id")
+                if isinstance(ark_response_id, str) and ark_response_id.strip():
+                    rid = ark_response_id.strip()
+                    ctx.meta_base["ark_response_id"] = rid
+                    log_event(
+                        logger,
+                        "grade_ark_response_id",
+                        request_id=ctx.request_id,
+                        session_id=ctx.session_id,
+                        response_id=rid,
+                    )
+                if "ark_image_process_requested" in llm_trace:
+                    ctx.meta_base["ark_image_process_requested"] = bool(
+                        llm_trace.get("ark_image_process_requested")
+                    )
+                ctx.meta_base["ark_image_process_enabled"] = bool(
+                    getattr(ctx.settings, "ark_image_process_enabled", False)
+                )
         except Exception as e:
             log_event(
                 logger,
@@ -782,6 +821,19 @@ async def _perform_autonomous_grading(
     grading_result = _build_grading_result_from_autonomous(
         autonomous=autonomous, subject=req.subject
     )
+
+    # T3: Quality Gate (Conservative Correctness)
+    # Downgrade 'correct' to 'uncertain' if risks are detected (e.g. OCR failure)
+    gate_warnings = enforce_conservative_grading(grading_result, autonomous.warnings or [])
+    if gate_warnings:
+        # Append new warnings to both response object and context for logging
+        if not hasattr(response, "warnings"):
+            response.warnings = []
+        if isinstance(response.warnings, list):
+            response.warnings.extend(gate_warnings)
+        if not hasattr(grading_result, "warnings"):
+            grading_result.warnings = []
+        grading_result.warnings.extend(gate_warnings)
 
     extra_warn = _persist_done_qbank_snapshot(
         ctx=ctx,
@@ -894,7 +946,9 @@ def validate_images(images: List[Any], provider: VisionProvider):
                 )
 
 
-def _resolve_images_from_upload_id(upload_id: str, *, user_id: str) -> List[str]:
+def _resolve_images_from_upload_id(
+    upload_id: str, *, user_id: str, prefer_proxy: bool = True
+) -> List[str]:
     """
     Backward-compatible name: we treat upload_id as submission_id (one upload == one Submission).
     Resolve canonical page_image_urls from Supabase Postgres.
@@ -902,7 +956,12 @@ def _resolve_images_from_upload_id(upload_id: str, *, user_id: str) -> List[str]
     return [
         str(u).strip()
         for u in (
-            resolve_page_image_urls(user_id=user_id, submission_id=str(upload_id)) or []
+            resolve_page_image_urls(
+                user_id=user_id,
+                submission_id=str(upload_id),
+                prefer_proxy=bool(prefer_proxy),
+            )
+            or []
         )
         if str(u).strip()
     ]
@@ -916,6 +975,9 @@ async def grade_homework(
     background_tasks: BackgroundTasks,
     x_idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key"),
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    x_grade_image_input_variant: Optional[str] = Header(
+        None, alias="X-Grade-Image-Input-Variant"
+    ),
 ):
     """
     批改作业 API (Stub)
@@ -924,9 +986,37 @@ async def grade_homework(
     user_id = require_user_id(
         authorization=request.headers.get("Authorization"), x_user_id=x_user_id
     )
+    settings = get_settings()
     upload_id = (getattr(req, "upload_id", None) or "").strip()
+
+    variant_raw = (
+        (x_grade_image_input_variant or "").strip()
+        or str(getattr(settings, "grade_image_input_variant", "") or "").strip()
+        or "auto"
+    )
+    grade_image_input_variant = str(variant_raw).strip().lower() or "auto"
+    allowed_variants = {
+        "auto",
+        "url",
+        "proxy",
+        "data_url_first_page",
+        "data_url_on_small_figure",
+    }
+    if grade_image_input_variant not in allowed_variants:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid X-Grade-Image-Input-Variant (allowed: {sorted(allowed_variants)})",
+        )
+    prefer_proxy = grade_image_input_variant != "url"
+    try:
+        setattr(req, "_grade_image_input_variant", grade_image_input_variant)
+    except Exception as e:
+        logger.debug(f"Setting _grade_image_input_variant on request failed: {e}")
+
     if upload_id and not (req.images or []):
-        urls = _resolve_images_from_upload_id(upload_id, user_id=user_id)
+        urls = _resolve_images_from_upload_id(
+            upload_id, user_id=user_id, prefer_proxy=prefer_proxy
+        )
         if not urls:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -962,6 +1052,7 @@ async def grade_homework(
         images=len(req.images or []),
         vision_provider=getattr(req.vision_provider, "value", str(req.vision_provider)),
         has_idempotency=bool(x_idempotency_key),
+        grade_image_input_variant=grade_image_input_variant,
     )
 
     # Best-effort: touch Submission last_active_at (180-day inactivity cleanup uses this).
@@ -1027,6 +1118,7 @@ async def grade_homework(
         images=len(req.images or []),
         provider=provider_str,
         upload_id=upload_id,
+        grade_image_input_variant=grade_image_input_variant,
     )
 
     if is_large_batch:
@@ -1143,6 +1235,7 @@ async def grade_homework(
                     if hasattr(req.subject, "value")
                     else str(req.subject)
                 )
+                db_start = time.monotonic()
                 update_submission_after_grade(
                     user_id=user_id,
                     submission_id=upload_id,
@@ -1170,6 +1263,23 @@ async def grade_homework(
                         else None
                     ),
                 )
+                log_event(
+                    logger,
+                    "submission_grade_persist_done",
+                    request_id=request_id,
+                    session_id=session_for_ctx,
+                    submission_id=upload_id,
+                    elapsed_ms=int((time.monotonic() - db_start) * 1000),
+                )
+                try:
+                    enqueue_facts_job(
+                        submission_id=upload_id,
+                        user_id=user_id,
+                        session_id=session_for_ctx,
+                        request_id=request_id,
+                    )
+                except Exception as e:
+                    logger.debug(f"enqueue_facts_job failed (best-effort): {e}")
             except Exception as e:
                 logger.debug(
                     f"update_submission_grade_result failed (best-effort): {e}"

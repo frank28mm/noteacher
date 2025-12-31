@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     ark_vision_model: str = Field(
         default="doubao-seed-1-6-vision-250815", validation_alias="ARK_VISION_MODEL"
     )
+    # Ark built-in image processing tool (image_process: zoom/rotate/grounding/point).
+    # Default off: enable only after verification against Ark Responses API behavior.
+    ark_image_process_enabled: bool = Field(
+        default=False, validation_alias="ARK_IMAGE_PROCESS_ENABLED"
+    )
+    # /grade experiment: choose image input strategy for Ark to isolate URL-fetch latency.
+    # Values: auto|url|proxy|data_url_first_page|data_url_on_small_figure
+    grade_image_input_variant: str = Field(
+        default="auto", validation_alias="GRADE_IMAGE_INPUT_VARIANT"
+    )
     # Ark/Doubao text reasoning models for chat/grading
     ark_reasoning_model: str = Field(
         default="Doubao-Seed-1-6", validation_alias="ARK_REASONING_MODEL"
@@ -48,6 +58,10 @@ class Settings(BaseSettings):
     ark_reasoning_model_thinking: str = Field(
         default="Doubao-Seed-1-6-thinking",
         validation_alias="ARK_REASONING_MODEL_THINKING",
+    )
+    ark_report_model: str = Field(
+        default="doubao-seed-1-6-251015",
+        validation_alias="ARK_REPORT_MODEL",
     )
 
     # Baidu PaddleOCR-VL (OCR + layout)
@@ -220,6 +234,17 @@ class Settings(BaseSettings):
     )
     judgment_basis_min_length: int = Field(
         default=2, validation_alias="JUDGMENT_BASIS_MIN_LENGTH"
+    )
+    max_math_steps_per_question: int = Field(
+        default=5, validation_alias="MAX_MATH_STEPS_PER_QUESTION"
+    )
+
+    # Derived facts extraction (question_attempts / question_steps)
+    facts_queue_name: str = Field(
+        default="facts:queue", validation_alias="FACTS_QUEUE_NAME"
+    )
+    facts_lock_ttl_seconds: int = Field(
+        default=600, validation_alias="FACTS_LOCK_TTL_SECONDS"
     )
 
     # Autonomous Grade Agent

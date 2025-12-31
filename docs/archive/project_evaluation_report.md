@@ -85,7 +85,7 @@
 | 测试分层 | ⚠️ | Unit/Contract 完备，E2E 待补齐 |
 | 变更可回滚 | ⚠️ | 缺 migrations 目录 |
 
-### 3.3 对照 `API_CONTRACT.md`
+### 3.3 对照 `homework_agent/API_CONTRACT.md`
 
 | 接口 | 状态 | 备注 |
 |------|------|------|

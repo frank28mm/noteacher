@@ -4,6 +4,8 @@
 **基于**: 对照实验结果
 **状态**: ✅ 全部完成（P0 + P1 + P2）
 
+> 文档状态：归档/仅供参考（历史实验记录；已移动到 `docs/reports/archived/optimization_plan_v2.md`）。路线图与 Backlog 以 `docs/cto_90_day_plan.md` / `docs/agent/next_development_worklist_and_pseudocode.md` 为准；阅读入口见 `docs/INDEX.md`。
+
 ---
 
 ## 📋 对照实验结论总结

@@ -1,0 +1,10 @@
+{
+  "version": "v0.1",
+  "unknown_policy": "keep",
+  "aliases": {
+    "毕达哥拉斯定理": "勾股定理",
+    "Pythagorean theorem": "勾股定理"
+  },
+  "deprecated": {}
+}
+

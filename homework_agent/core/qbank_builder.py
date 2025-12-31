@@ -8,6 +8,48 @@ from homework_agent.core.qbank_parser import build_question_bank_from_vision_raw
 from homework_agent.models.schemas import GeometryInfo, Severity, Subject
 
 
+def _max_math_steps_per_question() -> int:
+    try:
+        from homework_agent.utils.settings import get_settings
+
+        settings = get_settings()
+        v = getattr(settings, "max_math_steps_per_question", 5)
+        return max(0, min(int(v), 20))
+    except Exception:
+        return 5
+
+
+def _coerce_question_type(v: Any) -> str:
+    s = str(v or "").strip()
+    return s or "unknown"
+
+
+def _coerce_difficulty(v: Any) -> str:
+    s = str(v or "").strip()
+    return s or "unknown"
+
+
+def _normalize_question_identifiers(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Ensure each question has:
+    - question_idx: 1-indexed position in the current list (deterministic for storage)
+    - item_id: stable identifier for joins (prefer question_number, else idx)
+    """
+    counts: Dict[str, int] = {}
+    for idx, q in enumerate(questions or []):
+        if not isinstance(q, dict):
+            continue
+        q.setdefault("question_idx", idx + 1)
+        if q.get("item_id"):
+            q["item_id"] = str(q["item_id"])
+            continue
+        qn = q.get("question_number")
+        base = f"q:{qn}" if qn else f"idx:{idx+1}"
+        counts[base] = counts.get(base, 0) + 1
+        q["item_id"] = base if counts[base] == 1 else f"{base}#{counts[base]}"
+    return questions
+
+
 def sanitize_wrong_items(wrong_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Normalize LLM输出，避免 Severity/geometry_check 等字段导致 Pydantic 校验错误。"""
     allowed_sev = {s.value for s in Severity}
@@ -91,6 +133,7 @@ def _generate_question_aliases(qn: str) -> List[str]:
 def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Normalize question entries for storage (ensure strings and safe defaults)."""
     normalized: List[Dict[str, Any]] = []
+    max_steps = _max_math_steps_per_question()
     for q in questions or []:
         if not isinstance(q, dict):
             continue
@@ -121,11 +164,17 @@ def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         elif not isinstance(tags, list):
             copy_q["knowledge_tags"] = [str(tags)]
 
+        # normalize question_type/difficulty (used by reports)
+        copy_q["question_type"] = _coerce_question_type(copy_q.get("question_type"))
+        copy_q["difficulty"] = _coerce_difficulty(copy_q.get("difficulty"))
+
         # Contract: do not store standard answers in the question bank (avoid leakage + reduce payload).
         if "standard_answer" in copy_q:
             copy_q.pop("standard_answer", None)
 
-        # Contract: keep only the first error step for incorrect/uncertain; omit for correct.
+        # Storage policy for steps:
+        # - correct: omit steps
+        # - incorrect/uncertain: keep non-correct steps (up to K) for process diagnosis
         verdict = (copy_q.get("verdict") or "").strip().lower()
         steps = copy_q.get("math_steps") or copy_q.get("steps")
         if verdict == "correct":
@@ -133,17 +182,29 @@ def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             copy_q.pop("steps", None)
         else:
             if isinstance(steps, list) and steps:
-                first_bad = None
+                non_correct: List[Dict[str, Any]] = []
+                allowed_sev = {s.value for s in Severity}
                 for s in steps:
-                    if (
-                        isinstance(s, dict)
-                        and (s.get("verdict") or "").strip().lower() != "correct"
-                    ):
-                        first_bad = s
+                    if not isinstance(s, dict):
+                        continue
+                    v = (s.get("verdict") or "").strip().lower()
+                    if v == "correct":
+                        continue
+                    sev = s.get("severity")
+                    if isinstance(sev, str):
+                        sev_norm = sev.strip().lower()
+                        s["severity"] = (
+                            sev_norm
+                            if sev_norm in allowed_sev
+                            else Severity.UNKNOWN.value
+                        )
+                    non_correct.append(s)
+                    if max_steps and len(non_correct) >= max_steps:
                         break
-                first_bad = first_bad or steps[0]
-                if isinstance(first_bad, dict):
-                    copy_q["math_steps"] = [first_bad]
+                if non_correct:
+                    copy_q["math_steps"] = non_correct
+                else:
+                    copy_q.pop("math_steps", None)
             else:
                 copy_q.pop("math_steps", None)
                 copy_q.pop("steps", None)
@@ -164,7 +225,7 @@ def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         else:
             copy_q["options"] = None
         normalized.append(copy_q)
-    return normalized
+    return _normalize_question_identifiers(normalized)
 
 
 def build_question_bank(

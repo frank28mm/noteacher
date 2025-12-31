@@ -1,4 +1,6 @@
 from fastapi.testclient import TestClient
+import uuid
+
 from homework_agent.main import create_app
 from homework_agent.models.schemas import VisionProvider
 from homework_agent.api import routes
@@ -18,7 +20,22 @@ def test_grade_stub():
         "subject": "math",
         "vision_provider": VisionProvider.QWEN3.value,
     }
-    resp = client.post("/api/v1/grade", json=payload)
+    
+    from unittest.mock import patch, AsyncMock, MagicMock
+    
+    # Mock the autonomous agent to avoid real execution/blocking
+    mock_result = MagicMock()
+    mock_result.status = "done"
+    mock_result.summary = "mock summary"
+    mock_result.results = []
+    mock_result.warnings = []
+    mock_result.wrong_items = []
+    mock_result.ocr_text = "mock OCR"
+    
+    with patch("homework_agent.api.grade.run_autonomous_grade_agent", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = mock_result
+        resp = client.post("/api/v1/grade", json=payload)
+        
     assert resp.status_code == 200
     assert resp.headers.get("X-Request-Id")
     data = resp.json()
@@ -27,13 +44,28 @@ def test_grade_stub():
 
 
 def test_chat_stub_sse():
+    session_id = f"sess_test_{uuid.uuid4().hex[:8]}"
     payload = {
         "history": [],
         "question": "why?",
         "subject": "math",
-        "session_id": "sess-1",
+        "session_id": session_id,
     }
-    resp = client.post("/api/v1/chat", json=payload)
+    
+    from unittest.mock import patch, MagicMock
+    
+    # Mock LLMClient to avoid real calls
+    with patch("homework_agent.api.chat.LLMClient") as MockLLM:
+        # Mock the stream method to yield bytes
+        async def mock_stream(*args, **kwargs):
+            yield b'event: chat\ndata: {}\n\n'
+            yield b'event: done\ndata: {"status":"done"}\n\n'
+            
+        instance = MockLLM.return_value
+        instance.socratic_tutor_stream.side_effect = mock_stream
+        
+        resp = client.post("/api/v1/chat", json=payload)
+    
     assert resp.status_code == 200
     assert resp.headers.get("X-Request-Id")
     assert resp.headers["content-type"].startswith("text/event-stream")

@@ -23,7 +23,8 @@ cache_store: BaseCache = get_cache_store()
 # 常量
 # 取消硬性 5 轮上限；仅保留计数用于提示递进
 MAX_SOCRATIC_TURNS = 999999
-SESSION_TTL_HOURS = 24 * 7
+# 会话生命周期：以 API_CONTRACT 为准（默认 24 小时）。
+SESSION_TTL_HOURS = 24
 IDP_TTL_HOURS = 24
 SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
 

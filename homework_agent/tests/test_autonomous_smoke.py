@@ -2,7 +2,7 @@
 Smoke test for Autonomous Agent with relaxed timeout validation.
 
 This test verifies the core Loop flow can complete successfully with
-relaxed timeout settings (>=300s) as specified in implementation_plan.md.
+relaxed timeout settings (>=300s) as specified in docs/reports/archived/implementation_plan_autonomous_grade_agent.md.
 """
 
 from __future__ import annotations

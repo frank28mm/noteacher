@@ -341,7 +341,9 @@ def test_aggregator_fallback_to_original_when_no_figure(monkeypatch):
         return SimpleNamespace(text=json.dumps(payload, ensure_ascii=False))
 
     monkeypatch.setattr(
-        aa, "_compress_image_if_needed", lambda url, max_side=1280: f"compressed:{url}"
+        aa,
+        "_compress_image_if_needed_with_metrics",
+        lambda url, max_side=1280: (f"compressed:{url}", {}),
     )
     monkeypatch.setattr(
         LLMClient, "generate_with_images", _fake_generate_with_images, raising=False
@@ -397,7 +399,9 @@ def test_aggregator_fallback_to_original_when_figure_too_small(monkeypatch):
         return SimpleNamespace(text=json.dumps(payload, ensure_ascii=False))
 
     monkeypatch.setattr(
-        aa, "_compress_image_if_needed", lambda url, max_side=1280: f"compressed:{url}"
+        aa,
+        "_compress_image_if_needed_with_metrics",
+        lambda url, max_side=1280: (f"compressed:{url}", {}),
     )
     monkeypatch.setattr(
         LLMClient, "generate_with_images", _fake_generate_with_images, raising=False
