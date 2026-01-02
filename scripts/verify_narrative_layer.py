@@ -10,7 +10,8 @@ Verifies that the Narrative Layer implementation is working correctly by:
 5. Verifying the generated report in database
 """
 
-import os
+# ruff: noqa: E402
+
 import sys
 import logging
 from pathlib import Path
@@ -113,7 +114,7 @@ def check_llm_generate_report():
             logger.error("  ✗ generate_report returned empty narrative_md")
             return False
 
-        logger.info(f"  ✓ generate_report succeeded")
+        logger.info("  ✓ generate_report succeeded")
         logger.info(f"    - narrative_md length: {len(result.narrative_md)} chars")
         logger.info(f"    - summary_json keys: {list((result.summary_json or {}).keys())}")
         logger.info(f"    - Preview: {result.narrative_md[:200]}...")

@@ -6,7 +6,7 @@ import ast
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

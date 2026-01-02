@@ -1,19 +1,19 @@
-
 import sys
 import os
 import logging
+
+# ruff: noqa: E402
+
 # Add project root to python path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from homework_agent.services.vision import VisionClient
 from homework_agent.models.schemas import ImageRef, VisionProvider
-from homework_agent.utils.settings import get_settings
 
 logging.basicConfig(level=logging.INFO)
 
 def test_qwen_vision():
     client = VisionClient()
-    settings = get_settings()
     
     print("\n--- Testing Qwen3-VL Vision (SiliconFlow) ---")
     print(f"Model configured: {client.silicon_model}")

@@ -6,7 +6,8 @@ Bypasses worker's UPDATE lock issues by directly processing a pending job.
 This demonstrates that the Narrative Layer logic works correctly.
 """
 
-import os
+# ruff: noqa: E402
+
 import sys
 import logging
 from pathlib import Path
@@ -153,8 +154,6 @@ def main():
     logger.info("=" * 60)
     logger.info("Direct Narrative Layer Test")
     logger.info("=" * 60)
-
-    storage = get_storage_client()
 
     # Find a pending job
     resp = (

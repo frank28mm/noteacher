@@ -6,7 +6,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 
 def _load_json(path: Path) -> Dict[str, Any]:

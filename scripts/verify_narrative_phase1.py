@@ -6,7 +6,8 @@ This script verifies the Narrative Layer implementation using Phase 1 data schem
 (submissions table instead of question_attempts/question_steps which don't exist yet).
 """
 
-import os
+# ruff: noqa: E402
+
 import sys
 import logging
 from pathlib import Path

@@ -5,7 +5,7 @@ import argparse
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
 def _extract_json_obj(line: str) -> Optional[Dict[str, Any]]:
@@ -204,4 +204,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

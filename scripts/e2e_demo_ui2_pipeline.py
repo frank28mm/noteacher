@@ -313,7 +313,7 @@ def main() -> int:
     report_content = report_row.get("content") if isinstance(report_row, dict) else None
 
     md = []
-    md.append(f"# Demo UI 2.0 一次性联调报告\n")
+    md.append("# Demo UI 2.0 一次性联调报告\n")
     md.append(f"- generated_at: `{_now_iso()}`")
     md.append(f"- api_base: `{args.api_base}`")
     md.append(f"- image_file: `{args.image_file}`")

@@ -1,8 +1,6 @@
-import os
 import sys
 import time
 import requests
-import json
 
 API_BASE = "http://127.0.0.1:8000/api/v1"
 IMAGE_PATH = "test_image.jpg"
@@ -47,14 +45,13 @@ def run_grade(variant):
             resp = r.json()
             status = resp.get("status")
             summary = str(resp.get("summary"))[:50]
-            timings = resp.get("timings_ms", {}) # Assuming response might return timings, or we check logs
             print(f"Done. Status: {status}")
             print(f"Summary: {summary}...")
             print(f"Client Elapsed: {elapsed:.2f}s")
         else:
             print(f"Failed: {r.status_code} {r.text}")
     except Exception as e:
-         print(f"Grade Exception: {e}")
+        print(f"Grade Exception: {e}")
 
 if __name__ == "__main__":
     variants = ["url", "proxy", "data_url_first_page"]

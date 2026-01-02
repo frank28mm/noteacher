@@ -7,12 +7,11 @@ import base64
 import csv
 import json
 import mimetypes
-import os
 import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 # Register HEIF/HEIC opener for PIL (iPhone photos often use HEIC even with .jpg extension)
 try:
@@ -213,8 +212,8 @@ async def _run_one(
     timeout_s: Optional[float],
     experiments: Dict[str, Any],
 ) -> InventoryRunMetrics:
-    from homework_agent.models.schemas import ImageRef, Subject  # noqa: WPS433
-    from homework_agent.services.autonomous_agent import run_autonomous_grade_agent  # noqa: WPS433
+    from homework_agent.models.schemas import ImageRef, Subject
+    from homework_agent.services.autonomous_agent import run_autonomous_grade_agent
 
     subj = Subject.MATH if subject == "math" else Subject.ENGLISH
     refs = [ImageRef(**r) for r in image_refs]
@@ -394,4 +393,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

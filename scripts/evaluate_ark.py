@@ -1,9 +1,5 @@
-import os
-import sys
 import time
 import requests
-import json
-import argparse
 
 API_BASE = "http://127.0.0.1:8000/api/v1"
 # Use a challenging image if possible (e.g. rotated or small)
@@ -50,7 +46,7 @@ def run_test(enable_process: bool):
         "upload_id": upload_id
     }
     
-    print(f"Requesting /grade...")
+    print("Requesting /grade...")
     start = time.time()
     try:
         r = requests.post(f"{API_BASE}/grade", json=payload)

@@ -171,8 +171,8 @@ async def _run_one(
         raise ValueError("missing input object")
 
     # Import late so script can still lint/run without deps if not executed.
-    from homework_agent.models.schemas import ImageRef, Subject  # noqa: WPS433
-    from homework_agent.services.autonomous_agent import run_autonomous_grade_agent  # noqa: WPS433
+    from homework_agent.models.schemas import ImageRef, Subject
+    from homework_agent.services.autonomous_agent import run_autonomous_grade_agent
 
     refs_raw = _image_refs_from_sample(inp)
     refs = [ImageRef(**r) for r in refs_raw]
