@@ -13,6 +13,7 @@ import httpx
 import gradio as gr
 from dotenv import load_dotenv
 import inspect
+from contextlib import ExitStack
 
 from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple
 from homework_agent.utils.settings import get_settings
@@ -258,25 +259,41 @@ def _update_process_summary(
 
 
 def upload_to_backend(
-    file_path: str, *, session_id: Optional[str], auth_token: Optional[str]
+    file_path: str | List[str], *, session_id: Optional[str], auth_token: Optional[str]
 ) -> Dict[str, Any]:
-    """上传文件到后端 /uploads，并返回 {upload_id, page_image_urls, ...}。"""
-    if not file_path or not os.path.exists(file_path):
+    """上传文件到后端 /uploads，并返回 {upload_id, page_image_urls, ...}。
+
+    支持单文件或多文件（多文件会合并为一次 submission，返回同一个 upload_id）。
+    """
+    paths: List[str] = []
+    if isinstance(file_path, list):
+        paths = [str(p) for p in file_path if str(p).strip()]
+    else:
+        paths = [str(file_path)]
+
+    if not paths:
         raise ValueError("文件不存在")
-
-    # 检查文件大小 (<20MB)
-    file_size = os.path.getsize(file_path)
-    if file_size > 20 * 1024 * 1024:
-        raise ValueError(f"文件超过 20MB: {file_size / 1024 / 1024:.2f}MB")
-
-    filename = os.path.basename(file_path)
-    content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+    for p in paths:
+        if not p or not os.path.exists(p):
+            raise ValueError(f"文件不存在: {p}")
+        # 检查文件大小 (<20MB each)
+        file_size = os.path.getsize(p)
+        if file_size > 20 * 1024 * 1024:
+            raise ValueError(f"文件超过 20MB: {p}")
     params: Dict[str, str] = {}
     if session_id:
         params["session_id"] = str(session_id)
 
-    with open(file_path, "rb") as f:
-        files = {"file": (filename, f, content_type)}
+    with ExitStack() as stack:
+        # Backend accepts repeated "file" fields (List[UploadFile]).
+        files: List[Tuple[str, Tuple[str, Any, str]]] = []
+        for p in paths:
+            filename = os.path.basename(p)
+            content_type = (
+                mimetypes.guess_type(p)[0] or "application/octet-stream"
+            )
+            f = stack.enter_context(open(p, "rb"))
+            files.append(("file", (filename, f, content_type)))
         with httpx.Client(timeout=120.0) as client:
             r = client.post(
                 f"{API_BASE_URL}/uploads",
@@ -1123,6 +1140,52 @@ def _render_timing_panel_md(
     return "\n".join(lines).strip() + "\n"
 
 
+def _render_timing_summary_md(
+    *,
+    upload_id: str,
+    session_id: str,
+    timing_ctx: Dict[str, Any],
+) -> str:
+    ctx = timing_ctx or {}
+    upload_ms = ctx.get("upload_ms")
+    grade_submit_ms = ctx.get("grade_submit_ms")
+    grade_wall_ms = ctx.get("grade_wall_ms")
+    report_wall_ms = ctx.get("report_wall_ms")
+
+    e2e_grade_ms = None
+    try:
+        if upload_ms is not None and grade_submit_ms is not None and grade_wall_ms is not None:
+            e2e_grade_ms = int(upload_ms) + int(grade_submit_ms) + int(grade_wall_ms)
+    except Exception:
+        e2e_grade_ms = None
+
+    e2e_full_ms = None
+    try:
+        if e2e_grade_ms is not None and report_wall_ms is not None:
+            e2e_full_ms = int(e2e_grade_ms) + int(report_wall_ms)
+    except Exception:
+        e2e_full_ms = None
+
+    lines: List[str] = []
+    lines.append("### ⏱️ 用时概览")
+    if upload_id:
+        lines.append(f"- submission_id: `{upload_id}`")
+    if session_id:
+        lines.append(f"- session_id: `{session_id}`")
+    lines.append("")
+    lines.append(f"- 上传：`{_fmt_ms(upload_ms)}`")
+    lines.append(f"- grade（排队+执行）：`{_fmt_ms(grade_wall_ms)}`")
+    lines.append(f"- 用户感知 E2E（提交→看到 grade 完成）：`{_fmt_ms(e2e_grade_ms)}`")
+    if report_wall_ms is not None:
+        lines.append(f"- report：`{_fmt_ms(report_wall_ms)}`")
+        lines.append(f"- 用户感知 E2E（含报告）：`{_fmt_ms(e2e_full_ms)}`")
+    lines.append("")
+    lines.append(
+        "（已隐藏详细分段；需要排查时再展开“高级：调试指标”）"
+    )
+    return "\n".join(lines).strip() + "\n"
+
+
 async def _call_report_job(job_id: str, *, auth_token: Optional[str]) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get(
@@ -1157,10 +1220,21 @@ async def submit_job_handler(img_path, auth_token):
     provider = "doubao"
     llm_provider = "ark"
 
-    if hasattr(img_path, "name"):
-        img_path = img_path.name
+    paths: List[str] = []
+    if isinstance(img_path, list):
+        for it in img_path:
+            if hasattr(it, "name"):
+                paths.append(str(it.name))
+            else:
+                paths.append(str(it))
+    else:
+        if hasattr(img_path, "name"):
+            paths = [str(img_path.name)]
+        else:
+            paths = [str(img_path)]
 
-    if not img_path:
+    paths = [p for p in paths if p and str(p).strip()]
+    if not paths:
         raise gr.Error("请先上传图片")
 
     auth_token = (auth_token or "").strip() or None
@@ -1175,7 +1249,7 @@ async def submit_job_handler(img_path, auth_token):
         t0 = _now_m()
         upload_resp = await asyncio.to_thread(
             upload_to_backend,
-            img_path,
+            paths if len(paths) > 1 else paths[0],
             session_id=session_id,
             auth_token=auth_token,
         )
@@ -1217,11 +1291,12 @@ async def submit_job_handler(img_path, auth_token):
         "",  # report_job_id_state (reset)
         "",  # report_id_state (reset)
         gr.update(visible=True),  # Show Monitor Panel
-        f"✅ 作业已提交 (Async)\n\n- upload_id: `{upload_id}`\n- session_id: `{session_id_out}`\n- job_id: `{job_id}`",
+        f"✅ 作业已提交 (Async)\n\n- files: `{len(paths)}`\n- upload_id: `{upload_id}`\n- session_id: `{session_id_out}`\n- job_id: `{job_id}`",
         gr.update(
             value="已提交任务，等待 grade_worker ...", visible=True
         ),
-        "",  # timings_md (reset)
+        "",  # timings_summary_md (reset)
+        "",  # timings_detail_md (reset)
         "",  # grade_result_md (reset)
         "",  # class_report_md (reset)
         gr.update(interactive=False, value="生成学业报告"),
@@ -1271,7 +1346,7 @@ async def poll_job_status(
 ):
     """
     Polls the status of the job and updates the UI components.
-    Returns: (stage1_html, stage2_html, timings_md, grade_result_md, class_report_md, logs, report_job_id, report_id, btn_gen_report_interactive, timing_ctx)
+    Returns: (stage1_html, stage2_html, timings_summary_md, timings_detail_md, grade_result_md, class_report_md, logs, report_job_id, report_id, btn_gen_report_interactive, timing_ctx)
     """
     ctx = dict(timing_ctx or {})
     now_m = _now_m()
@@ -1280,6 +1355,7 @@ async def poll_job_status(
         return (
             '<div style="color: gray">⏳ 等待中</div>',
             '<div style="color: gray">⏳ 等待中</div>',
+            "",
             "",
             "",  # grade_result_md
             "",  # class_report_md
@@ -1427,12 +1503,17 @@ async def poll_job_status(
         except Exception:
             pass
 
-    timings_md = _render_timing_panel_md(
+    timings_detail_md = _render_timing_panel_md(
         upload_id=str(upload_id or "").strip(),
         session_id=str(session_id or "").strip(),
         timing_ctx=ctx,
         grade_job=grade_job if isinstance(grade_job, dict) else None,
         report_job=report_job if isinstance(report_job, dict) else None,
+    )
+    timings_summary_md = _render_timing_summary_md(
+        upload_id=str(upload_id or "").strip(),
+        session_id=str(session_id or "").strip(),
+        timing_ctx=ctx,
     )
 
     logs_lines: List[str] = []
@@ -1450,7 +1531,8 @@ async def poll_job_status(
     return (
         s1_html, 
         s2_html, 
-        timings_md,
+        timings_summary_md,
+        timings_detail_md,
         grade_report_md, 
         class_report_md, 
         logs, 
@@ -1806,13 +1888,21 @@ def create_demo():
 
 
         with gr.Tabs():
-            with gr.Tab("🚀 工作台 (Workflow Console)"):
-                # ================= Input Area =================
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        input_img = gr.File(
-                            label="📤 上传图片", file_types=["image"], height=200
-                        )
+                with gr.Tab("🚀 工作台 (Workflow Console)"):
+                    # ================= Input Area =================
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            file_kwargs: Dict[str, Any] = {
+                                "label": "📤 上传图片（可多选）",
+                                "file_types": ["image"],
+                                "height": 200,
+                            }
+                            if (
+                                "file_count"
+                                in inspect.signature(gr.File.__init__).parameters
+                            ):
+                                file_kwargs["file_count"] = "multiple"
+                            input_img = gr.File(**file_kwargs)
                         # Simplified: Hardcoded defaults (math/doubao/ark)
                         # subject_dropdown = gr.Dropdown(...) -> Removed
                         # provider_dropdown = gr.Dropdown(...) -> Removed
@@ -1835,7 +1925,9 @@ def create_demo():
                         )
                     
                     btn_gen_report = gr.Button("生成学业报告", variant="secondary", interactive=False)
-                    timings_md = gr.Markdown(value="")
+                    timings_summary_md = gr.Markdown(value="")
+                    with gr.Accordion("高级：调试指标（默认隐藏）", open=False):
+                        timings_detail_md = gr.Markdown(value="")
                     logs_box = gr.Textbox(
                         label="System Logs", lines=5, interactive=False
                     )
@@ -1874,7 +1966,8 @@ def create_demo():
                         monitor_group,
                         submission_status_md,
                         logs_box,
-                        timings_md,
+                        timings_summary_md,
+                        timings_detail_md,
                         grade_result_md,
                         class_report_md,
                         btn_gen_report,
@@ -1910,7 +2003,8 @@ def create_demo():
                     outputs=[
                         s1_html,
                         s2_html,
-                        timings_md,
+                        timings_summary_md,
+                        timings_detail_md,
                         grade_result_md,
                         class_report_md,
                         logs_box,

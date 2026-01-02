@@ -21,7 +21,7 @@ router = APIRouter()
 @router.post("/uploads", status_code=status.HTTP_200_OK)
 async def upload_files(
     request: Request,
-    file: UploadFile = File(...),
+    file: List[UploadFile] = File(...),
     session_id: Optional[str] = None,
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -39,40 +39,54 @@ async def upload_files(
         getattr(request, "state", None), "request_id", None
     ) or get_request_id_from_headers(request.headers)
     upload_id = f"upl_{uuid.uuid4().hex[:16]}"
-    filename = (file.filename or "").strip() or "upload"
+    files_in = [f for f in (file or []) if f is not None]
+    first = files_in[0] if files_in else None
+    filename0 = (getattr(first, "filename", None) or "").strip() if first else ""
+    content_type0 = (getattr(first, "content_type", None) or "").strip() if first else ""
+    filename = filename0 or "upload"
+    if len(files_in) > 1:
+        filename = f"{filename} (+{len(files_in) - 1} files)"
 
-    # Keep suffix for mime sniffing (pdf/heic/jpg/png etc.)
-    suffix = Path(filename).suffix
-    if not suffix:
-        suffix = ".bin"
-
+    tmp_paths: List[str] = []
+    total_size = 0
+    urls: List[str] = []
+    storage = get_storage_client()
     try:
-        raw = await file.read()
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=f"read upload failed: {e}"
-        )
-
-    if not raw:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="empty file"
-        )
-    if len(raw) > 20 * 1024 * 1024:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="file exceeds 20MB"
-        )
-
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(raw)
-            tmp.flush()
-            tmp_path = tmp.name
-
-        storage = get_storage_client()
         prefix = f"users/{user_id}/uploads/{upload_id}/"
-        # For doubao compatibility, keep min_side conservative; heic/pdf conversion handled inside client.
-        urls: List[str] = storage.upload_files(tmp_path, prefix=prefix, min_side=14)
+        # Keep small and predictable: max 8 files per submission (PDF can still expand into pages).
+        if len(files_in) > 8:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="too many files (max 8)",
+            )
+
+        for f in files_in:
+            fname = (f.filename or "").strip() or "upload"
+            suffix = Path(fname).suffix or ".bin"
+            try:
+                raw = await f.read()
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"read upload failed: {e}",
+                )
+            if not raw:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail="empty file"
+                )
+            if len(raw) > 20 * 1024 * 1024:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail="file exceeds 20MB"
+                )
+            total_size += int(len(raw))
+
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(raw)
+                tmp.flush()
+                tmp_paths.append(tmp.name)
+
+            # For doubao compatibility, keep min_side conservative; heic/pdf conversion handled inside client.
+            urls.extend(storage.upload_files(tmp.name, prefix=prefix, min_side=14))
     except HTTPException:
         raise
     except Exception as e:
@@ -93,11 +107,12 @@ async def upload_files(
             detail="Internal server error",
         )
     finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception as e:
-                logger.debug(f"Failed to clean up temp file: {e}")
+        for tmp_path in tmp_paths:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception as e:
+                    logger.debug(f"Failed to clean up temp file: {e}")
 
     # Best-effort: persist metadata to Supabase Postgres (requires table created via supabase/schema.sql).
     try:
@@ -106,8 +121,8 @@ async def upload_files(
             "user_id": user_id,
             "session_id": session_id,
             "filename": filename,
-            "content_type": file.content_type,
-            "size_bytes": len(raw),
+            "content_type": content_type0 or "multipart/mixed",
+            "size_bytes": int(total_size),
             "page_image_urls": urls,
         }
         storage.client.table("user_uploads").insert(record).execute()
@@ -125,8 +140,8 @@ async def upload_files(
             request_id=request_id,
             page_image_urls=urls,
             filename=filename,
-            content_type=file.content_type,
-            size_bytes=len(raw),
+            content_type=content_type0 or "multipart/mixed",
+            size_bytes=int(total_size),
         )
     except Exception as e:
         logger.debug(f"create_submission_on_upload failed (best-effort): {e}")
