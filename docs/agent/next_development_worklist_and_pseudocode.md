@@ -539,6 +539,33 @@ while True:
 
 ---
 
+#### WL‑P1‑006：多页作业“逐页可用”展示 + 可选进入辅导（方案 A：单 job + partial 输出）
+
+**为什么**：多页作业若必须等全量结束才出结果，用户会“干等”；我们要做可持续运营闭环（作业→错题→辅导→复盘→报告），因此需要把批改过程变成“逐页可用”，并允许用户对已完成页先进入辅导，而不影响后台继续处理后续页。
+
+**执行计划入口（唯一）**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑A：A‑6）。
+
+**前端用户感受（Demo UI 2.0）**：
+- 上传 N 张图后立刻出现 N 个页卡（第 1/N…N/N）。
+- 第 1 页先出摘要（错题数/待确认/needs_review），不等后续页。
+- 每页卡片有“进入辅导（本页）”按钮（可选，不强制）。
+- 全部完成后显示“本次 submission 汇总”与“生成学业报告”入口。
+
+**后端交付物（最小契约）**：
+- `/jobs/{job_id}` 在 `running` 时返回（除现有字段外）：
+  - `total_pages`、`done_pages`
+  - `page_summaries[]`：按页递增的摘要（`page_index, wrong_count, uncertain_count, needs_review, warnings(optional)`）
+- `qbank:{session_id}` / `GET /session/{session_id}/qbank`：
+  - `meta.pages_total/pages_done`（用于 UI 与 chat 边界提示）
+  - 已完成页的证据链可被 chat 消费（保证“只基于已完成页回答”可实现）
+
+**验收标准**：
+- UI：第 1 页完成后 1 次 polling 内可见该页摘要；X/N 时显示进度，不会“全黑屏等待”。
+- Chat：X/N 时提问，回复必须标注“仅基于已完成页（1..X）”，且不得引用未完成页内容。
+- 成本/稳定性：并发（grade + chat）不应显著提高失败率；若 provider 限流，需要有可见提示与降级策略。
+
+---
+
 #### WL‑P1‑005：模型 B（FastAPI 唯一入口）与生产安全开关
 
 **为什么**：产品方向是“前端只调用本服务 API”；开发期 Supabase 只是临时实现，后续要可替换到国内云 DB/OSS。需要先固化安全边界与配置护栏，避免 dev 配置误上公网。

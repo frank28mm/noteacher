@@ -115,6 +115,36 @@
   - 默认快路径仍是 `qindex_only + url`，但当命中 `visual_risk`（OCR 关键字）或存在 slices 时，切换到“带图 + image_process”（宁可不确定也不误判）。
   - `full` 仅用于“离线复核/正确性上限”，避免把 ~70–100s 的预处理成本带入默认快路径。
 
+#### A‑6 多页作业“逐页可用”体验（方案 A：单 job + partial 输出）
+
+> 背景：多页作业若“必须等全量结束才出结果”，用户体感会很差；而豆包 App 虽快但不严谨，我们的差异化是“可解释 + 可控不确定”，因此更需要把等待变成“逐页可用 + 可选进入辅导”。
+>
+> 原则：**仍然是 1 个 submission / 1 个 grade job**，只是让 job 在 `running` 期间持续暴露“已完成页”的最小摘要；辅导（/chat）只基于已完成页的证据回答。
+
+- 前端体验目标（Demo UI 2.0）
+  - 上传 N 张图后立即显示 `1/N..N/N` 页卡（缩略图/页号）。
+  - 第 1 页结果就绪后立即渲染“第 1 页摘要”（错题数/待确认数/needs_review），不等待后续页完成。
+  - 每页卡片提供 **“进入辅导（本页）”**按钮（用户可选进入，不强制）。
+  - 全部页完成后再展示“本次 submission 汇总”（总错题/待确认/常见错误类型/知识点摘要）与“生成学业报告”入口。
+
+- 后端契约与数据来源（最小改动）
+  - `/jobs/{job_id}`（Redis job 状态）在 `running` 时允许返回：
+    - `total_pages`（int）、`done_pages`（int）
+    - `page_summaries`（list，按 `page_index` 递增；每项包含：`page_index, wrong_count, uncertain_count, needs_review, warnings(optional)`）
+  - `qbank:{session_id}` / `GET /session/{session_id}/qbank`：
+    - `meta.pages_total/pages_done`（用于 UI 与 chat 边界提示）
+    - 逐页追加的 `questions`/`wrong_items` 或等价结构（至少保证“已完成页”的证据链可用于 chat）。
+
+- 关键约束（稳定性/成本）
+  - chat 与 grade 解耦：用户在 grade 进行中提问，不应阻塞 grade job；但必须在 UI 提示“当前仅基于已完成页回答”。
+  - 成本护栏：允许并发（grade worker + chat LLM）但要有并发/速率控制，避免 provider 限流导致失败率上升。
+  - 输出体积：`page_summaries` 只放摘要，避免把完整错题/证据塞进 job payload（详细数据仍以 `qbank`/DB 为准）。
+
+- 验收
+  - 多页作业：第 1 页结果出现后，UI 在下一次 polling 内展示该页摘要（无需等全量完成）。
+  - chat：在只完成 X/N 时提问，回复必须显式标注“当前基于已完成页（1..X）”，且不引用未完成页内容。
+  - 全量完成后，最终 grade 结果与现在的“一次性汇总”口径一致（只是更早可见部分结果）。
+
 ### WS‑B：Supabase Schema/RLS/权限（支撑 Worker 稳定运行）
 
 **决策偏好**：因为现阶段数据可丢，可选择“重置到真源 schema + 增量补齐缺失表/字段”。但**禁止**再引入“DROP SCHEMA + 迁移文件强对齐”这套会导致口径漂移的方案。

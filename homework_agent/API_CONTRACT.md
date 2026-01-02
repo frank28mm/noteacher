@@ -161,7 +161,7 @@ X-Request-Id: req-123456
 ```json
 {
   "job_id": "job-789xyz",
-  "status": "done",  // processing | done | failed
+  "status": "done",  // queued | processing | running | done | failed
   "result": {
     "wrong_items": [/* 完整结果 */],
     "summary": "...",
@@ -173,7 +173,31 @@ X-Request-Id: req-123456
   },
   "error": null,
   "created_at": "2025-01-06T10:30:00Z",
-  "updated_at": "2025-01-06T10:30:45Z"
+  "updated_at": "2025-01-06T10:30:45Z",
+  "total_pages": null,
+  "done_pages": null,
+  "page_summaries": null
+}
+```
+
+**补充（多页逐页可用，方案 A）**：
+- 当 submission 为多页/多图时，服务端允许在 `status=running` 期间返回“已完成页”的最小摘要，用于前端逐页展示（不必等全量结束）。
+- 这些字段是 **可选** 的：单页任务可能为 `null` 或缺失；多页任务也可能在早期尚未填充。
+
+#### 示例：running（多页 partial）
+```json
+{
+  "job_id": "job-789xyz",
+  "status": "running",
+  "result": null,
+  "error": null,
+  "created_at": "2025-01-06T10:30:00Z",
+  "updated_at": "2025-01-06T10:30:12Z",
+  "total_pages": 3,
+  "done_pages": 1,
+  "page_summaries": [
+    {"page_index": 1, "wrong_count": 3, "uncertain_count": 1, "needs_review": true}
+  ]
 }
 ```
 
