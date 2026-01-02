@@ -45,7 +45,7 @@
 
 **为什么**：闭环不是“批改一次就结束”，必须能沉淀错题、允许纠偏、支持长期复盘。
 
-**实施方案（Design Doc）**：`docs/design/mistakes_reports_learning_analyst_design.md`
+**实施方案（Design Doc）**：`docs/archive/design/mistakes_reports_learning_analyst_design.md`
 
 **交付物**：
 - 数据层：`submissions`（批改快照）+ `mistake_exclusions`（排除语义）可回滚迁移（`migrations/*.sql`）
@@ -234,6 +234,56 @@ async def call_llm_with_budget(*, stage: str, prompt: str, budget, request_ctx):
 
 ---
 
+#### WL‑P0‑007：/grade 性能拆解与输入策略对比（url/proxy/data_url + image_process）
+
+**为什么**：当前 `/grade` 在 Demo 场景下出现“分钟级耗时”，且与豆包 App 的用户体验差距极大；我们必须先把“慢到底慢在哪”拆成可量化分项，并用可复跑脚本钉住基线，否则后续任何优化/策略切换都不可验证。
+
+**执行计划入口（唯一）**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑A，尤其 A‑2/A‑4）。
+
+**交付物**：
+- `/grade` 分项时延口径固化：`grade_total_duration_ms` + `timings_ms`（preprocess/compress/llm/db/queue_wait 等）
+- 可复跑脚本：`scripts/bench_grade_variants_async.py`（输出 `docs/reports/grade_perf_variants_*.md/.json`）
+- 维度对比（分两档，避免“每次都跑 N=10”拖慢迭代）：
+  - 日常迭代：每个 variant 先跑 **N=5**，输出 `p50 + max + 失败率/needs_review率`（用于快速判断方向）
+  - 决策/验收：再补一轮 **N=5**（不同时间段/清空队列或隔离前缀），两轮合并视作 **≈N=10**，再看 `p50/p95`
+  - `GRADE_IMAGE_INPUT_VARIANT=auto|url|proxy|data_url_first_page|data_url_on_small_figure`
+  - `ARK_IMAGE_PROCESS_ENABLED=0/1`
+  - `AUTONOMOUS_PREPROCESS_MODE=off|qindex_only|full`
+- 实验隔离策略：优先用新的 `CACHE_PREFIX` / `DEMO_USER_ID` 隔离实验（优先级高于 `redis-cli FLUSHDB`）
+
+**验收标准**：
+- 在“无排队干扰”（队列为空/隔离前缀）前提下：同一张图 `p50 < 60s`，`p95 < 120s`（以 `grade_total_duration_ms` 为准，且同时记录分项）
+- 结论明确：最大慢点来自哪一段，以及下一步默认策略推荐（例如快路径默认 `AUTONOMOUS_PREPROCESS_MODE=qindex_only`，必要时回退 `off`）
+- 每次变更都能用相同脚本复跑并在 `docs/reports/` 留档
+
+**最新证据**（URL-only + qindex_only 快路径）：
+- `docs/reports/grade_perf_url_n3_fast_finalize_12000_20260102.md`
+- `docs/reports/grade_perf_fast_path_summary_20260102.md`
+- 视觉题（A‑5，N=5 对比 + 触发规则固化）：`docs/reports/grade_perf_visual_validation_20260102.md`
+
+---
+
+#### WL‑P0‑008：Worker service role key 治理（CI 防泄露 + 运行手册）
+
+**为什么**：worker 需要稳定写库（抢占锁/更新状态/回填事实表），在 RLS 下最可靠的路线是使用 service role；但 service role key 一旦泄露风险极高，因此必须把“只在运行环境使用 + CI 防误提交 + 明确运行手册”变成强约束。
+
+**执行计划入口（唯一）**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑B/WS‑C）。
+
+**交付物**：
+- 运行手册口径：
+  - service role key 只存在于 worker 进程环境变量（Secret Manager/部署平台），**禁止**写入仓库/镜像层/前端
+  - API 仍使用 anon key（开发）或 auth（生产），与 worker 权限隔离
+- CI 防误提交（已落地，需纳入执行检查）：
+  - `scripts/check_no_secrets.py`
+  - `.github/workflows/ci.yml` 中强制执行
+- Key 轮换预案（最小版本）：发生疑似泄露/误提交时的轮换步骤与影响评估
+
+**验收标准**：
+- 任意 PR 都会运行 `python3 scripts/check_no_secrets.py`，且能拦截 `.env/.env.example` 中的 service role key
+- worker 在 service role 下可完成：`report_jobs` 抢占锁 + 状态更新 +（如启用）facts 回填写入
+
+---
+
 #### WL‑P0‑005：工具层统一契约（ToolResult + 错误恢复字段 + 输出净化 + HITL）
 
 **为什么**：动态工具编排是 agent 的独特风险；工具越多越容易“部分失败/脏输出/不可恢复”。
@@ -346,11 +396,11 @@ def log_run_versions(request_ctx, *, prompt_meta, model_meta, thresholds):
 
 **为什么**：报告是“复盘→运营”的核心交付物，必须从 grade/chat 解耦为独立链路（异步、可重跑、可审计）。
 
-**实施方案（Design Doc）**：`docs/design/mistakes_reports_learning_analyst_design.md`
+**实施方案（Design Doc）**：`docs/archive/design/mistakes_reports_learning_analyst_design.md`
 
 **交付物**：
 - 数据表（建议）：
-  - `report_jobs`：异步任务（pending/running/done/failed）
+  - `report_jobs`：异步任务（queued/running/done/failed；兼容 pending）
   - `reports`：报告内容（JSON + 可读摘要），可按 `user_id/time_range` 查询
 - Subagent（学情分析师）：
   - 输入：一段时间范围内 submissions（含 wrong_items/knowledge_tags/severity/judgment_basis）+ `mistake_exclusions`

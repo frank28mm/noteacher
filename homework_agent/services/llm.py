@@ -207,7 +207,7 @@ class LLMResult(BaseModel):
 
     text: str = Field(..., description="模型返回的文本内容")
     raw: Dict[str, Any] = Field(default_factory=dict, description="原始API响应")
-    usage: Optional[Dict[str, int]] = Field(None, description="token使用统计")
+    usage: Optional[Dict[str, Any]] = Field(None, description="token使用统计")
     response_id: Optional[str] = Field(
         None,
         description="Provider-side response_id (Ark Responses API). Used for audit via GET /responses/{response_id}.",
@@ -261,6 +261,7 @@ class SocraticTutorResult(BaseModel):
 
 class ReportResult(BaseModel):
     """学情报告生成结果"""
+
     narrative_md: str = Field(..., description="Markdown报告正文")
     summary_json: Dict[str, Any] = Field(default_factory=dict, description="结构化摘要")
 
@@ -632,7 +633,9 @@ class LLMClient:
                             if isinstance(steps, list) and steps:
                                 allowed = {s.value for s in Severity}
                                 max_steps = int(
-                                    getattr(get_settings(), "max_math_steps_per_question", 5)
+                                    getattr(
+                                        get_settings(), "max_math_steps_per_question", 5
+                                    )
                                 )
                                 non_correct = []
                                 for s in steps:
@@ -1390,13 +1393,72 @@ class LLMClient:
         """
         client = self._get_client(provider)
 
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-
         try:
             model = self.silicon_model if provider == "silicon" else self.ark_model
+            if provider == "ark":
+                # Prefer Responses API for Ark to keep behavior consistent with multimodal calls
+                # and to get a provider-side response_id for audit.
+                instructions = str(system_prompt or "").strip()
+                content_blocks = [{"type": "input_text", "text": str(prompt or "")}]
+                kwargs: Dict[str, Any] = {
+                    "model": model,
+                    "instructions": instructions,
+                    "input": [{"role": "user", "content": content_blocks}],
+                    "temperature": float(temperature),
+                    "max_output_tokens": int(max_tokens),
+                }
+                try:
+                    resp = client.responses.create(**kwargs)
+                except TypeError:
+                    # Older SDKs may not support some params.
+                    kwargs.pop("temperature", None)
+                    kwargs.pop("max_output_tokens", None)
+                    resp = client.responses.create(**kwargs)
+
+                resp_dict = resp.to_dict()
+                response_id = None
+                try:
+                    response_id = str(
+                        getattr(resp, "id", None) or resp_dict.get("id") or ""
+                    ).strip()
+                except Exception:
+                    response_id = None
+                response_id = response_id if response_id else None
+
+                text_out = getattr(resp, "output_text", None)
+                if not isinstance(text_out, str) or not text_out.strip():
+                    parts: List[str] = []
+                    try:
+                        for item in getattr(resp, "output", []) or []:
+                            for c in getattr(item, "content", []) or []:
+                                if getattr(c, "type", None) == "output_text":
+                                    txt = getattr(c, "text", "")
+                                    if isinstance(txt, str) and txt.strip():
+                                        parts.append(txt)
+                    except Exception:
+                        parts = []
+                    text_out = "\n".join(parts).strip()
+                if not isinstance(text_out, str):
+                    text_out = str(text_out or "")
+
+                u = resp_dict.get("usage") or {}
+                usage_norm: Dict[str, Any] = {}
+                if isinstance(u, dict):
+                    usage_norm.update(u)
+                    usage_norm.setdefault("prompt_tokens", u.get("input_tokens"))
+                    usage_norm.setdefault("completion_tokens", u.get("output_tokens"))
+                    usage_norm.setdefault("total_tokens", u.get("total_tokens"))
+                return LLMResult(
+                    text=str(text_out or ""),
+                    raw=resp_dict,
+                    usage=usage_norm or (u if isinstance(u, dict) else None),
+                    response_id=response_id,
+                )
+
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -1494,41 +1556,163 @@ class LLMClient:
             ]
             content_blocks += self._image_blocks_from_refs(images, provider)
             tools = None
-            if use_tools and bool(getattr(settings, "ark_image_process_enabled", False)):
+            if use_tools and bool(
+                getattr(settings, "ark_image_process_enabled", False)
+            ):
                 tools = [{"type": "image_process"}]
+
+            def _extract_output_text(resp_obj: Any) -> str:
+                try:
+                    ot = getattr(resp_obj, "output_text", None)
+                    if isinstance(ot, str) and ot.strip():
+                        return ot.strip()
+                except Exception:
+                    pass
+                parts: List[str] = []
+                try:
+                    for item in getattr(resp_obj, "output", []) or []:
+                        for c in getattr(item, "content", []) or []:
+                            if getattr(c, "type", None) == "output_text":
+                                txt = getattr(c, "text", "")
+                                if isinstance(txt, str) and txt.strip():
+                                    parts.append(txt)
+                except Exception:
+                    parts = []
+                if parts:
+                    return "\n".join(parts).strip()
+                # If the model returned only "reasoning" (no message), surface summary_text as a best-effort fallback.
+                summaries: List[str] = []
+                try:
+                    for item in getattr(resp_obj, "output", []) or []:
+                        if getattr(item, "type", None) != "reasoning":
+                            continue
+                        for s in getattr(item, "summary", []) or []:
+                            st = None
+                            try:
+                                st = getattr(s, "text", None)
+                            except Exception:
+                                st = None
+                            if st is None and isinstance(s, dict):
+                                st = s.get("text")
+                            if isinstance(st, str) and st.strip():
+                                summaries.append(st)
+                except Exception:
+                    summaries = []
+                return "\n".join(summaries).strip()
+
+            def _responses_create(*, with_tools: bool, out_tokens: int) -> Any:
+                base: Dict[str, Any] = {
+                    "model": model,
+                    "instructions": system_prompt,
+                    "input": [{"role": "user", "content": content_blocks}],
+                }
+                if with_tools and tools:
+                    base["tools"] = tools
+                kwargs: Dict[str, Any] = dict(base)
+                if (
+                    isinstance(out_tokens, int)
+                    and out_tokens > 0
+                    and bool(
+                        getattr(settings, "ark_responses_enable_output_cap", False)
+                    )
+                ):
+                    kwargs["max_output_tokens"] = int(out_tokens)
+                if isinstance(temperature, (int, float)):
+                    kwargs["temperature"] = float(temperature)
+                try:
+                    return client.responses.create(**kwargs)
+                except TypeError:
+                    kwargs.pop("max_output_tokens", None)
+                    kwargs.pop("temperature", None)
+                    return client.responses.create(**kwargs)
+
+            # First attempt: use tools (if enabled).
             try:
-                resp = client.responses.create(
-                    model=model,
-                    instructions=system_prompt,
-                    input=[{"role": "user", "content": content_blocks}],
-                    tools=tools,
-                )
+                resp = _responses_create(with_tools=True, out_tokens=int(max_tokens))
             except Exception:
                 # Best-effort fallback: if tool-enabled call fails, retry without tools.
                 if tools:
-                    resp = client.responses.create(
-                        model=model,
-                        instructions=system_prompt,
-                        input=[{"role": "user", "content": content_blocks}],
+                    resp = _responses_create(
+                        with_tools=False, out_tokens=int(max_tokens)
                     )
                 else:
                     raise
+
             resp_dict = resp.to_dict()
+            text_out = _extract_output_text(resp)
+
+            # If tool-enabled call returned no output_text (common with deep-thinking models), retry once without tools.
+            if not text_out and tools:
+                try:
+                    resp_nt = _responses_create(
+                        with_tools=False, out_tokens=int(max_tokens)
+                    )
+                    resp_nt_dict = resp_nt.to_dict()
+                    text_nt = _extract_output_text(resp_nt)
+                    if text_nt:
+                        resp = resp_nt
+                        resp_dict = resp_nt_dict
+                        text_out = text_nt
+                        resp_dict.setdefault("meta", {})["ark_tools_fallback"] = True
+                except Exception:
+                    pass
+
+            # If the model spent the entire output budget on "reasoning" and produced no message, retry once with a higher cap.
+            # This avoids a false "parse_failed" when the final output was never emitted.
+            try:
+                usage = resp_dict.get("usage") or {}
+                out_used = int(usage.get("output_tokens") or 0)
+                out_details = usage.get("output_tokens_details") or {}
+                reasoning_used = int(out_details.get("reasoning_tokens") or 0)
+                if (
+                    not text_out
+                    and out_used > 0
+                    and out_used == int(max_tokens)
+                    and reasoning_used == out_used
+                ):
+                    retry_cap = min(max(int(max_tokens) * 3, 12000), 24000)
+                    if retry_cap > int(max_tokens):
+                        # Prefer retrying without tools for stability; tools can be re-enabled via feature flag later.
+                        resp2 = _responses_create(
+                            with_tools=False, out_tokens=retry_cap
+                        )
+                        resp2_dict = resp2.to_dict()
+                        text2 = _extract_output_text(resp2)
+                        if text2:
+                            resp = resp2
+                            resp_dict = resp2_dict
+                            text_out = text2
+            except Exception:
+                pass
+
             response_id = None
             try:
-                response_id = str(getattr(resp, "id", None) or resp_dict.get("id") or "")
+                response_id = str(
+                    getattr(resp, "id", None) or resp_dict.get("id") or ""
+                )
             except Exception:
                 response_id = None
             response_id = response_id if (response_id and response_id.strip()) else None
-            text_parts: List[str] = []
-            for item in getattr(resp, "output", []) or []:
-                for c in getattr(item, "content", []) or []:
-                    if getattr(c, "type", None) == "output_text":
-                        text_parts.append(getattr(c, "text", ""))
             return LLMResult(
-                text="\n".join(text_parts),
+                text=str(text_out or ""),
                 raw=resp_dict,
                 response_id=response_id,
+                usage=(
+                    {
+                        **(resp_dict.get("usage") or {}),
+                        "prompt_tokens": (resp_dict.get("usage") or {}).get(
+                            "input_tokens"
+                        ),
+                        "completion_tokens": (resp_dict.get("usage") or {}).get(
+                            "output_tokens"
+                        ),
+                        "total_tokens": (resp_dict.get("usage") or {}).get(
+                            "total_tokens"
+                        ),
+                    }
+                    if isinstance(resp_dict.get("usage"), dict)
+                    else None
+                ),
             )
 
         raise ValueError(f"Unsupported provider for generate_with_images: {provider}")
@@ -1568,7 +1752,7 @@ class LLMClient:
             # Default to ark_report_model if available, else ark_reasoning_model
             settings = get_settings()
             model = getattr(settings, "ark_report_model", None) or self.ark_model
-            
+
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -1579,7 +1763,7 @@ class LLMClient:
 
             content = response.choices[0].message.content
             logger.info(f"[generate_report] content_len={len(content or '')}")
-            
+
             try:
                 data = json.loads(content)
                 return ReportResult(**data)
@@ -1591,20 +1775,28 @@ class LLMClient:
                         return ReportResult(**data)
                     except Exception:
                         pass
-                
+
                 logger.error(f"Report parse error: {e}, content: {content[:200]}")
                 # Fallback empty
                 return ReportResult(
                     narrative_md=f"# Report Generation Failed\n\nError: {e}",
-                    summary_json={"error": str(e)}
+                    summary_json={"error": str(e)},
                 )
 
         except Exception as e:
             # Let tenacity retry network errors
-            if isinstance(e, (APIConnectionError, APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout)):
+            if isinstance(
+                e,
+                (
+                    APIConnectionError,
+                    APITimeoutError,
+                    httpx.ReadTimeout,
+                    httpx.ConnectTimeout,
+                ),
+            ):
                 raise e
             logger.error(f"Report generation failed: {e}")
             return ReportResult(
                 narrative_md=f"# Report Generation Error\n\n{e}",
-                summary_json={"error": str(e)}
+                summary_json={"error": str(e)},
             )

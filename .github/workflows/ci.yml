@@ -28,6 +28,8 @@ jobs:
         run: |
           python3 -m bandit -r homework_agent -c bandit.yaml -x homework_agent/demo_ui.py -q
           python3 -m pylint --disable=all --enable=E0602 homework_agent
+      - name: Secret Hygiene (No Service Role Key)
+        run: python3 scripts/check_no_secrets.py
       - name: Replay Evaluation (If Dataset Present)
         if: ${{ hashFiles('homework_agent/tests/replay_data/samples/*.json') != '' }}
         run: |

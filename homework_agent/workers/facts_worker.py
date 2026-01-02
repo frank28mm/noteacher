@@ -24,7 +24,10 @@ from homework_agent.utils.taxonomy import taxonomy_version
 from homework_agent.utils.logging_setup import setup_file_logging, silence_noisy_loggers
 from homework_agent.utils.observability import log_event
 from homework_agent.utils.settings import get_settings
-from homework_agent.utils.supabase_client import get_storage_client
+from homework_agent.utils.supabase_client import (
+    get_service_role_storage_client,
+    get_storage_client,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +49,11 @@ def _iso_now() -> str:
 
 
 def _safe_table(name: str):
-    storage = get_storage_client()
+    # Prefer service role for workers (bypass RLS); fall back to anon for dev-only setups.
+    try:
+        storage = get_service_role_storage_client()
+    except Exception:
+        storage = get_storage_client()
     return storage.client.table(name)
 
 
@@ -150,7 +157,9 @@ def main() -> int:
 
             started = time.monotonic()
             try:
-                row = _load_submission(user_id=job.user_id, submission_id=job.submission_id)
+                row = _load_submission(
+                    user_id=job.user_id, submission_id=job.submission_id
+                )
                 if not row:
                     log_event(
                         logger,
@@ -160,6 +169,7 @@ def main() -> int:
                         session_id=job.session_id,
                         submission_id=job.submission_id,
                         error="submission_not_found",
+                        error_type="NotFound",
                     )
                     continue
                 facts = extract_facts_from_grade_result(

@@ -18,9 +18,9 @@ HIGH_RISK_WARNING_substrings = {
     "budget_exhausted",
 }
 
+
 def enforce_conservative_grading(
-    result: Union[MathGradingResult, EnglishGradingResult], 
-    warnings: List[str]
+    result: Union[MathGradingResult, EnglishGradingResult], warnings: List[str]
 ) -> List[str]:
     """
     T3: Quality Differentiated Gate (Conservative Correctness).
@@ -37,25 +37,25 @@ def enforce_conservative_grading(
         for trigger in HIGH_RISK_WARNING_substrings:
             if trigger in w_lower:
                 detected_risks.append(trigger)
-    
+
     if not detected_risks:
         return []
-    
+
     # Apply downgrade
     downgrade_count = 0
     new_warnings = []
-    
+
     # Handle different result types
     wrong_items = getattr(result, "wrong_items", []) or []
     questions = getattr(result, "questions", []) or []
-    
+
     # We iterate over 'questions' (full list) to find 'correct' items.
     # Note: MathGradingResult/EnglishGradingResult structure usually puts 'correct' items implicitly
     # or explicitly in a 'questions' list if comprehensive.
     # However, standard output mostly focuses on 'wrong_items'.
     # If the autonomous agent only returns 'wrong_items', we can't downgrade 'correct' ones easily
     # unless 'questions' contains ALL items.
-    
+
     # In Phase 2 Step 0, we ensured 'questions' contains all items with 'verdict'.
     for q in questions:
         if not isinstance(q, dict):
@@ -63,9 +63,11 @@ def enforce_conservative_grading(
         v = str(q.get("verdict") or "").strip().lower()
         if v == "correct":
             q["verdict"] = "uncertain"
-            q["verdict_reason"] = f"Conservative downgrade due to risks: {','.join(detected_risks)}"
+            q["verdict_reason"] = (
+                f"Conservative downgrade due to risks: {','.join(detected_risks)}"
+            )
             downgrade_count += 1
-            
+
             # Also ensure this item appears in 'wrong_items' list if it wasn't there
             # (since it's now uncertain, it counts as 'not correct').
             # But 'wrong_items' usually drives the 'mistakes' DB.
@@ -73,7 +75,8 @@ def enforce_conservative_grading(
             q_idx = str(q.get("question_idx") or q.get("question_number") or "")
             if q_idx:
                 already_in_wrong = any(
-                    str(w.get("question_idx") or w.get("question_number") or "") == q_idx 
+                    str(w.get("question_idx") or w.get("question_number") or "")
+                    == q_idx
                     for w in wrong_items
                 )
                 if not already_in_wrong:
@@ -88,5 +91,5 @@ def enforce_conservative_grading(
         msg = f"Conservative Gate: Downgraded {downgrade_count} correct items due to risks: {list(set(detected_risks))}"
         logger.warning(msg)
         new_warnings.append(msg)
-        
+
     return new_warnings

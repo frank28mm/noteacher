@@ -129,6 +129,7 @@ def enqueue_grade_job(
     session_id: str,
     user_id: str,
     ttl_seconds: int,
+    grade_image_input_variant: Optional[str] = None,
 ) -> bool:
     """
     Enqueue a grade job. Returns True if queued, False if Redis is unavailable.
@@ -153,7 +154,12 @@ def enqueue_grade_job(
 
     save_job_request(
         job_id,
-        {"grade_request": grade_request, "provider": str(provider or "").strip()},
+        {
+            "grade_request": grade_request,
+            "provider": str(provider or "").strip(),
+            "grade_image_input_variant": str(grade_image_input_variant or "").strip()
+            or None,
+        },
         ttl_seconds=ttl_seconds,
     )
     set_job_status(
@@ -185,4 +191,3 @@ def enqueue_grade_job(
         provider=str(provider),
     )
     return True
-

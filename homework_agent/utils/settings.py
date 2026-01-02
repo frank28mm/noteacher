@@ -46,10 +46,15 @@ class Settings(BaseSettings):
     ark_image_process_enabled: bool = Field(
         default=False, validation_alias="ARK_IMAGE_PROCESS_ENABLED"
     )
+    # Ark Responses API output cap (max_output_tokens). Default off because deep-thinking models may spend
+    # the entire cap on reasoning and fail to emit final output_text (causing parse_failed).
+    ark_responses_enable_output_cap: bool = Field(
+        default=False, validation_alias="ARK_RESPONSES_ENABLE_OUTPUT_CAP"
+    )
     # /grade experiment: choose image input strategy for Ark to isolate URL-fetch latency.
     # Values: auto|url|proxy|data_url_first_page|data_url_on_small_figure
     grade_image_input_variant: str = Field(
-        default="auto", validation_alias="GRADE_IMAGE_INPUT_VARIANT"
+        default="url", validation_alias="GRADE_IMAGE_INPUT_VARIANT"
     )
     # Ark/Doubao text reasoning models for chat/grading
     ark_reasoning_model: str = Field(
@@ -62,6 +67,10 @@ class Settings(BaseSettings):
     ark_report_model: str = Field(
         default="doubao-seed-1-6-251015",
         validation_alias="ARK_REPORT_MODEL",
+    )
+    # Narrative Layer (LLM) for reports: enabled by default (set REPORT_NARRATIVE_ENABLED=0 for deterministic E2E).
+    report_narrative_enabled: bool = Field(
+        default=True, validation_alias="REPORT_NARRATIVE_ENABLED"
     )
 
     # Baidu PaddleOCR-VL (OCR + layout)
@@ -261,7 +270,10 @@ class Settings(BaseSettings):
         default=4000, validation_alias="AUTONOMOUS_AGENT_MAX_TOKENS"
     )
     autonomous_agent_max_iterations: int = Field(
-        default=3, validation_alias="AUTONOMOUS_AGENT_MAX_ITERATIONS"
+        # Keep the Planner/Executor/Reflector loop off by default for deterministic + faster /grade.
+        # Use the feature flag `grade.autonomous_loop` (iter2/iter3) to enable canary runs.
+        default=0,
+        validation_alias="AUTONOMOUS_AGENT_MAX_ITERATIONS",
     )
     autonomous_agent_confidence_threshold: float = Field(
         default=0.90, validation_alias="AUTONOMOUS_AGENT_CONFIDENCE_THRESHOLD"
@@ -271,6 +283,13 @@ class Settings(BaseSettings):
     )
     autonomous_agent_min_aggregator_seconds: int = Field(
         default=20, validation_alias="AUTONOMOUS_AGENT_MIN_AGGREGATOR_SECONDS"
+    )
+    # Autonomous preprocessing pipeline control:
+    # - full: qindex cache -> VLM locator -> OpenCV fallback (slow, highest coverage)
+    # - qindex_only: only use cached qindex slices; if miss, skip preprocessing
+    # - off: skip preprocessing entirely (fastest)
+    autonomous_preprocess_mode: str = Field(
+        default="qindex_only", validation_alias="AUTONOMOUS_PREPROCESS_MODE"
     )
 
     # OpenCV pipeline

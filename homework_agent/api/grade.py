@@ -824,13 +824,12 @@ async def _perform_autonomous_grading(
 
     # T3: Quality Gate (Conservative Correctness)
     # Downgrade 'correct' to 'uncertain' if risks are detected (e.g. OCR failure)
-    gate_warnings = enforce_conservative_grading(grading_result, autonomous.warnings or [])
+    gate_warnings = enforce_conservative_grading(
+        grading_result, autonomous.warnings or []
+    )
     if gate_warnings:
-        # Append new warnings to both response object and context for logging
-        if not hasattr(response, "warnings"):
-            response.warnings = []
-        if isinstance(response.warnings, list):
-            response.warnings.extend(gate_warnings)
+        # Apply gate warnings to the grading result (used for response + qbank snapshot).
+        # NOTE: Do not touch FastAPI `Response` here; this function is also used by workers.
         if not hasattr(grading_result, "warnings"):
             grading_result.warnings = []
         grading_result.warnings.extend(gate_warnings)
@@ -975,6 +974,7 @@ async def grade_homework(
     background_tasks: BackgroundTasks,
     x_idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key"),
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    x_force_async: Optional[str] = Header(None, alias="X-Force-Async"),
     x_grade_image_input_variant: Optional[str] = Header(
         None, alias="X-Grade-Image-Input-Variant"
     ),
@@ -1101,7 +1101,8 @@ async def grade_homework(
             logger.debug(f"link_session_to_submission failed (best-effort): {e}")
 
     # 3. 决定同步/异步
-    is_large_batch = len(req.images) > 5
+    force_async = str(x_force_async or "").strip().lower() in {"1", "true", "yes"}
+    is_large_batch = len(req.images) > 5 or force_async
     # LLM provider: use explicit llm_provider if set, else derive from vision_provider
     if req.llm_provider:
         provider_str = req.llm_provider  # "ark" or "silicon"
@@ -1140,6 +1141,7 @@ async def grade_homework(
                 session_id=session_for_ctx,
                 user_id=user_id,
                 ttl_seconds=ttl_seconds,
+                grade_image_input_variant=grade_image_input_variant,
             )
         except Exception as e:
             if require_redis:

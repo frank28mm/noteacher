@@ -62,4 +62,3 @@ def test_extract_facts_from_grade_result_builds_attempts_and_steps():
     assert step2["severity"] == "calculation"
     assert step2["diagnosis_codes"] == ["calculation_error"]
     assert step3["severity"] == "unknown"
-

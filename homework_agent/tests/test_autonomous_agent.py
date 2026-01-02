@@ -182,6 +182,114 @@ def test_aggregator_parse_failure(monkeypatch):
     assert result.reason == "parse_failed"
 
 
+def test_aggregator_visual_risk_triggers_image_tools_without_slices(monkeypatch):
+    from homework_agent.services import autonomous_agent as aa
+
+    monkeypatch.setattr(
+        aa, "get_settings", lambda: SimpleNamespace(ark_image_process_enabled=True)
+    )
+
+    calls = {"n": 0, "use_tools": None, "image_count": None}
+
+    def _fake_generate_with_images(*args, **kwargs):
+        calls["n"] += 1
+        calls["use_tools"] = bool(kwargs.get("use_tools"))
+        calls["image_count"] = len(kwargs.get("images") or [])
+        return SimpleNamespace(
+            text=json.dumps(
+                {
+                    "status": "done",
+                    "ocr_text": "如图，∠ABC=...",
+                    "results": [],
+                    "summary": "ok",
+                    "warnings": [],
+                },
+                ensure_ascii=False,
+            ),
+            usage={"total_tokens": 10},
+            response_id="resp_test",
+        )
+
+    monkeypatch.setattr(LLMClient, "generate_with_images", _fake_generate_with_images)
+
+    state = SessionState(
+        session_id="s",
+        image_urls=["data:image/jpeg;base64,Zm9v"],  # avoid network in compression path
+        slice_urls={"figure": [], "question": []},
+        ocr_text="如图，已知△ABC...",
+        preprocess_meta={"mode": "qindex_only"},
+    )
+    agg = AggregatorAgent(
+        llm=LLMClient(),
+        provider="ark",
+        subject=Subject.MATH,
+        max_tokens=200,
+        timeout_s=5,
+    )
+    result = _run(agg.run(state))
+    assert result.status == "done"
+    assert state.preprocess_meta.get("visual_risk") is True
+    assert calls["n"] == 1
+    assert calls["use_tools"] is True
+    assert calls["image_count"] == 1
+    assert (
+        state.partial_results.get("llm_trace", {}).get("ark_image_process_requested")
+        is True
+    )
+
+
+def test_aggregator_includes_original_when_slices_present(monkeypatch):
+    from homework_agent.services import autonomous_agent as aa
+
+    monkeypatch.setattr(
+        aa, "get_settings", lambda: SimpleNamespace(ark_image_process_enabled=True)
+    )
+
+    calls = {"image_count": None, "has_url": False, "has_data": False}
+
+    def _fake_generate_with_images(*args, **kwargs):
+        images = kwargs.get("images") or []
+        calls["image_count"] = len(images)
+        calls["has_url"] = any(getattr(i, "url", None) for i in images)
+        calls["has_data"] = any(getattr(i, "base64", None) for i in images)
+        return SimpleNamespace(
+            text=json.dumps(
+                {
+                    "status": "done",
+                    "ocr_text": "ok",
+                    "results": [],
+                    "summary": "ok",
+                    "warnings": [],
+                },
+                ensure_ascii=False,
+            ),
+            usage={"total_tokens": 10},
+            response_id="resp_test",
+        )
+
+    monkeypatch.setattr(LLMClient, "generate_with_images", _fake_generate_with_images)
+
+    state = SessionState(
+        session_id="s",
+        image_urls=["data:image/jpeg;base64,Zm9v"],
+        slice_urls={"figure": ["https://example.com/fig.jpg"], "question": []},
+        ocr_text="ocr",
+        preprocess_meta={"mode": "full"},
+    )
+    agg = AggregatorAgent(
+        llm=LLMClient(),
+        provider="ark",
+        subject=Subject.MATH,
+        max_tokens=200,
+        timeout_s=5,
+    )
+    result = _run(agg.run(state))
+    assert result.status == "done"
+    assert calls["image_count"] == 2  # slices + original fallback
+    assert calls["has_url"] is True
+    assert calls["has_data"] is True
+
+
 def test_planner_forced_strategy_on_diagram_roi_not_found(monkeypatch):
 
     payload = {
@@ -198,6 +306,38 @@ def test_planner_forced_strategy_on_diagram_roi_not_found(monkeypatch):
     state = SessionState(
         session_id="s",
         image_urls=["u"],
+        preprocess_meta={"mode": "qindex_only"},
+        partial_results={
+            "reflection": {
+                "issues": ["diagram_roi_not_found"],
+                "pass": False,
+                "confidence": 0.6,
+            }
+        },
+    )
+    result = _run(planner.run(state))
+    steps = [step.get("step") for step in result.plan]
+    assert "diagram_slice" not in steps
+    assert "ocr_fallback" in steps
+    assert steps[:2] == ["qindex_fetch", "ocr_fallback"]
+
+
+def test_planner_forced_strategy_allows_vlm_locator_on_full_mode(monkeypatch):
+    payload = {
+        "thoughts": "t",
+        "plan": [{"step": "diagram_slice", "args": {"image": "u"}}],
+        "action": "execute_tools",
+    }
+
+    def _fake_generate(*args, **kwargs):
+        return SimpleNamespace(text=json.dumps(payload, ensure_ascii=False))
+
+    monkeypatch.setattr(LLMClient, "generate", _fake_generate)
+    planner = PlannerAgent(llm=LLMClient(), provider="ark", max_tokens=200, timeout_s=5)
+    state = SessionState(
+        session_id="s",
+        image_urls=["u"],
+        preprocess_meta={"mode": "full"},
         partial_results={
             "reflection": {
                 "issues": ["diagram_roi_not_found"],

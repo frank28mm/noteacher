@@ -107,12 +107,23 @@ class PreprocessingPipeline:
         result = await pipeline.process_image(image_ref)
     """
 
-    def __init__(self, session_id: str, *, request_id: Optional[str] = None):
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        request_id: Optional[str] = None,
+        enable_qindex_cache: bool = True,
+        enable_vlm: bool = True,
+        enable_opencv: bool = True,
+    ):
         self.session_id = session_id
         self.request_id = request_id
         self._cache: Dict[str, PreprocessResult] = {}
         self._cache_store = get_cache_store()
         self._vlm_locator = SiliconFlowQIndexLocator()
+        self._enable_qindex_cache = bool(enable_qindex_cache)
+        self._enable_vlm = bool(enable_vlm)
+        self._enable_opencv = bool(enable_opencv)
 
     def _get_cache_key(self, image_hash: str) -> str:
         return f"{PREPROCESS_CACHE_PREFIX}{image_hash}"
@@ -454,18 +465,29 @@ class PreprocessingPipeline:
             prefix = f"autonomous/prep/{self.session_id}/"
 
         # Strategy A: Try qindex cache first
-        if use_cache:
+        if use_cache and self._enable_qindex_cache:
             result = await self._try_qindex_cache()
             if result and (result.figure_urls or result.question_urls):
                 return result
 
         # Strategy B: Try VLM locator
-        result = await self._try_vlm_locator(image_ref, prefix)
-        if result and (result.figure_urls or result.question_urls):
-            return result
+        if self._enable_vlm:
+            result = await self._try_vlm_locator(image_ref, prefix)
+            if result and (result.figure_urls or result.question_urls):
+                return result
 
         # Strategy C: Fall back to OpenCV
-        return await self._try_opencv(image_ref, prefix)
+        if self._enable_opencv:
+            return await self._try_opencv(image_ref, prefix)
+
+        # No preprocessing strategies enabled
+        return PreprocessResult(
+            source="disabled",
+            warnings=["preprocess_disabled"],
+            cached=False,
+            figure_too_small=False,
+            timings_ms={},
+        )
 
     async def process_batch(
         self,

@@ -17,15 +17,25 @@ def _stub_qbank(monkeypatch: pytest.MonkeyPatch):
     }
     monkeypatch.setattr(chat_stages, "get_question_bank", lambda session_id: qbank)
     monkeypatch.setattr(chat_stages, "get_question_index", lambda session_id: None)
-    monkeypatch.setattr(chat_stages, "save_question_bank", lambda session_id, qbank_now: None)
-    monkeypatch.setattr(chat_stages, "analyze_visual_risk", lambda *args, **kwargs: (False, None))
-    monkeypatch.setattr(chat_stages.chat_api, "qindex_is_configured", lambda: (False, "test"))
+    monkeypatch.setattr(
+        chat_stages, "save_question_bank", lambda session_id, qbank_now: None
+    )
+    monkeypatch.setattr(
+        chat_stages, "analyze_visual_risk", lambda *args, **kwargs: (False, None)
+    )
+    monkeypatch.setattr(
+        chat_stages.chat_api, "qindex_is_configured", lambda: (False, "test")
+    )
     return qbank
 
 
 def test_focus_retained_when_no_new_question_number(monkeypatch: pytest.MonkeyPatch):
     _stub_qbank(monkeypatch)
-    session_data = {"history": [], "interaction_count": 0, "focus_question_number": "20"}
+    session_data = {
+        "history": [],
+        "interaction_count": 0,
+        "focus_question_number": "20",
+    }
     req = ChatRequest(
         history=[],
         question="再讲一下这个步骤",
@@ -47,7 +57,11 @@ def test_focus_retained_when_no_new_question_number(monkeypatch: pytest.MonkeyPa
 
 def test_focus_switch_without_target_prompts_user(monkeypatch: pytest.MonkeyPatch):
     _stub_qbank(monkeypatch)
-    session_data = {"history": [], "interaction_count": 0, "focus_question_number": "20"}
+    session_data = {
+        "history": [],
+        "interaction_count": 0,
+        "focus_question_number": "20",
+    }
     req = ChatRequest(
         history=[],
         question="换一题",

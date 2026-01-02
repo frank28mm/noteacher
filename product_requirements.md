@@ -67,6 +67,18 @@
         * `geometry`：文本判断（例：“辅助线 BE 画对了；∠ABC 标注缺失”），可选 `elements` 列表（type: line/angle/point; label: A,B,C; status: correct/missing/misplaced）。
     *   如后续需要步骤/几何高亮，可在错误项中补充可选 `bbox`，沿用统一坐标系。
 
+#### 2.2.1 /grade 快路径与视觉路径（当前实现口径）
+
+> 目的：在“可运营闭环”的前提下，把体验做稳——文本题优先走稳定快路径，图形题走可解释的视觉证据路径。
+
+*   **快路径（默认）**：适用于绝大多数“纯文本/算式/无图形证据”的页面。
+    *   默认配置：`AUTONOMOUS_PREPROCESS_MODE=qindex_only` + `GRADE_IMAGE_INPUT_VARIANT=url`
+    *   行为：先 OCR（可缓存）→ 以 OCR 文本为证据进行结构化聚合输出（可审计：`ark_response_id` + `timings_ms`）
+    *   约束：证据不足必须标记 `uncertain/needs_review`，禁止“看起来很快但互相矛盾”的结论。
+*   **视觉路径（待专项验证后固化门槛）**：用于几何/函数图像/复杂示意图等需要“看图”才能可靠判定的场景。
+    *   行为：优先生成/复用 figure/question 切片（qindex/opencv；必要时 VLM locator）→ 再启用 `image_process` 做放大/定位/复核
+    *   目标：在视觉题上保证“可解释/可复核”，宁可 `uncertain` 也不误判为 `correct`
+
 ### 2.3 英语批改 (English Grading)
 *   **范围限制**：Phase 1 (MVP版本) **不包含** 作文批改。
 *   **主观题逻辑**：**B. 语义相似度 (Semantic Similarity)**。

@@ -57,5 +57,6 @@ def test_compute_report_features_counts_and_accuracy():
     assert features["overall"]["incorrect"] == 1
     assert features["overall"]["uncertain"] == 1
     assert features["overall"]["accuracy"] == 1 / 3
-    assert features["process_diagnosis"]["diagnosis_code_counts"]["calculation_error"] == 1
-
+    assert (
+        features["process_diagnosis"]["diagnosis_code_counts"]["calculation_error"] == 1
+    )

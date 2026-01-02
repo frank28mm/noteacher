@@ -33,17 +33,32 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 
+def _load_supabase_key(*, role: str) -> str:
+    role = (role or "").strip().lower()
+    if role == "service":
+        key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+        if key:
+            return key
+        raise ValueError(
+            "SUPABASE_SERVICE_ROLE_KEY 未配置（worker 需要 service role key）"
+        )
+    key = (os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY") or "").strip()
+    if not key:
+        raise ValueError("SUPABASE_KEY 未配置（需要 anon key）")
+    return key
+
+
 class SupabaseStorageClient:
     """Supabase Storage 客户端"""
 
-    def __init__(self):
+    def __init__(self, *, role: str = "anon"):
         """初始化 Supabase 客户端"""
         self.url = os.getenv("SUPABASE_URL")
-        self.key = os.getenv("SUPABASE_KEY")
+        self.key = _load_supabase_key(role=role)
         self.bucket = os.getenv("SUPABASE_BUCKET", "homework-images")
 
-        if not self.url or not self.key:
-            raise ValueError("SUPABASE_URL 和 SUPABASE_KEY 环境变量必须设置")
+        if not self.url:
+            raise ValueError("SUPABASE_URL 环境变量必须设置")
 
         self.client: Client = create_client(self.url, self.key)
 
@@ -249,4 +264,12 @@ class SupabaseStorageClient:
 
 def get_storage_client() -> SupabaseStorageClient:
     """获取 SupabaseStorageClient 实例 (单例模式)"""
-    return SupabaseStorageClient()
+    return SupabaseStorageClient(role="anon")
+
+
+def get_service_role_storage_client() -> SupabaseStorageClient:
+    """
+    Get a Supabase client using service role key (bypasses RLS).
+    Only intended for worker processes / offline maintenance scripts.
+    """
+    return SupabaseStorageClient(role="service")

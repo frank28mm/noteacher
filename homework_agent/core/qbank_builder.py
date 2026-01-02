@@ -29,7 +29,9 @@ def _coerce_difficulty(v: Any) -> str:
     return s or "unknown"
 
 
-def _normalize_question_identifiers(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _normalize_question_identifiers(
+    questions: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     """
     Ensure each question has:
     - question_idx: 1-indexed position in the current list (deterministic for storage)

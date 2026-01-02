@@ -34,6 +34,11 @@
 
 ## 🚀 快速开始 (Quick Start)
 
+### 当前默认（快路径已固定）
+
+- `/grade`：`AUTONOMOUS_PREPROCESS_MODE=qindex_only` + `GRADE_IMAGE_INPUT_VARIANT=url`
+- 策略：先 OCR（可缓存）→ 文本聚合（Ark 推理模型）；几何/函数图像等视觉题将走单独“视觉证据路径”（用真实样本验证后固化门槛）
+
 ### 环境准备
 - Python 3.10+
 - Redis (可选，生产环境推荐)
@@ -70,6 +75,20 @@ uvicorn homework_agent.main:app --host 0.0.0.0 --port 8000 --reload
 ```bash
 python3 -m homework_agent.workers.qindex_worker
 ```
+
+### 7. 启动 Demo UI 2.0（Workflow Console）
+Demo UI 2.0 会强制走 `/grade` 异步模式（`X-Force-Async: 1`），并在 UI 里轮询：
+`/jobs/{job_id}` → 创建并轮询 `/reports/jobs/{job_id}` → 展示 `/reports/{report_id}`。
+
+推荐（带 Redis 队列，最接近生产拓扑）：
+```bash
+python3 -m homework_agent.workers.grade_worker
+python3 -m homework_agent.workers.facts_worker   # 可选：加速报表（无则 report_worker 会 fallback 从 submissions 现提取）
+python3 -m homework_agent.workers.report_worker
+python3 homework_agent/demo_ui.py
+```
+
+不使用 Redis（开发兜底）：确保未设置 `REQUIRE_REDIS=1`，此时异步批改会降级为后端进程内 BackgroundTasks；仍需单独启动 `report_worker`。
 
 > 说明：
 > - 依赖安装入口为项目根目录 `requirements.txt`（会包含 `homework_agent/requirements.txt`）。

@@ -160,4 +160,3 @@ def delete_mistake_exclusion(
             detail=str(e),
         ) from e
     return {"ok": True}
-

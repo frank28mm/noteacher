@@ -1,0 +1,337 @@
+{
+  "generated_at": "20260102_120852",
+  "api_base": "http://127.0.0.1:8000/api/v1",
+  "image_file": "tmp/bench_assets/IMG_1100.jpg",
+  "upload_id": "upl_7bf3c631acf34b92",
+  "upload_ms": 4825,
+  "preprocess_mode": "full",
+  "repeat": 5,
+  "summary": {
+    "url": {
+      "n": 5,
+      "total_ms_p50": 225940,
+      "total_ms_p95": 263524,
+      "queue_wait_ms_p50": 10,
+      "queue_wait_ms_p95": 25,
+      "grade_total_duration_ms_p50": 224908,
+      "grade_total_duration_ms_p95": 261334
+    }
+  },
+  "cases": [
+    {
+      "preprocess_mode": "full",
+      "variant": "url",
+      "run_index": 0,
+      "job_id": "job_c5b96242ac1e4e84",
+      "session_id": "bench_full_url_003fc2",
+      "upload_id": "upl_7bf3c631acf34b92",
+      "grade_status": "done",
+      "queue_wait_ms": 10,
+      "total_ms": 263524,
+      "timings_ms": {
+        "preprocess_total_ms": 89556,
+        "preprocess_vlm_locate_ms": 72322,
+        "preprocess_vlm_crop_upload_ms": 17233,
+        "preprocess_vlm_total_ms": 89555,
+        "tools_total_ms": 830,
+        "tool_ocr_fallback_ms": 830,
+        "llm_aggregate_call_ms": 76576,
+        "llm_aggregate_parse_ms": 0,
+        "grade_total_duration_ms": 261334
+      },
+      "qbank_meta": {
+        "vision_provider_requested": "doubao",
+        "vision_used_base64_fallback": false,
+        "vision_used_proxy_url": false,
+        "llm_provider_requested": "ark",
+        "llm_used_fallback": false,
+        "experiments": {
+          "grade.autonomous_loop": {
+            "enabled": false,
+            "variant": "",
+            "reason": "missing",
+            "key": "bench_full_url_003fc2"
+          }
+        },
+        "grade_image_input_variant": "url",
+        "ark_response_id": "resp_021767327112580e11c8c272fc7f915500c6ff352cd688f2f7fe5",
+        "ark_image_process_requested": true,
+        "ark_image_process_enabled": true,
+        "updated_at": "2026-01-02T12:13:20.320351",
+        "grade_status": "done",
+        "grade_summary": "所有几何题（1-8）因图缺失无法验证角的位置关系，批改结果均为不确定。",
+        "warnings": [
+          "所有几何题参考的图缺失，无法验证角的位置关系，影响批改准确性",
+          "token_budget_exhausted_needs_review",
+          "needs_review",
+          "⚠️ Token预算已耗尽，结果可能不完整，建议人工复核",
+          "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+        ],
+        "timings_ms": {
+          "preprocess_total_ms": 89556,
+          "preprocess_vlm_locate_ms": 72322,
+          "preprocess_vlm_crop_upload_ms": 17233,
+          "preprocess_vlm_total_ms": 89555,
+          "tools_total_ms": 830,
+          "tool_ocr_fallback_ms": 830,
+          "llm_aggregate_call_ms": 76576,
+          "llm_aggregate_parse_ms": 0,
+          "grade_total_duration_ms": 261334
+        },
+        "vision_raw_len": 1959,
+        "questions_count": 9,
+        "questions_with_options": 0
+      }
+    },
+    {
+      "preprocess_mode": "full",
+      "variant": "url",
+      "run_index": 1,
+      "job_id": "job_a4e723eb79144b3b",
+      "session_id": "bench_full_url_2d45d1",
+      "upload_id": "upl_7bf3c631acf34b92",
+      "grade_status": "done",
+      "queue_wait_ms": 8,
+      "total_ms": 225940,
+      "timings_ms": {
+        "preprocess_total_ms": 69890,
+        "preprocess_vlm_locate_ms": 56196,
+        "preprocess_vlm_crop_upload_ms": 13692,
+        "preprocess_vlm_total_ms": 69888,
+        "tools_total_ms": 1362,
+        "tool_ocr_fallback_ms": 1362,
+        "llm_aggregate_call_ms": 87640,
+        "llm_aggregate_parse_ms": 0,
+        "grade_total_duration_ms": 224908
+      },
+      "qbank_meta": {
+        "vision_provider_requested": "doubao",
+        "vision_used_base64_fallback": false,
+        "vision_used_proxy_url": false,
+        "llm_provider_requested": "ark",
+        "llm_used_fallback": false,
+        "experiments": {
+          "grade.autonomous_loop": {
+            "enabled": false,
+            "variant": "",
+            "reason": "missing",
+            "key": "bench_full_url_2d45d1"
+          }
+        },
+        "grade_image_input_variant": "url",
+        "ark_response_id": "resp_02176732733088353efce2506f8ba33cd433680ff709829bc953a",
+        "ark_image_process_requested": true,
+        "ark_image_process_enabled": true,
+        "updated_at": "2026-01-02T12:17:09.220884",
+        "grade_status": "done",
+        "grade_summary": "部分题目（题1、题4）因图形缺失无法准确判断答案正确性，其余题目答案多数符合平行线判定/性质等知识，需补充图形进一步验证。",
+        "warnings": [
+          "题1、题4因图形缺失，答案正确性无法完全确定；需补充图形以准确批改。",
+          "token_budget_exhausted_needs_review",
+          "needs_review",
+          "⚠️ Token预算已耗尽，结果可能不完整，建议人工复核",
+          "Conservative Gate: Downgraded 6 correct items due to risks: ['needs_review', 'budget_exhausted']",
+          "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+        ],
+        "timings_ms": {
+          "preprocess_total_ms": 69890,
+          "preprocess_vlm_locate_ms": 56196,
+          "preprocess_vlm_crop_upload_ms": 13692,
+          "preprocess_vlm_total_ms": 69888,
+          "tools_total_ms": 1362,
+          "tool_ocr_fallback_ms": 1362,
+          "llm_aggregate_call_ms": 87640,
+          "llm_aggregate_parse_ms": 0,
+          "grade_total_duration_ms": 224908
+        },
+        "vision_raw_len": 1959,
+        "questions_count": 9,
+        "questions_with_options": 0
+      }
+    },
+    {
+      "preprocess_mode": "full",
+      "variant": "url",
+      "run_index": 2,
+      "job_id": "job_3dba45716ac1452a",
+      "session_id": "bench_full_url_419925",
+      "upload_id": "upl_7bf3c631acf34b92",
+      "grade_status": "done",
+      "queue_wait_ms": 25,
+      "total_ms": 199446,
+      "timings_ms": {
+        "preprocess_total_ms": 101557,
+        "preprocess_vlm_locate_ms": 87549,
+        "preprocess_vlm_crop_upload_ms": 14007,
+        "preprocess_vlm_total_ms": 101556,
+        "tools_total_ms": 1126,
+        "tool_ocr_fallback_ms": 1126,
+        "grade_total_duration_ms": 198016
+      },
+      "qbank_meta": {
+        "vision_provider_requested": "doubao",
+        "vision_used_base64_fallback": false,
+        "vision_used_proxy_url": false,
+        "llm_provider_requested": "ark",
+        "llm_used_fallback": false,
+        "experiments": {
+          "grade.autonomous_loop": {
+            "enabled": false,
+            "variant": "",
+            "reason": "missing",
+            "key": "bench_full_url_419925"
+          }
+        },
+        "grade_image_input_variant": "url",
+        "updated_at": "2026-01-02T12:20:30.269309",
+        "grade_status": "done",
+        "grade_summary": "批改暂时失败，建议稍后重试或人工复核",
+        "warnings": [
+          "autonomous_agent_llm_failed",
+          "needs_review",
+          "token_budget_exhausted_needs_review",
+          "⚠️ Token预算已耗尽，结果可能不完整，建议人工复核"
+        ],
+        "timings_ms": {
+          "preprocess_total_ms": 101557,
+          "preprocess_vlm_locate_ms": 87549,
+          "preprocess_vlm_crop_upload_ms": 14007,
+          "preprocess_vlm_total_ms": 101556,
+          "tools_total_ms": 1126,
+          "tool_ocr_fallback_ms": 1126,
+          "grade_total_duration_ms": 198016
+        },
+        "vision_raw_len": 1959,
+        "questions_count": 1,
+        "questions_with_options": 0
+      }
+    },
+    {
+      "preprocess_mode": "full",
+      "variant": "url",
+      "run_index": 3,
+      "job_id": "job_c17ec2cf9da84f33",
+      "session_id": "bench_full_url_0c0bb4",
+      "upload_id": "upl_7bf3c631acf34b92",
+      "grade_status": "done",
+      "queue_wait_ms": 10,
+      "total_ms": 209591,
+      "timings_ms": {
+        "preprocess_total_ms": 119922,
+        "preprocess_vlm_locate_ms": 105310,
+        "preprocess_vlm_crop_upload_ms": 14610,
+        "preprocess_vlm_total_ms": 119920,
+        "llm_aggregate_call_ms": 27042,
+        "llm_aggregate_parse_ms": 0,
+        "grade_total_duration_ms": 208740
+      },
+      "qbank_meta": {
+        "vision_provider_requested": "doubao",
+        "vision_used_base64_fallback": false,
+        "vision_used_proxy_url": false,
+        "llm_provider_requested": "ark",
+        "llm_used_fallback": false,
+        "experiments": {
+          "grade.autonomous_loop": {
+            "enabled": false,
+            "variant": "",
+            "reason": "missing",
+            "key": "bench_full_url_0c0bb4"
+          }
+        },
+        "grade_image_input_variant": "url",
+        "ark_response_id": "resp_0217673278039720e0b6737cb852249c6c63a5fec540556452bf8",
+        "ark_image_process_requested": true,
+        "ark_image_process_enabled": true,
+        "updated_at": "2026-01-02T12:24:02.207523",
+        "grade_status": "done",
+        "grade_summary": "OCR提取后题干仍有缺失，且无学生作答，无法准确批改。",
+        "warnings": [
+          "OCR初始失败后重新提取仍信息不全",
+          "无学生作答数据",
+          "token_budget_exhausted_needs_review",
+          "needs_review",
+          "⚠️ Token预算已耗尽，结果可能不完整，建议人工复核",
+          "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+        ],
+        "timings_ms": {
+          "preprocess_total_ms": 119922,
+          "preprocess_vlm_locate_ms": 105310,
+          "preprocess_vlm_crop_upload_ms": 14610,
+          "preprocess_vlm_total_ms": 119920,
+          "llm_aggregate_call_ms": 27042,
+          "llm_aggregate_parse_ms": 0,
+          "grade_total_duration_ms": 208740
+        },
+        "vision_raw_len": 129,
+        "questions_count": 4,
+        "questions_with_options": 0
+      }
+    },
+    {
+      "preprocess_mode": "full",
+      "variant": "url",
+      "run_index": 4,
+      "job_id": "job_ad1f661c813e4f09",
+      "session_id": "bench_full_url_dcc6ca",
+      "upload_id": "upl_7bf3c631acf34b92",
+      "grade_status": "done",
+      "queue_wait_ms": 9,
+      "total_ms": 248340,
+      "timings_ms": {
+        "preprocess_total_ms": 94598,
+        "preprocess_vlm_locate_ms": 80788,
+        "preprocess_vlm_crop_upload_ms": 13808,
+        "preprocess_vlm_total_ms": 94596,
+        "tools_total_ms": 1142,
+        "tool_ocr_fallback_ms": 1142,
+        "llm_aggregate_call_ms": 75092,
+        "llm_aggregate_parse_ms": 0,
+        "grade_total_duration_ms": 246911
+      },
+      "qbank_meta": {
+        "vision_provider_requested": "doubao",
+        "vision_used_base64_fallback": false,
+        "vision_used_proxy_url": false,
+        "llm_provider_requested": "ark",
+        "llm_used_fallback": false,
+        "experiments": {
+          "grade.autonomous_loop": {
+            "enabled": false,
+            "variant": "",
+            "reason": "missing",
+            "key": "bench_full_url_dcc6ca"
+          }
+        },
+        "grade_image_input_variant": "url",
+        "ark_response_id": "resp_0217673280054479936a5f6e8f40fdc06126b5fc1504deb3f62b1",
+        "ark_image_process_requested": true,
+        "ark_image_process_enabled": true,
+        "updated_at": "2026-01-02T12:28:11.715258",
+        "grade_status": "done",
+        "grade_summary": "由于缺少图形切片，所有几何题的角位置关系无法确认，批改结果存在不确定性，需补充图形证据后重新批改。",
+        "warnings": [
+          "缺少图形切片，无法确认角的位置关系，所有几何题批改结果不确定",
+          "token_budget_exhausted_needs_review",
+          "needs_review",
+          "⚠️ Token预算已耗尽，结果可能不完整，建议人工复核",
+          "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+        ],
+        "timings_ms": {
+          "preprocess_total_ms": 94598,
+          "preprocess_vlm_locate_ms": 80788,
+          "preprocess_vlm_crop_upload_ms": 13808,
+          "preprocess_vlm_total_ms": 94596,
+          "tools_total_ms": 1142,
+          "tool_ocr_fallback_ms": 1142,
+          "llm_aggregate_call_ms": 75092,
+          "llm_aggregate_parse_ms": 0,
+          "grade_total_duration_ms": 246911
+        },
+        "vision_raw_len": 1959,
+        "questions_count": 9,
+        "questions_with_options": 0
+      }
+    }
+  ]
+}

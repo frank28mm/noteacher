@@ -12,22 +12,29 @@
 ## 1. Week 1（接手稳态化）
 
 - 工程健康：本地/CI 完整验证链路（compile/test/observability/security/replay/baseline）
+- **Schema 对齐（P0）**：以 `supabase/schema.sql` 为当前真源，对齐 reports/report_jobs 口径并补齐缺失表（避免“迁移文件=真源”的误导）
 - 依赖治理：锁定“可复现安装”的依赖集合，CI 增加 `pip check` 防止依赖漂移
 - 契约对齐：文档/实现口径统一（SSE、会话 TTL、轮次策略、relook 边界）
 - 运行手册：补齐上线必需的 env/开关表（prod 安全要求、CORS、auth、redis 必选项）
 - 数据闭环（MVP）：历史错题查询 + 排除/恢复 + 知识点基础统计（为“复盘→报告”铺路）
-  - 实施方案（Design Doc）：`docs/design/mistakes_reports_learning_analyst_design.md`
+  - 实施方案（Design Doc）：`docs/archive/design/mistakes_reports_learning_analyst_design.md`
 
 ## 2. Week 2–4（走向可上线）
 
 - 数据闭环最小落地：
   - Submission 持久化：`/uploads` 与 `/grade` 结果入库（Postgres）可按用户/时间查询
   - 错题本产品化：支持按 `user_id` 聚合历史错题、排除/恢复误判、基础统计（按 `knowledge_tags`）
-  - 报告链路打底：引入 `report_jobs/reports`（异步生成、可查询、可重跑），为“学情分析师 subagent”提供落点（实施方案：`docs/design/mistakes_reports_learning_analyst_design.md`）
+  - 报告链路打底：引入 `report_jobs/reports`（异步生成、可查询、可重跑），为“学情分析师 subagent”提供落点（实施方案：`docs/archive/design/mistakes_reports_learning_analyst_design.md`）
   - 会话/切片 TTL 策略固化：明确“短期数据”和“长期数据”的清理职责边界
 - E2E 自动化：
   - CI 保留 offline replay 门禁；新增“无外部依赖”的 E2E 冒烟（stub LLM/Vision）
   - Live quality gate 作为手动 workflow（已有 `live_quality_gate.yml`），扩大样本与阈值口径
+  - 性能实验口径（/grade）：日常迭代每个 variant 跑 N=5（看 `p50 + max + 失败率/needs_review率`）；做默认策略/验收结论时再补一轮 N=5（两轮合并≈N=10 后看 `p50/p95`）
+  - **/grade 快路径默认（当前固定）**：
+    - 默认：`AUTONOMOUS_PREPROCESS_MODE=qindex_only` + `GRADE_IMAGE_INPUT_VARIANT=url`
+    - 策略：先 OCR（可缓存）→ 文本聚合（Ark 推理模型），避免 deep-vision 在快路径里长时间思考/拉图
+    - 证据：`docs/reports/grade_perf_url_n3_fast_finalize_12000_20260102.md`（同图重复可复现）
+    - 视觉题触发规则与验证（A‑5）：`docs/reports/grade_perf_visual_validation_20260102.md`
 - 生产形态：
   - Redis 必选开关（`REQUIRE_REDIS=1`）与 worker 部署拓扑落地（grade/qindex worker）
   - Metrics/Logs/Tracing 统一采集与告警阈值（先最小集：错误率/延迟/成本/队列堆积）

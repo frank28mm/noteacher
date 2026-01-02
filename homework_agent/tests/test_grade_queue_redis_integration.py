@@ -5,7 +5,11 @@ import uuid
 
 import pytest
 
-from homework_agent.services.grade_queue import enqueue_grade_job, load_job_request, queue_key
+from homework_agent.services.grade_queue import (
+    enqueue_grade_job,
+    load_job_request,
+    queue_key,
+)
 from homework_agent.utils.cache import get_cache_store
 
 
@@ -66,6 +70,7 @@ def test_grade_queue_enqueues_and_persists_job_payload(monkeypatch) -> None:
             session_id="sess_x",
             user_id="user_x",
             ttl_seconds=ttl,
+            grade_image_input_variant="data_url_first_page",
         )
         assert ok is True
 
@@ -78,6 +83,7 @@ def test_grade_queue_enqueues_and_persists_job_payload(monkeypatch) -> None:
         assert isinstance(stored_req, dict)
         assert isinstance(stored_req.get("grade_request"), dict)
         assert stored_req.get("provider") == "ark"
+        assert stored_req.get("grade_image_input_variant") == "data_url_first_page"
 
         # Job status persisted.
         job_obj = cache.get(f"job:{job_id}")
@@ -93,4 +99,3 @@ def test_grade_queue_enqueues_and_persists_job_payload(monkeypatch) -> None:
             cache.delete(f"jobreq:{job_id}")
         except Exception:
             pass
-

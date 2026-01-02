@@ -127,4 +127,3 @@ def enqueue_facts_job(
         submission_id=submission_id,
     )
     return True
-

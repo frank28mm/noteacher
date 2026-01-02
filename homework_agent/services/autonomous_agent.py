@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -29,7 +30,6 @@ from homework_agent.services.autonomous_tools import (
     vision_roi_detect,
     math_verify,
     ocr_fallback,
-    _compress_image_if_needed,
     _compress_image_if_needed_with_metrics,
     _compute_image_hash,
 )
@@ -159,6 +159,54 @@ def _dedupe_images(images: List[str]) -> List[str]:
     return out
 
 
+_TEMPLATE_RE = re.compile(r"\{\{\s*([^}]+?)\s*\}\}")
+
+
+def _resolve_template_expr(expr: str, state: SessionState) -> str:
+    e = str(expr or "").strip()
+    if not e:
+        return ""
+    if e == "session_id":
+        return str(state.session_id or "")
+    if e.startswith("slice_urls."):
+        rest = e[len("slice_urls.") :]
+        m = re.fullmatch(r"(figure|question)\[(\d+)\]", rest)
+        if m:
+            kind = m.group(1)
+            idx = int(m.group(2))
+            urls = state.slice_urls.get(kind) or []
+            if 0 <= idx < len(urls):
+                return str(urls[idx] or "")
+        return ""
+    m = re.fullmatch(r"image_urls\[(\d+)\]", e)
+    if m:
+        idx = int(m.group(1))
+        urls = state.image_urls or []
+        if 0 <= idx < len(urls):
+            return str(urls[idx] or "")
+        return ""
+    return ""
+
+
+def _resolve_templates(value: Any, state: SessionState) -> Any:
+    try:
+        if isinstance(value, str):
+            if "{{" not in value:
+                return value
+
+            def _repl(m: re.Match) -> str:
+                return _resolve_template_expr(m.group(1), state)
+
+            return _TEMPLATE_RE.sub(_repl, value)
+        if isinstance(value, dict):
+            return {k: _resolve_templates(v, state) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_resolve_templates(v, state) for v in value]
+        return value
+    except Exception:
+        return value
+
+
 class PlannerAgent:
     def __init__(
         self, llm: LLMClient, provider: str, max_tokens: int, timeout_s: float
@@ -272,16 +320,23 @@ class PlannerAgent:
                 forced_plan.append(
                     {"step": "qindex_fetch", "args": {"session_id": state.session_id}}
                 )
-            if not attempted.get("vision_roi_detect", {}).get("status") == "ok":
-                forced_plan.append(
-                    {
-                        "step": "vision_roi_detect",
-                        "args": {
-                            "image": state.image_urls[0] if state.image_urls else "",
-                            "prefix": f"autonomous/slices/{state.session_id}/",
-                        },
-                    }
-                )
+            preprocess_mode = (
+                str((state.preprocess_meta or {}).get("mode") or "").strip().lower()
+            )
+            # Keep VLM-based locator out of fast path unless preprocess is "full".
+            if preprocess_mode == "full":
+                if not attempted.get("vision_roi_detect", {}).get("status") == "ok":
+                    forced_plan.append(
+                        {
+                            "step": "vision_roi_detect",
+                            "args": {
+                                "image": (
+                                    state.image_urls[0] if state.image_urls else ""
+                                ),
+                                "prefix": f"autonomous/slices/{state.session_id}/",
+                            },
+                        }
+                    )
             if not state.ocr_text:
                 forced_plan.append(
                     {
@@ -315,7 +370,7 @@ class ExecutorAgent:
             if not isinstance(step, dict):
                 continue
             tool_name = step.get("step") or step.get("tool")
-            args = step.get("args") or {}
+            args = _resolve_templates(step.get("args") or {}, state) or {}
             if not tool_name:
                 continue
             log_event(
@@ -453,9 +508,9 @@ class ExecutorAgent:
             try:
                 timings = state.partial_results.setdefault("timings_ms", {})
                 if isinstance(timings, dict):
-                    timings["tools_total_ms"] = int(timings.get("tools_total_ms", 0)) + int(
-                        duration_ms
-                    )
+                    timings["tools_total_ms"] = int(
+                        timings.get("tools_total_ms", 0)
+                    ) + int(duration_ms)
                     key = f"tool_{str(tool_name).strip().lower()}_ms"
                     timings[key] = int(timings.get(key, 0)) + int(duration_ms)
             except Exception:
@@ -652,6 +707,42 @@ class AggregatorAgent:
         question_urls = question_urls[:1]
         figure_too_small = bool(state.preprocess_meta.get("figure_too_small"))
 
+        ocr_text = str(state.ocr_text or "")
+        visual_risk = False
+        try:
+            # Heuristic trigger for geometry/diagram-heavy pages where text-only aggregation is brittle.
+            # Kept intentionally simple and explainable (documented in A-5 visual validation).
+            signals = (
+                "如图",
+                "下图",
+                "右图",
+                "左图",
+                "图中",
+                "图1",
+                "图2",
+                "坐标",
+                "函数",
+                "抛物线",
+                "直线",
+                "圆",
+                "扇形",
+                "三角形",
+                "平行四边形",
+                "梯形",
+                "矩形",
+                "正方形",
+                "菱形",
+                "∠",
+                "△",
+                "⊙",
+                "⟂",
+                "∥",
+            )
+            visual_risk = any(s in ocr_text for s in signals)
+        except Exception:
+            visual_risk = False
+        state.preprocess_meta["visual_risk"] = bool(visual_risk)
+
         # Determine image source and apply P0.2 compression
         image_source = "unknown"
         grade_variant = (
@@ -661,55 +752,59 @@ class AggregatorAgent:
             or "auto"
         )
         image_input_mode = "url"
-        if figure_urls and not figure_too_small:
-            image_urls = _dedupe_images(
-                figure_urls + (question_urls if question_urls else [])
+        # P0.2: Compress original images if needed (also used as a fallback when slices are imperfect).
+        original_urls = _dedupe_images(state.image_urls or [])[:1]
+        compressed_original_urls: List[str] = []
+        compress_totals = {
+            "compress_total_ms": 0,
+            "compress_download_ms": 0,
+            "compress_decode_ms": 0,
+            "compress_resize_ms": 0,
+            "compress_encode_ms": 0,
+            "compress_upload_ms": 0,
+        }
+        for url in original_urls:
+            compressed_url, metrics = _compress_image_if_needed_with_metrics(
+                url, max_side=1280
             )
-            image_source = "slices"
+            compressed_original_urls.append(compressed_url)
+            try:
+                for src_k, dst_k in (
+                    ("total_ms", "compress_total_ms"),
+                    ("download_ms", "compress_download_ms"),
+                    ("decode_ms", "compress_decode_ms"),
+                    ("resize_ms", "compress_resize_ms"),
+                    ("encode_ms", "compress_encode_ms"),
+                    ("upload_ms", "compress_upload_ms"),
+                ):
+                    v = metrics.get(src_k)
+                    if isinstance(v, int):
+                        compress_totals[dst_k] = int(compress_totals[dst_k]) + int(v)
+            except Exception:
+                pass
+        try:
+            timings = state.partial_results.setdefault("timings_ms", {})
+            if isinstance(timings, dict):
+                for k, v in compress_totals.items():
+                    timings[k] = int(timings.get(k, 0)) + int(v)
+        except Exception:
+            pass
+
+        if figure_urls and not figure_too_small:
+            # Include original page as a robust fallback: if a slice misses the key diagram,
+            # image_process can still zoom/locate on the full page.
+            image_urls = _dedupe_images(
+                figure_urls
+                + (question_urls if question_urls else [])
+                + (compressed_original_urls if compressed_original_urls else [])
+            )
+            image_source = "slices_plus_original"
         else:
-            # P0.2: Compress original images if needed
-            original_urls = _dedupe_images(state.image_urls or [])[:1]
-            image_urls = []
-            compress_totals = {
-                "compress_total_ms": 0,
-                "compress_download_ms": 0,
-                "compress_decode_ms": 0,
-                "compress_resize_ms": 0,
-                "compress_encode_ms": 0,
-                "compress_upload_ms": 0,
-            }
-            for url in original_urls:
-                compressed_url, metrics = _compress_image_if_needed_with_metrics(
-                    url, max_side=1280
-                )
-                image_urls.append(compressed_url)
-                try:
-                    for src_k, dst_k in (
-                        ("total_ms", "compress_total_ms"),
-                        ("download_ms", "compress_download_ms"),
-                        ("decode_ms", "compress_decode_ms"),
-                        ("resize_ms", "compress_resize_ms"),
-                        ("encode_ms", "compress_encode_ms"),
-                        ("upload_ms", "compress_upload_ms"),
-                    ):
-                        v = metrics.get(src_k)
-                        if isinstance(v, int):
-                            compress_totals[dst_k] = int(compress_totals[dst_k]) + int(
-                                v
-                            )
-                except Exception:
-                    pass
+            image_urls = list(compressed_original_urls)
             if figure_too_small:
                 image_source = "original_fallback_small_figure"
             else:
                 image_source = "original_fallback_no_figure"
-            try:
-                timings = state.partial_results.setdefault("timings_ms", {})
-                if isinstance(timings, dict):
-                    for k, v in compress_totals.items():
-                        timings[k] = int(timings.get(k, 0)) + int(v)
-            except Exception:
-                pass
 
         # T2: A/B/C variant for Ark image input (URL vs Data URL).
         if self.provider == "ark" and image_urls:
@@ -736,10 +831,34 @@ class AggregatorAgent:
                         image_urls[0] = data_url
                         image_input_mode = "data_url"
 
-        image_refs = [
-            ImageRef(url=u) if not u.startswith("data:image/") else ImageRef(base64=u)
-            for u in image_urls
-        ]
+        preprocess_mode = (
+            str((state.preprocess_meta or {}).get("mode") or "").strip().lower()
+        )
+        use_images_for_aggregate = True
+        if (
+            preprocess_mode in {"off", "qindex_only"}
+            and not figure_urls
+            and not question_urls
+            and bool(state.ocr_text)
+            and not bool((state.preprocess_meta or {}).get("visual_risk"))
+        ):
+            # Fast path: when we already have OCR and no visual slices exist, prefer text-only aggregation.
+            use_images_for_aggregate = False
+            image_source = "ocr_only"
+            image_input_mode = "none"
+
+        image_refs = (
+            [
+                (
+                    ImageRef(url=u)
+                    if not u.startswith("data:image/")
+                    else ImageRef(base64=u)
+                )
+                for u in image_urls
+            ]
+            if use_images_for_aggregate
+            else []
+        )
 
         # P0.4: Enhanced logging with image_source
         log_event(
@@ -776,21 +895,50 @@ class AggregatorAgent:
             if self.provider == "silicon"
             else self.llm.ark_vision_model
         )
+        if not use_images_for_aggregate:
+            model = (
+                self.llm.silicon_model
+                if self.provider == "silicon"
+                else self.llm.ark_model
+            )
         try:
             settings = get_settings()
             use_image_tools = bool(
                 self.provider == "ark"
                 and bool(getattr(settings, "ark_image_process_enabled", False))
             )
-            text = await _call_llm_with_backoff(
-                lambda: self.llm.generate_with_images(
+            if not use_images_for_aggregate:
+                use_image_tools = False
+            visual_risk = bool((state.preprocess_meta or {}).get("visual_risk"))
+            if use_image_tools and not (figure_urls or visual_risk):
+                # Only enable image_process when we either have explicit slices OR we have a clear
+                # diagram/geometry risk signal from OCR (slices may be missing in qindex_only/off).
+                use_image_tools = False
+
+            def _call_llm(max_tokens: int):
+                if use_images_for_aggregate:
+                    return self.llm.generate_with_images(
+                        system_prompt=system_prompt,
+                        user_prompt=prompt,
+                        images=image_refs,
+                        provider=self.provider,
+                        max_tokens=int(max_tokens),
+                        temperature=0.2,
+                        use_tools=use_image_tools,
+                    )
+                return self.llm.generate(
+                    prompt=prompt,
                     system_prompt=system_prompt,
-                    user_prompt=prompt,
-                    images=image_refs,
                     provider=self.provider,
-                    max_tokens=self.max_tokens,
+                    max_tokens=int(max_tokens),
                     temperature=0.2,
-                    use_tools=use_image_tools,
+                )
+
+            text = await _call_llm_with_backoff(
+                lambda: _call_llm(
+                    int(max(int(self.max_tokens), 12000))
+                    if not use_images_for_aggregate
+                    else int(self.max_tokens)
                 ),
                 timeout_s=effective_timeout,
             )
@@ -878,6 +1026,48 @@ class AggregatorAgent:
         except Exception:
             pass
         if not parsed:
+            # If the model output was truncated (e.g., max_output_tokens too low), retry once with a higher cap.
+            # This keeps fast-path latency lower while preserving correctness for multi-question pages.
+            if self.provider == "ark":
+                retry_max_tokens = int(max(int(self.max_tokens) * 3, 12000))
+                if retry_max_tokens != int(self.max_tokens):
+                    log_event(
+                        aggregator_logger,
+                        "agent_aggregate_parse_retry",
+                        session_id=state.session_id,
+                        request_id=request_id,
+                        prev_max_tokens=int(self.max_tokens),
+                        retry_max_tokens=retry_max_tokens,
+                    )
+                    try:
+                        text2 = await _call_llm_with_backoff(
+                            lambda: _call_llm(retry_max_tokens),
+                            timeout_s=effective_timeout,
+                        )
+                        raw2 = text2.text if hasattr(text2, "text") else str(text2)
+                        parse_start2 = time.monotonic()
+                        parsed2 = _parse_json(raw2, AutonomousPayload)
+                        parse_ms2 = int((time.monotonic() - parse_start2) * 1000)
+                        try:
+                            timings = state.partial_results.setdefault("timings_ms", {})
+                            if isinstance(timings, dict):
+                                timings["llm_aggregate_parse_retry_ms"] = int(
+                                    timings.get("llm_aggregate_parse_retry_ms", 0)
+                                ) + int(parse_ms2)
+                        except Exception:
+                            pass
+                        if parsed2:
+                            return parsed2
+                    except Exception as retry_err:
+                        log_event(
+                            aggregator_logger,
+                            "agent_aggregate_parse_retry_failed",
+                            level="warning",
+                            session_id=state.session_id,
+                            request_id=request_id,
+                            error_type=retry_err.__class__.__name__,
+                            error=str(retry_err),
+                        )
             logger.error(
                 f"Aggregator parse failed for {state.session_id}. Raw response (first 500 chars): {raw_text[:500]}"
             )
@@ -1000,24 +1190,57 @@ async def run_autonomous_grade_agent(
         request_id=request_id,
         images=len(images or []),
     )
-    # Use 3-tier preprocessing pipeline: A (qindex cache) → B (VLM locator) → C (OpenCV fallback)
-    pipeline = PreprocessingPipeline(session_id=session_id, request_id=request_id)
-    for ref in images or []:
-        result = await pipeline.process_image(
-            ref, prefix=f"autonomous/prep/{session_id}/", use_cache=True
+    settings = get_settings()
+    preprocess_mode = (
+        str(getattr(settings, "autonomous_preprocess_mode", "full") or "full")
+        .strip()
+        .lower()
+    )
+    if preprocess_mode not in {"full", "qindex_only", "off"}:
+        preprocess_mode = "full"
+    state.preprocess_meta["mode"] = preprocess_mode
+    try:
+        # Guardrail: the default token budget (e.g. 12k) is too small for real pages (OCR + evidence + output),
+        # and can cause premature "token_budget_exhausted" downgrades in full/visual paths.
+        if budget.token_budget_total is not None:
+            budget.token_budget_total = max(int(budget.token_budget_total), 40000)
+    except Exception:
+        pass
+
+    if preprocess_mode == "off":
+        log_event(
+            logger,
+            "agent_preprocess_skipped",
+            session_id=session_id,
+            request_id=request_id,
+            mode=preprocess_mode,
         )
-        # Add all figure slices
-        for fig_url in result.figure_urls or []:
-            state.slice_urls.setdefault("figure", []).append(fig_url)
-        # Add all question slices
-        for q_url in result.question_urls or []:
-            state.slice_urls.setdefault("question", []).append(q_url)
-        if result.warnings:
-            state.warnings.extend(result.warnings)
-        state.preprocess_meta.setdefault("results", []).append(result.to_dict())
-        if result.figure_too_small:
-            state.preprocess_meta["figure_too_small"] = True
-        # Per-image preprocess details already logged inside preprocessing pipeline.
+    else:
+        enable_vlm = preprocess_mode == "full"
+        enable_opencv = preprocess_mode == "full"
+        pipeline = PreprocessingPipeline(
+            session_id=session_id,
+            request_id=request_id,
+            enable_qindex_cache=True,
+            enable_vlm=enable_vlm,
+            enable_opencv=enable_opencv,
+        )
+        for ref in images or []:
+            result = await pipeline.process_image(
+                ref, prefix=f"autonomous/prep/{session_id}/", use_cache=True
+            )
+            # Add all figure slices
+            for fig_url in result.figure_urls or []:
+                state.slice_urls.setdefault("figure", []).append(fig_url)
+            # Add all question slices
+            for q_url in result.question_urls or []:
+                state.slice_urls.setdefault("question", []).append(q_url)
+            if result.warnings:
+                state.warnings.extend(result.warnings)
+            state.preprocess_meta.setdefault("results", []).append(result.to_dict())
+            if result.figure_too_small:
+                state.preprocess_meta["figure_too_small"] = True
+            # Per-image preprocess details already logged inside preprocessing pipeline.
 
     # Aggregate preprocess sources + timings across pages (for T1 timing breakdown).
     source_counts: Dict[str, int] = {}
@@ -1054,22 +1277,106 @@ async def run_autonomous_grade_agent(
         figure=len(state.slice_urls.get("figure") or []),
         question=len(state.slice_urls.get("question") or []),
         elapsed_ms=preprocess_total_ms,
+        mode=preprocess_mode,
     )
-    state.partial_results.setdefault("timings_ms", {})["preprocess_total_ms"] = (
-        preprocess_total_ms
-    )
+    state.partial_results.setdefault("timings_ms", {})[
+        "preprocess_total_ms"
+    ] = preprocess_total_ms
     for k, v in preprocess_stage_ms.items():
         state.partial_results.setdefault("timings_ms", {})[f"preprocess_{k}"] = int(v)
 
     store = get_session_store()
     store.save(session_id, state)
 
+    # Fast-path guardrail: for qindex_only/off modes, ensure we have OCR text before the loop,
+    # so Aggregator can prefer text-only aggregation (much faster than deep vision reasoning).
+    try:
+        if preprocess_mode in {"qindex_only", "off"} and not state.ocr_text:
+            img0 = state.image_urls[0] if state.image_urls else ""
+            if img0:
+                log_event(
+                    executor_logger,
+                    "agent_tool_call",
+                    session_id=state.session_id,
+                    request_id=request_id,
+                    tool="ocr_fallback",
+                    status="running",
+                    iteration=0,
+                )
+                t0 = time.monotonic()
+                raw = await asyncio.to_thread(
+                    ocr_fallback, image=img0, provider=provider
+                )
+                dur_ms = int((time.monotonic() - t0) * 1000)
+                tr = ToolResult.from_legacy(
+                    tool_name="ocr_fallback",
+                    stage="autonomous.tool.ocr_fallback",
+                    raw=raw,
+                    request_id=request_id,
+                    session_id=state.session_id,
+                    timing_ms=dur_ms,
+                )
+                state.tool_results["ocr_fallback"] = tr.to_dict(merge_raw=True)
+                state.attempted_tools["ocr_fallback"] = {
+                    "status": raw.get("status") if isinstance(raw, dict) else "error",
+                    "reason": (raw.get("message") if isinstance(raw, dict) else None),
+                }
+                if isinstance(raw, dict) and raw.get("status") == "ok":
+                    state.ocr_text = raw.get("text") or state.ocr_text
+                try:
+                    timings = state.partial_results.setdefault("timings_ms", {})
+                    if isinstance(timings, dict):
+                        timings["tools_total_ms"] = int(
+                            timings.get("tools_total_ms", 0)
+                        ) + int(dur_ms)
+                        timings["tool_ocr_fallback_ms"] = int(
+                            timings.get("tool_ocr_fallback_ms", 0)
+                        ) + int(dur_ms)
+                except Exception:
+                    pass
+                log_event(
+                    executor_logger,
+                    "agent_tool_done",
+                    session_id=state.session_id,
+                    request_id=request_id,
+                    tool="ocr_fallback",
+                    status="completed" if bool(tr.ok) else "error",
+                    iteration=0,
+                    duration_ms=dur_ms,
+                    needs_review=bool(tr.needs_review),
+                    warning_codes=tr.warning_codes,
+                    error_code=tr.error_code,
+                )
+                store.save(session_id, state)
+    except Exception:
+        pass
+
+    planner_max_tokens = int(
+        getattr(
+            settings,
+            "autonomous_agent_planner_max_tokens",
+            min(1200, int(max_tokens)),
+        )
+    )
+    reflector_max_tokens = int(
+        getattr(
+            settings,
+            "autonomous_agent_reflector_max_tokens",
+            min(1200, int(max_tokens)),
+        )
+    )
     planner = PlannerAgent(
-        llm=llm, provider=provider, max_tokens=max_tokens, timeout_s=timeout_s
+        llm=llm,
+        provider=provider,
+        max_tokens=planner_max_tokens,
+        timeout_s=timeout_s,
     )
     executor = ExecutorAgent(provider=provider, session_id=session_id)
     reflector = ReflectorAgent(
-        llm=llm, provider=provider, max_tokens=max_tokens, timeout_s=timeout_s
+        llm=llm,
+        provider=provider,
+        max_tokens=reflector_max_tokens,
+        timeout_s=timeout_s,
     )
     aggregator = AggregatorAgent(
         llm=llm,
@@ -1078,6 +1385,15 @@ async def run_autonomous_grade_agent(
         subject=subject,
         timeout_s=timeout_s,
     )
+
+    fast_finalize = bool(
+        preprocess_mode in {"off", "qindex_only"}
+        and bool(state.ocr_text)
+        and not (state.slice_urls.get("figure") or [])
+        and not (state.slice_urls.get("question") or [])
+    )
+    if fast_finalize:
+        max_iterations = 0
 
     for iteration in range(max_iterations):
         if budget.is_time_exhausted():

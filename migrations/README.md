@@ -30,4 +30,3 @@ python3 scripts/migrate.py check
 将检查：
 - 是否存在缺失的 `down` 文件
 - 迁移编号格式是否正确
-

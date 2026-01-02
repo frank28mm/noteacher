@@ -46,6 +46,7 @@ import homework_agent.api.chat as chat_api  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+
 def _now_iso_utc() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -404,7 +405,8 @@ def _prepare_chat_context_or_abort(
                 session_data["focus_question_number"] = str(mentioned)
             else:
                 wants_switch = any(
-                    k in (req.question or "") for k in ("换一题", "下一题", "换个", "换个题")
+                    k in (req.question or "")
+                    for k in ("换一题", "下一题", "换个", "换个题")
                 )
                 if wants_switch or not session_data.get("focus_question_number"):
                     _abort_with_assistant_message(
@@ -691,7 +693,9 @@ async def _stream_socratic_llm_to_sse(
 
     buffer = ""
     last_emit = time.monotonic()
-    heartbeat_interval = float(getattr(settings, "chat_heartbeat_interval_seconds", 30.0) or 30.0)
+    heartbeat_interval = float(
+        getattr(settings, "chat_heartbeat_interval_seconds", 30.0) or 30.0
+    )
     idle_disconnect_seconds = float(
         getattr(settings, "chat_idle_disconnect_seconds", 0.0) or 0.0
     )

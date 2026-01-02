@@ -1,0 +1,228 @@
+{
+  "generated_at": "20260101_145518",
+  "api_base": "http://127.0.0.1:8000/api/v1",
+  "image_file": "/Users/frank/Desktop/作业档案/数学/202511/1103/IMG_0699 copy.JPG",
+  "upload_id": "upl_59e20725b4154c15",
+  "upload_ms": 7775,
+  "preprocess_mode": "full",
+  "cases": [
+    {
+      "preprocess_mode": "full",
+      "variant": "url",
+      "job_id": "job_26ab331f76d448c4",
+      "session_id": "bench_full_url_835bf3",
+      "upload_id": "upl_59e20725b4154c15",
+      "grade_status": "done",
+      "queue_wait_ms": 5,
+      "total_ms": 489084,
+      "timings_ms": {
+        "preprocess_total_ms": 227620,
+        "preprocess_vlm_locate_ms": 136180,
+        "preprocess_vlm_crop_upload_ms": 91438,
+        "preprocess_vlm_total_ms": 227618,
+        "tools_total_ms": 1621,
+        "tool_ocr_fallback_ms": 1621,
+        "compress_total_ms": 3224,
+        "compress_download_ms": 1111,
+        "compress_decode_ms": 32,
+        "compress_resize_ms": 56,
+        "compress_encode_ms": 2,
+        "compress_upload_ms": 2021,
+        "llm_aggregate_call_ms": 199018,
+        "llm_aggregate_parse_ms": 0,
+        "grade_total_duration_ms": 488163
+      },
+      "qbank_meta": {
+        "vision_provider_requested": "doubao",
+        "vision_used_base64_fallback": false,
+        "vision_used_proxy_url": false,
+        "llm_provider_requested": "ark",
+        "llm_used_fallback": false,
+        "experiments": {
+          "grade.autonomous_loop": {
+            "enabled": false,
+            "variant": "",
+            "reason": "missing",
+            "key": "bench_full_url_835bf3"
+          }
+        },
+        "ark_response_id": "resp_02176724902836081abbd6c16bee1cf75e33ac11302acbdb5fd1f",
+        "ark_image_process_requested": true,
+        "ark_image_process_enabled": true,
+        "updated_at": "2026-01-01T14:33:58.352616",
+        "grade_status": "done",
+        "grade_summary": "共16题：选择题中1题正确、2题错误、1题未答、1题不确定；填空题中3题正确、2题错误、4题未答；解答题中1题正确、1题错误。需重点复习多项式运算、完全平方公式、幂的运算等知识点，补充缺失答案并修正概念错误。",
+        "warnings": [
+          "部分题目存在答案缺失（如选择5、填空8/10/11/13），建议学生补充。",
+          "选择题3和填空题12、14存在概念或计算错误，需加强相关知识点复习。",
+          "题目3的选项可能存在错误，建议人工复核。",
+          "⚠️ Token预算已耗尽，结果可能不完整，建议人工复核"
+        ],
+        "timings_ms": {
+          "preprocess_total_ms": 227620,
+          "preprocess_vlm_locate_ms": 136180,
+          "preprocess_vlm_crop_upload_ms": 91438,
+          "preprocess_vlm_total_ms": 227618,
+          "tools_total_ms": 1621,
+          "tool_ocr_fallback_ms": 1621,
+          "compress_total_ms": 3224,
+          "compress_download_ms": 1111,
+          "compress_decode_ms": 32,
+          "compress_resize_ms": 56,
+          "compress_encode_ms": 2,
+          "compress_upload_ms": 2021,
+          "llm_aggregate_call_ms": 199018,
+          "llm_aggregate_parse_ms": 0,
+          "grade_total_duration_ms": 488163
+        },
+        "vision_raw_len": 1519,
+        "questions_count": 17,
+        "questions_with_options": 0
+      }
+    },
+    {
+      "preprocess_mode": "full",
+      "variant": "proxy",
+      "job_id": "job_d02d4bb24a3f40c2",
+      "session_id": "bench_full_proxy_260627",
+      "upload_id": "upl_59e20725b4154c15",
+      "grade_status": "done",
+      "queue_wait_ms": 5,
+      "total_ms": 766652,
+      "timings_ms": {
+        "preprocess_total_ms": 81212,
+        "preprocess_vlm_locate_ms": 65892,
+        "preprocess_vlm_crop_upload_ms": 15319,
+        "preprocess_vlm_total_ms": 81211,
+        "tools_total_ms": 1982,
+        "tool_ocr_fallback_ms": 1982,
+        "compress_total_ms": 4453,
+        "compress_download_ms": 2078,
+        "compress_decode_ms": 33,
+        "compress_resize_ms": 55,
+        "compress_encode_ms": 2,
+        "compress_upload_ms": 2284,
+        "grade_total_duration_ms": 600002
+      },
+      "qbank_meta": {
+        "vision_provider_requested": "doubao",
+        "vision_used_base64_fallback": false,
+        "vision_used_proxy_url": false,
+        "llm_provider_requested": "ark",
+        "llm_used_fallback": false,
+        "experiments": {
+          "grade.autonomous_loop": {
+            "enabled": false,
+            "variant": "",
+            "reason": "missing",
+            "key": "bench_full_proxy_260627"
+          }
+        },
+        "updated_at": "2026-01-01T14:44:02.403553",
+        "grade_status": "done",
+        "grade_summary": "批改暂时失败，建议稍后重试或人工复核",
+        "warnings": [
+          "autonomous_agent_llm_failed",
+          "needs_review",
+          "⚠️ Token预算已耗尽，结果可能不完整，建议人工复核",
+          "⚠️ 超时预算已耗尽，结果可能不完整，建议人工复核"
+        ],
+        "timings_ms": {
+          "preprocess_total_ms": 81212,
+          "preprocess_vlm_locate_ms": 65892,
+          "preprocess_vlm_crop_upload_ms": 15319,
+          "preprocess_vlm_total_ms": 81211,
+          "tools_total_ms": 1982,
+          "tool_ocr_fallback_ms": 1982,
+          "compress_total_ms": 4453,
+          "compress_download_ms": 2078,
+          "compress_decode_ms": 33,
+          "compress_resize_ms": 55,
+          "compress_encode_ms": 2,
+          "compress_upload_ms": 2284,
+          "grade_total_duration_ms": 600002
+        },
+        "vision_raw_len": 1519,
+        "questions_count": 1,
+        "questions_with_options": 0
+      }
+    },
+    {
+      "preprocess_mode": "full",
+      "variant": "data_url_first_page",
+      "job_id": "job_3d2c2937a3ca4028",
+      "session_id": "bench_full_data_url_first_page_3f02ed",
+      "upload_id": "upl_59e20725b4154c15",
+      "grade_status": "done",
+      "queue_wait_ms": 5,
+      "total_ms": 507924,
+      "timings_ms": {
+        "preprocess_total_ms": 99230,
+        "preprocess_vlm_locate_ms": 83195,
+        "preprocess_vlm_crop_upload_ms": 16034,
+        "preprocess_vlm_total_ms": 99229,
+        "tools_total_ms": 90716,
+        "tool_ocr_fallback_ms": 90716,
+        "compress_total_ms": 2790,
+        "compress_download_ms": 1130,
+        "compress_decode_ms": 33,
+        "compress_resize_ms": 54,
+        "compress_encode_ms": 2,
+        "compress_upload_ms": 1569,
+        "llm_aggregate_call_ms": 236828,
+        "llm_aggregate_parse_ms": 0,
+        "grade_total_duration_ms": 506519
+      },
+      "qbank_meta": {
+        "vision_provider_requested": "doubao",
+        "vision_used_base64_fallback": false,
+        "vision_used_proxy_url": false,
+        "llm_provider_requested": "ark",
+        "llm_used_fallback": false,
+        "experiments": {
+          "grade.autonomous_loop": {
+            "enabled": false,
+            "variant": "",
+            "reason": "missing",
+            "key": "bench_full_data_url_first_page_3f02ed"
+          }
+        },
+        "ark_response_id": "resp_0217672502697001888091dae27cb68a8dc76ef712c2eb1f37bd2",
+        "ark_image_process_requested": true,
+        "ark_image_process_enabled": true,
+        "updated_at": "2026-01-01T14:55:17.470592",
+        "grade_status": "done",
+        "grade_summary": "共16题，其中6题正确，5题错误，5题因未作答或信息缺失无法判定。建议学生补充未作答题目，复习幂的运算、完全平方公式、去括号法则等知识点。",
+        "warnings": [
+          "学生在选择5、填空8、10、11、13未作答，需补充答案",
+          "部分题目答案错误（选择2、3；填空12、14；解答15(2)），需复习相关知识点",
+          "反思结果指出未使用math_verify工具，导致部分代数运算的验证不足，建议后续使用该工具确认答案正确性",
+          "token_budget_exhausted_needs_review",
+          "needs_review",
+          "⚠️ Token预算已耗尽，结果可能不完整，建议人工复核",
+          "Conservative Gate: Downgraded 6 correct items due to risks: ['budget_exhausted', 'needs_review']"
+        ],
+        "timings_ms": {
+          "preprocess_total_ms": 99230,
+          "preprocess_vlm_locate_ms": 83195,
+          "preprocess_vlm_crop_upload_ms": 16034,
+          "preprocess_vlm_total_ms": 99229,
+          "tools_total_ms": 90716,
+          "tool_ocr_fallback_ms": 90716,
+          "compress_total_ms": 2790,
+          "compress_download_ms": 1130,
+          "compress_decode_ms": 33,
+          "compress_resize_ms": 54,
+          "compress_encode_ms": 2,
+          "compress_upload_ms": 1569,
+          "llm_aggregate_call_ms": 236828,
+          "llm_aggregate_parse_ms": 0,
+          "grade_total_duration_ms": 506519
+        },
+        "vision_raw_len": 1661,
+        "questions_count": 17,
+        "questions_with_options": 0
+      }
+    }
+  ]
+}

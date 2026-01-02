@@ -5,7 +5,6 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple
 import re
@@ -133,10 +132,10 @@ def _select_question_number_from_text(
         if numeric:
             # Stricter check for numeric terms to avoid math expressions
             # e.g. "3" should not match in "3x", "x^3", "3+5", "5-3"
-            
+
             # Check if term is just digits (simple number case)
             is_simple_number = re.fullmatch(r"\d+", term) is not None
-            
+
             if is_simple_number:
                 # For simple numbers, enforce stricter boundaries:
                 # Not preceded/followed by digits, letters, or math operators (+-*/^=)
@@ -145,7 +144,7 @@ def _select_question_number_from_text(
                 exclusion = r"[A-Za-z0-9+\-*/^=]"
                 pat = re.compile(rf"(?<!{exclusion}){re.escape(term)}(?!{exclusion})")
                 return [(m.start(), m.end()) for m in pat.finditer(msg_norm)]
-            
+
             # For complex numbers like "20(1)", standard digit boundaries are sufficient
             pat = re.compile(rf"(?<!\d){re.escape(term)}(?!\d)")
             return [(m.start(), m.end()) for m in pat.finditer(msg_norm)]

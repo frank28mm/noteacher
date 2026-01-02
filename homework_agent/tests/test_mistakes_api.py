@@ -96,6 +96,7 @@ class _FakeTable:
             return _Resp(data=kept)
 
         if self._delete:
+
             def _match(r: Dict[str, Any]) -> bool:
                 for op, k, v in self._filters:
                     if op == "eq" and str(r.get(k) or "") != str(v):
@@ -157,7 +158,9 @@ def test_mistakes_history_exclusions_and_stats(monkeypatch: pytest.MonkeyPatch):
                 },
             }
         ],
-        "mistake_exclusions": [{"user_id": "u1", "submission_id": "sub1", "item_id": "item-2"}],
+        "mistake_exclusions": [
+            {"user_id": "u1", "submission_id": "sub1", "item_id": "item-2"}
+        ],
     }
 
     monkeypatch.setattr(
@@ -202,4 +205,3 @@ def test_mistakes_history_exclusions_and_stats(monkeypatch: pytest.MonkeyPatch):
     assert r5.status_code == 200
     r6 = client.get("/api/v1/mistakes", headers={"X-User-Id": "u1"}).json()
     assert [it["item_id"] for it in r6["items"]] == ["item-2"]
-

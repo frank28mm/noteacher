@@ -4,12 +4,19 @@ import argparse
 from typing import Any, Dict, List, Optional
 
 from homework_agent.services.facts_extractor import extract_facts_from_grade_result
-from homework_agent.utils.supabase_client import get_storage_client
+from homework_agent.utils.supabase_client import (
+    get_service_role_storage_client,
+    get_storage_client,
+)
 from homework_agent.utils.taxonomy import taxonomy_version
 
 
 def _safe_table(name: str):
-    storage = get_storage_client()
+    # Prefer service role for backfills (bypass RLS); fall back to anon for dev-only setups.
+    try:
+        storage = get_service_role_storage_client()
+    except Exception:
+        storage = get_storage_client()
     return storage.client.table(name)
 
 

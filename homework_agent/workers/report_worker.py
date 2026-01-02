@@ -19,10 +19,14 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from homework_agent.services.report_features import compute_report_features
 from homework_agent.services.llm import LLMClient, ReportResult
+from homework_agent.services.facts_extractor import extract_facts_from_grade_result
 from homework_agent.utils.logging_setup import setup_file_logging, silence_noisy_loggers
 from homework_agent.utils.observability import log_event
 from homework_agent.utils.settings import get_settings
-from homework_agent.utils.supabase_client import get_storage_client
+from homework_agent.utils.supabase_client import (
+    get_service_role_storage_client,
+    get_storage_client,
+)
 from homework_agent.utils.taxonomy import taxonomy_version
 from homework_agent.utils.prompt_manager import get_prompt_manager
 from homework_agent.utils.env import load_project_dotenv
@@ -55,7 +59,11 @@ def _iso(dt: datetime) -> str:
 
 
 def _safe_table(name: str):
-    storage = get_storage_client()
+    # Prefer service role for workers (bypass RLS); fall back to anon for dev-only setups.
+    try:
+        storage = get_service_role_storage_client()
+    except Exception:
+        storage = get_storage_client()
     return storage.client.table(name)
 
 
@@ -64,7 +72,7 @@ def _load_pending_job() -> Optional[Dict[str, Any]]:
         resp = (
             _safe_table("report_jobs")
             .select("*")
-            .eq("status", "pending")
+            .in_("status", ["queued", "pending"])
             .order("created_at", desc=False)
             .limit(1)
             .execute()
@@ -82,18 +90,17 @@ def _lock_job(job_id: str) -> Optional[Dict[str, Any]]:
     now = _iso(_utc_now())
     who = f"{socket.gethostname()}:{os.getpid()}"
     try:
+        payload = {
+            "status": "running",
+            "updated_at": now,
+            "locked_at": now,
+            "locked_by": who,
+        }
         resp = (
             _safe_table("report_jobs")
-            .update(
-                {
-                    "status": "running",
-                    "updated_at": now,
-                    # Note: locked_at column missing in current DB schema
-                }
-            )
+            .update(payload)
             .eq("id", str(job_id))
-            .eq("status", "pending")
-            # .select("*") removed due to lib incompatibility
+            .in_("status", ["queued", "pending"])
             .execute()
         )
         rows = getattr(resp, "data", None)
@@ -102,67 +109,258 @@ def _lock_job(job_id: str) -> Optional[Dict[str, Any]]:
         row = rows[0] if isinstance(rows[0], dict) else {}
         return row if isinstance(row, dict) else None
     except Exception:
-        return None
+        # Backward-compatible fallback if lock columns don't exist yet.
+        try:
+            resp2 = (
+                _safe_table("report_jobs")
+                .update({"status": "running", "updated_at": now})
+                .eq("id", str(job_id))
+                .in_("status", ["queued", "pending"])
+                .execute()
+            )
+            rows2 = getattr(resp2, "data", None)
+            if not isinstance(rows2, list) or not rows2:
+                return None
+            row2 = rows2[0] if isinstance(rows2[0], dict) else {}
+            return row2 if isinstance(row2, dict) else None
+        except Exception:
+            return None
 
 
 def _mark_job_failed(*, job_id: str, error: str) -> None:
     now = _iso(_utc_now())
     try:
-        _safe_table("report_jobs").update(
-            {"status": "failed", "error": str(error)[:2000], "updated_at": now}
-        ).eq("id", str(job_id)).execute()
+        payload = {
+            "status": "failed",
+            "error": str(error)[:2000],
+            "last_error": str(error)[:2000],
+            "updated_at": now,
+        }
+        _safe_table("report_jobs").update(payload).eq("id", str(job_id)).execute()
     except Exception:
-        return
+        try:
+            _safe_table("report_jobs").update(
+                {"status": "failed", "error": str(error)[:2000], "updated_at": now}
+            ).eq("id", str(job_id)).execute()
+        except Exception:
+            return
 
 
 def _mark_job_done(*, job_id: str, report_id: str) -> None:
     now = _iso(_utc_now())
     try:
-        _safe_table("report_jobs").update(
-            {"status": "done", "report_id": str(report_id), "updated_at": now}
-        ).eq("id", str(job_id)).execute()
+        payload = {"status": "done", "report_id": str(report_id), "updated_at": now}
+        _safe_table("report_jobs").update(payload).eq("id", str(job_id)).execute()
     except Exception:
-        return
+        try:
+            _safe_table("report_jobs").update({"status": "done", "updated_at": now}).eq(
+                "id", str(job_id)
+            ).execute()
+        except Exception:
+            return
 
 
 def _load_attempts(
     *, user_id: str, since: str, until: str, subject: Optional[str]
 ) -> List[Dict[str, Any]]:
-    q = (
-        _safe_table("question_attempts")
-        .select(
-            "submission_id,item_id,question_number,created_at,subject,verdict,knowledge_tags,knowledge_tags_norm,question_type,difficulty,severity,warnings"
+    try:
+        q = (
+            _safe_table("question_attempts")
+            .select(
+                "submission_id,item_id,question_number,created_at,subject,verdict,knowledge_tags,knowledge_tags_norm,question_type,difficulty,severity,warnings"
+            )
+            .eq("user_id", str(user_id))
+            .gte("created_at", str(since))
+            .lte("created_at", str(until))
+            .order("created_at", desc=True)
+            .limit(5000)
         )
+        if subject:
+            q = q.eq("subject", str(subject))
+        resp = q.execute()
+        rows = getattr(resp, "data", None)
+        return rows if isinstance(rows, list) else []
+    except Exception:
+        return []
+
+
+def _load_attempts_for_submission(
+    *, user_id: str, submission_id: str, subject: Optional[str]
+) -> List[Dict[str, Any]]:
+    try:
+        q = (
+            _safe_table("question_attempts")
+            .select(
+                "submission_id,item_id,question_number,created_at,subject,verdict,knowledge_tags,knowledge_tags_norm,question_type,difficulty,severity,warnings"
+            )
+            .eq("user_id", str(user_id))
+            .eq("submission_id", str(submission_id))
+            .order("created_at", desc=True)
+            .limit(5000)
+        )
+        if subject:
+            q = q.eq("subject", str(subject))
+        resp = q.execute()
+        rows = getattr(resp, "data", None)
+        return rows if isinstance(rows, list) else []
+    except Exception:
+        return []
+
+
+def _load_steps(
+    *, user_id: str, since: str, until: str, subject: Optional[str]
+) -> List[Dict[str, Any]]:
+    try:
+        q = (
+            _safe_table("question_steps")
+            .select(
+                "submission_id,item_id,step_index,created_at,subject,verdict,severity,diagnosis_codes"
+            )
+            .eq("user_id", str(user_id))
+            .gte("created_at", str(since))
+            .lte("created_at", str(until))
+            .order("created_at", desc=True)
+            .limit(10000)
+        )
+        if subject:
+            q = q.eq("subject", str(subject))
+        resp = q.execute()
+        rows = getattr(resp, "data", None)
+        return rows if isinstance(rows, list) else []
+    except Exception:
+        return []
+
+
+def _load_steps_for_submission(
+    *, user_id: str, submission_id: str, subject: Optional[str]
+) -> List[Dict[str, Any]]:
+    try:
+        q = (
+            _safe_table("question_steps")
+            .select(
+                "submission_id,item_id,step_index,created_at,subject,verdict,severity,diagnosis_codes"
+            )
+            .eq("user_id", str(user_id))
+            .eq("submission_id", str(submission_id))
+            .order("created_at", desc=True)
+            .limit(10000)
+        )
+        if subject:
+            q = q.eq("subject", str(subject))
+        resp = q.execute()
+        rows = getattr(resp, "data", None)
+        return rows if isinstance(rows, list) else []
+    except Exception:
+        return []
+
+
+def _fallback_extract_from_submissions(
+    *, user_id: str, since: str, until: str, subject: Optional[str]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Fallback path when derived facts tables are missing/empty:
+    load submissions within the window and re-extract facts in-process.
+    """
+    q = (
+        _safe_table("submissions")
+        .select("submission_id,user_id,subject,created_at,grade_result")
         .eq("user_id", str(user_id))
         .gte("created_at", str(since))
         .lte("created_at", str(until))
         .order("created_at", desc=True)
-        .limit(5000)
+        .limit(2000)
     )
     if subject:
         q = q.eq("subject", str(subject))
     resp = q.execute()
     rows = getattr(resp, "data", None)
-    return rows if isinstance(rows, list) else []
+    rows = rows if isinstance(rows, list) else []
 
-
-def _load_steps(*, user_id: str, since: str, until: str, subject: Optional[str]) -> List[Dict[str, Any]]:
-    q = (
-        _safe_table("question_steps")
-        .select(
-            "submission_id,item_id,step_index,created_at,subject,verdict,severity,diagnosis_codes"
+    all_attempts: List[Dict[str, Any]] = []
+    all_steps: List[Dict[str, Any]] = []
+    tax_ver = taxonomy_version() or None
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        sid = str(r.get("submission_id") or "").strip()
+        uid = str(r.get("user_id") or "").strip()
+        if not sid or not uid:
+            continue
+        facts = extract_facts_from_grade_result(
+            user_id=uid,
+            submission_id=sid,
+            created_at=r.get("created_at"),
+            subject=r.get("subject"),
+            grade_result=r.get("grade_result") or {},
+            taxonomy_version=tax_ver,
         )
+        all_attempts.extend(facts.question_attempts)
+        all_steps.extend(facts.question_steps)
+    return all_attempts, all_steps
+
+
+def _load_submission_meta(
+    *, user_id: str, submission_id: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Return (created_at_iso, subject) for a submission, if available.
+    """
+    try:
+        resp = (
+            _safe_table("submissions")
+            .select("submission_id,created_at,subject")
+            .eq("user_id", str(user_id))
+            .eq("submission_id", str(submission_id))
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None)
+        row = (
+            rows[0]
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict)
+            else {}
+        )
+        created_at = str(row.get("created_at") or "").strip() or None
+        subject = str(row.get("subject") or "").strip() or None
+        return created_at, subject
+    except Exception:
+        return None, None
+
+
+def _fallback_extract_from_submission(
+    *, user_id: str, submission_id: str
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Fallback path: load a single submission and re-extract facts in-process.
+    """
+    q = (
+        _safe_table("submissions")
+        .select("submission_id,user_id,subject,created_at,grade_result")
         .eq("user_id", str(user_id))
-        .gte("created_at", str(since))
-        .lte("created_at", str(until))
-        .order("created_at", desc=True)
-        .limit(10000)
+        .eq("submission_id", str(submission_id))
+        .limit(1)
     )
-    if subject:
-        q = q.eq("subject", str(subject))
     resp = q.execute()
     rows = getattr(resp, "data", None)
-    return rows if isinstance(rows, list) else []
+    row = (
+        rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
+    )
+    if not row:
+        return [], []
+
+    sid = str(row.get("submission_id") or "").strip()
+    uid = str(row.get("user_id") or "").strip()
+    if not sid or not uid:
+        return [], []
+    facts = extract_facts_from_grade_result(
+        user_id=uid,
+        submission_id=sid,
+        created_at=row.get("created_at"),
+        subject=row.get("subject"),
+        grade_result=row.get("grade_result") or {},
+        taxonomy_version=taxonomy_version() or None,
+    )
+    return facts.question_attempts, facts.question_steps
 
 
 def _load_exclusions(*, user_id: str) -> Set[Tuple[str, str]]:
@@ -208,20 +406,30 @@ def _filter_excluded_attempts(
 def _insert_report(
     *,
     user_id: str,
+    report_job_id: str,
     params: Dict[str, Any],
     features: Dict[str, Any],
     narrative: Optional[ReportResult] = None,
 ) -> str:
+    def _to_date(v: Any) -> Optional[str]:
+        s = str(v or "").strip()
+        if not s:
+            return None
+        if "T" in s:
+            s = s.split("T", 1)[0]
+        return s[:10] if len(s) >= 10 else None
+
     # Map to actual DB schema (columns: id, user_id, content, stats, title, created_at, etc.)
     row = {
         "user_id": str(user_id),
+        "report_job_id": str(report_job_id),
         # Store features in stats column
         "stats": features,
         # Store params for reference
         "used_submission_ids": features.get("submission_ids") or [],
         # Time window from params
-        "period_from": params.get("since"),
-        "period_to": params.get("until"),
+        "period_from": _to_date(params.get("since")),
+        "period_to": _to_date(params.get("until")),
     }
     if narrative:
         # Combine narrative_md into content
@@ -295,14 +503,69 @@ def main() -> int:
 
             started = time.monotonic()
             try:
-                since, until, subject = _compute_window(params)
-                attempts = _load_attempts(user_id=user_id, since=since, until=until, subject=subject)
-                steps = _load_steps(user_id=user_id, since=since, until=until, subject=subject)
+                effective_params = dict(params)
+                submission_id = str(effective_params.get("submission_id") or "").strip()
+                subject = str(effective_params.get("subject") or "").strip() or None
+                if submission_id:
+                    created_at, subj2 = _load_submission_meta(
+                        user_id=user_id, submission_id=submission_id
+                    )
+                    if not subject and subj2:
+                        subject = subj2
+                    # Provide a stable window for downstream features/report persistence.
+                    if created_at:
+                        effective_params.setdefault("since", created_at)
+                        effective_params.setdefault("until", created_at)
+
+                    attempts = _load_attempts_for_submission(
+                        user_id=user_id, submission_id=submission_id, subject=subject
+                    )
+                    steps = _load_steps_for_submission(
+                        user_id=user_id, submission_id=submission_id, subject=subject
+                    )
+                    if not attempts and not steps:
+                        attempts, steps = _fallback_extract_from_submission(
+                            user_id=user_id, submission_id=submission_id
+                        )
+                        log_event(
+                            logger,
+                            "report_worker_fallback_extract_from_submission",
+                            job_id=job_id,
+                            user_id=user_id,
+                            submission_id=submission_id,
+                            attempts=len(attempts),
+                            steps=len(steps),
+                        )
+                    window = {
+                        "mode": "submission",
+                        "submission_id": submission_id,
+                        "subject": subject,
+                    }
+                else:
+                    since, until, subject = _compute_window(effective_params)
+                    attempts = _load_attempts(
+                        user_id=user_id, since=since, until=until, subject=subject
+                    )
+                    steps = _load_steps(
+                        user_id=user_id, since=since, until=until, subject=subject
+                    )
+                    if not attempts and not steps:
+                        attempts, steps = _fallback_extract_from_submissions(
+                            user_id=user_id, since=since, until=until, subject=subject
+                        )
+                        log_event(
+                            logger,
+                            "report_worker_fallback_extract_from_submissions",
+                            job_id=job_id,
+                            user_id=user_id,
+                            attempts=len(attempts),
+                            steps=len(steps),
+                        )
+                    window = {"since": since, "until": until, "subject": subject}
                 exclusions = _load_exclusions(user_id=user_id)
                 attempts = _filter_excluded_attempts(attempts, exclusions)
                 # For steps, exclusions only apply to wrong attempts; we keep steps as-is for now (MVP).
 
-                window = {"since": since, "until": until, "subject": subject}
                 features = compute_report_features(
                     user_id=user_id,
                     attempts=attempts,
@@ -311,37 +574,46 @@ def main() -> int:
                     taxonomy_version=taxonomy_version() or None,
                     classifier_version=None,
                 )
-                
+
                 # Narrative Layer
                 report_narrative = None
-                try:
-                    pm = get_prompt_manager()
-                    # We access _load directly or use a better public access if available. 
-                    # Assuming we extend prompt_manager later, but for now _load works.
-                    p_data = pm._load("report_analyst.yaml")
-                    system_tmpl = p_data.get("system_template")
-                    user_tmpl = p_data.get("user_template")
-                    
-                    if system_tmpl and user_tmpl:
-                        user_prompt = Template(user_tmpl).render(
-                            features_json=json.dumps(features, ensure_ascii=False, indent=2)
+                if bool(getattr(settings, "report_narrative_enabled", False)):
+                    try:
+                        pm = get_prompt_manager()
+                        p_data = pm._load("report_analyst.yaml")
+                        system_tmpl = p_data.get("system_template")
+                        user_tmpl = p_data.get("user_template")
+
+                        if system_tmpl and user_tmpl:
+                            user_prompt = Template(user_tmpl).render(
+                                features_json=json.dumps(
+                                    features, ensure_ascii=False, indent=2
+                                )
+                            )
+                            llm = LLMClient()
+                            report_narrative = llm.generate_report(
+                                system_prompt=system_tmpl, user_prompt=user_prompt
+                            )
+                            log_event(
+                                logger, "report_narrative_generated", user_id=user_id
+                            )
+                    except Exception as nl_err:
+                        logger.error(f"Narrative generation failed: {nl_err}")
+                        log_event(
+                            logger,
+                            "report_narrative_failed",
+                            error=str(nl_err),
+                            error_type=nl_err.__class__.__name__,
                         )
-                        # Instantiate LLMClient just-in-time or hoist it out. Hoist is better but this is safe.
-                        llm = LLMClient()
-                        report_narrative = llm.generate_report(
-                            system_prompt=system_tmpl,
-                            user_prompt=user_prompt
-                        )
-                        log_event(logger, "report_narrative_generated", user_id=user_id)
-                except Exception as nl_err:
-                    logger.error(f"Narrative generation failed: {nl_err}")
-                    log_event(logger, "report_narrative_failed", error=str(nl_err))
-                
+                else:
+                    log_event(logger, "report_narrative_skipped", user_id=user_id)
+
                 report_id = _insert_report(
-                    user_id=user_id, 
-                    params=params, 
+                    user_id=user_id,
+                    report_job_id=job_id,
+                    params=effective_params,
                     features=features,
-                    narrative=report_narrative
+                    narrative=report_narrative,
                 )
                 _mark_job_done(job_id=job_id, report_id=report_id)
                 log_event(
@@ -380,4 +652,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

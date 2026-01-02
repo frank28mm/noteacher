@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -27,6 +27,9 @@ def _utc_now() -> datetime:
 class CreateReportRequest(BaseModel):
     window_days: int = Field(default=7, ge=1, le=90)
     subject: Optional[str] = None
+    # Optional: generate report for a single submission (demo-friendly).
+    # When set, the worker should ignore window_days and only use this submission_id.
+    submission_id: Optional[str] = Field(default=None, min_length=1)
 
 
 @router.post("/reports", status_code=status.HTTP_202_ACCEPTED)
@@ -38,17 +41,29 @@ def create_report_job(
 ):
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
     now = _utc_now()
-    since = now - timedelta(days=int(req.window_days))
-    params: Dict[str, Any] = {
-        "window_days": int(req.window_days),
-        "since": since.isoformat(),
-        "until": now.isoformat(),
-    }
+    params: Dict[str, Any] = {}
+    submission_id = str(req.submission_id or "").strip()
+    if submission_id:
+        params["mode"] = "submission"
+        params["submission_id"] = submission_id
+    else:
+        since = now - timedelta(days=int(req.window_days))
+        params.update(
+            {
+                "window_days": int(req.window_days),
+                "since": since.isoformat(),
+                "until": now.isoformat(),
+            }
+        )
     if req.subject:
         params["subject"] = str(req.subject).strip()
 
     try:
-        resp = _safe_table("report_jobs").insert({"user_id": user_id, "params": params}).execute()
+        resp = (
+            _safe_table("report_jobs")
+            .insert({"user_id": user_id, "params": params})
+            .execute()
+        )
         rows = getattr(resp, "data", None)
         row = rows[0] if isinstance(rows, list) and rows else {}
         job_id = str(row.get("id") or "").strip()
@@ -81,7 +96,9 @@ def get_report_job(
         )
         rows = getattr(resp, "data", None)
         if not isinstance(rows, list) or not rows:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="job not found"
+            )
         row = rows[0] if isinstance(rows[0], dict) else {}
         return row
     except HTTPException:
@@ -105,14 +122,17 @@ def get_report(
         resp = (
             _safe_table("reports")
             .select("*")
-            .eq("report_id", str(report_id))
+            # DB schema uses `reports.id` (uuid). Keep route param name `report_id` for compatibility.
+            .eq("id", str(report_id))
             .eq("user_id", str(user_id))
             .limit(1)
             .execute()
         )
         rows = getattr(resp, "data", None)
         if not isinstance(rows, list) or not rows:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="report not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="report not found"
+            )
         row = rows[0] if isinstance(rows[0], dict) else {}
         return row
     except HTTPException:
@@ -148,4 +168,3 @@ def list_reports(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"failed to list reports: {e}",
         ) from e
-

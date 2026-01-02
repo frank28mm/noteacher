@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -63,9 +62,15 @@ def compute_report_features(
     now = _iso_utc_now()
 
     total = len(attempts)
-    correct = sum(1 for a in attempts if (a.get("verdict") or "").strip().lower() == "correct")
-    incorrect = sum(1 for a in attempts if (a.get("verdict") or "").strip().lower() == "incorrect")
-    uncertain = sum(1 for a in attempts if (a.get("verdict") or "").strip().lower() == "uncertain")
+    correct = sum(
+        1 for a in attempts if (a.get("verdict") or "").strip().lower() == "correct"
+    )
+    incorrect = sum(
+        1 for a in attempts if (a.get("verdict") or "").strip().lower() == "incorrect"
+    )
+    uncertain = sum(
+        1 for a in attempts if (a.get("verdict") or "").strip().lower() == "uncertain"
+    )
 
     # Knowledge mastery (tag-level accuracy)
     tag_stats: Dict[str, Dict[str, int]] = {}
@@ -76,7 +81,9 @@ def compute_report_features(
             ts = str(t).strip()
             if not ts:
                 continue
-            s = tag_stats.setdefault(ts, {"total": 0, "correct": 0, "incorrect": 0, "uncertain": 0})
+            s = tag_stats.setdefault(
+                ts, {"total": 0, "correct": 0, "incorrect": 0, "uncertain": 0}
+            )
             s["total"] += 1
             if verdict == "correct":
                 s["correct"] += 1
@@ -108,7 +115,9 @@ def compute_report_features(
         qtype = str(a.get("question_type") or "unknown").strip() or "unknown"
         diff = str(a.get("difficulty") or "unknown").strip() or "unknown"
         key = _bucket_key(question_type=qtype, difficulty=diff)
-        s = bucket_stats.setdefault(key, {"total": 0, "correct": 0, "incorrect": 0, "uncertain": 0})
+        s = bucket_stats.setdefault(
+            key, {"total": 0, "correct": 0, "incorrect": 0, "uncertain": 0}
+        )
         s["total"] += 1
         if verdict == "correct":
             s["correct"] += 1
@@ -131,7 +140,9 @@ def compute_report_features(
                 "accuracy": _safe_div(s["correct"], s["total"]),
             }
         )
-    bucket_rows.sort(key=lambda r: (r["accuracy"] is not None, r.get("accuracy") or 0.0))
+    bucket_rows.sort(
+        key=lambda r: (r["accuracy"] is not None, r.get("accuracy") or 0.0)
+    )
 
     # Process diagnosis from steps
     sev_counts: Dict[str, int] = {}
@@ -153,7 +164,11 @@ def compute_report_features(
         ts = str(a.get("created_at") or "")
         return (pri, ts)
 
-    incorrectish = [a for a in attempts if (a.get("verdict") or "").strip().lower() in {"incorrect", "uncertain"}]
+    incorrectish = [
+        a
+        for a in attempts
+        if (a.get("verdict") or "").strip().lower() in {"incorrect", "uncertain"}
+    ]
     incorrectish.sort(key=_sort_key)
     evidence = []
     for a in incorrectish[:20]:
@@ -163,14 +178,29 @@ def compute_report_features(
                 "item_id": a.get("item_id"),
                 "question_number": a.get("question_number"),
                 "verdict": a.get("verdict"),
-                "knowledge_tags": _dedupe_keep_order([str(t).strip() for t in _coerce_list(a.get("knowledge_tags_norm") or []) if str(t).strip()])[:10],
+                "knowledge_tags": _dedupe_keep_order(
+                    [
+                        str(t).strip()
+                        for t in _coerce_list(a.get("knowledge_tags_norm") or [])
+                        if str(t).strip()
+                    ]
+                )[:10],
             }
         )
+
+    submission_ids = _dedupe_keep_order(
+        [
+            str(a.get("submission_id") or "").strip()
+            for a in attempts
+            if str(a.get("submission_id") or "").strip()
+        ]
+    )
 
     return {
         "features_version": FEATURES_VERSION,
         "generated_at": now,
         "user_id": uid,
+        "submission_ids": submission_ids,
         "window": window,
         "taxonomy_version": taxonomy_version,
         "classifier_version": classifier_version,
@@ -195,4 +225,3 @@ def compute_report_features(
         },
         "evidence_refs": evidence,
     }
-

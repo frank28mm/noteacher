@@ -20,9 +20,9 @@ def test_grade_stub():
         "subject": "math",
         "vision_provider": VisionProvider.QWEN3.value,
     }
-    
+
     from unittest.mock import patch, AsyncMock, MagicMock
-    
+
     # Mock the autonomous agent to avoid real execution/blocking
     mock_result = MagicMock()
     mock_result.status = "done"
@@ -31,11 +31,13 @@ def test_grade_stub():
     mock_result.warnings = []
     mock_result.wrong_items = []
     mock_result.ocr_text = "mock OCR"
-    
-    with patch("homework_agent.api.grade.run_autonomous_grade_agent", new_callable=AsyncMock) as mock_run:
+
+    with patch(
+        "homework_agent.api.grade.run_autonomous_grade_agent", new_callable=AsyncMock
+    ) as mock_run:
         mock_run.return_value = mock_result
         resp = client.post("/api/v1/grade", json=payload)
-        
+
     assert resp.status_code == 200
     assert resp.headers.get("X-Request-Id")
     data = resp.json()
@@ -51,21 +53,21 @@ def test_chat_stub_sse():
         "subject": "math",
         "session_id": session_id,
     }
-    
-    from unittest.mock import patch, MagicMock
-    
+
+    from unittest.mock import patch
+
     # Mock LLMClient to avoid real calls
     with patch("homework_agent.api.chat.LLMClient") as MockLLM:
         # Mock the stream method to yield bytes
         async def mock_stream(*args, **kwargs):
-            yield b'event: chat\ndata: {}\n\n'
+            yield b"event: chat\ndata: {}\n\n"
             yield b'event: done\ndata: {"status":"done"}\n\n'
-            
+
         instance = MockLLM.return_value
         instance.socratic_tutor_stream.side_effect = mock_stream
-        
+
         resp = client.post("/api/v1/chat", json=payload)
-    
+
     assert resp.status_code == 200
     assert resp.headers.get("X-Request-Id")
     assert resp.headers["content-type"].startswith("text/event-stream")

@@ -842,6 +842,7 @@ async def call_grade_api(
     llm_provider: str,
     session_id: str,
     auth_token: Optional[str],
+    force_async: bool = False,
 ) -> Dict[str, Any]:
     """调用后端 /api/v1/grade（推荐：upload_id -> 后端反查 images）。"""
     payload = {
@@ -855,13 +856,16 @@ async def call_grade_api(
 
     # Demo 端的 HTTP timeout 必须 ≥ 后端 grade 的 SLA，否则前端会“系统报错”但后端仍在跑。
     async with httpx.AsyncClient(timeout=DEMO_GRADE_TIMEOUT_SECONDS) as client:
+        headers = _build_demo_headers(auth_token=auth_token)
+        if force_async:
+            headers["X-Force-Async"] = "1"
         response = await client.post(
             f"{API_BASE_URL}/grade",
             json=payload,
-            headers=_build_demo_headers(auth_token=auth_token),
+            headers=headers,
         )
 
-    if response.status_code != 200:
+    if response.status_code not in (200, 202):
         raise Exception(f"API 调用失败: {response.status_code} - {response.text}")
 
     return response.json()
@@ -972,149 +976,284 @@ async def call_chat_api(
     return content or "无响应"
 
 
-async def grade_homework_logic(
-    img_path, subject, provider, llm_provider, auth_token, history
-):
-    """批改作业主逻辑（流式状态更新）：上传 → Vision → 批改 → 渲染到 Chat"""
-    # gr.File returns path string or object with .name
+# ========== Demo UI 2.0: Workflow Console Logic ==========
+
+
+async def _call_job_status(job_id: str, *, auth_token: Optional[str]) -> Dict[str, Any]:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            f"{API_BASE_URL}/jobs/{job_id}",
+            headers=_build_demo_headers(auth_token=auth_token),
+        )
+    if r.status_code != 200:
+        raise Exception(f"job 查询失败: {r.status_code} - {r.text}")
+    data = r.json() if r.content else {}
+    return data if isinstance(data, dict) else {}
+
+
+async def _call_create_report_job(
+    *,
+    window_days: int,
+    subject: Optional[str],
+    auth_token: Optional[str],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"window_days": int(window_days)}
+    if subject:
+        payload["subject"] = str(subject).strip()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            f"{API_BASE_URL}/reports",
+            json=payload,
+            headers=_build_demo_headers(auth_token=auth_token),
+        )
+    if r.status_code not in (200, 202):
+        raise Exception(f"report job 创建失败: {r.status_code} - {r.text}")
+    data = r.json() if r.content else {}
+    return data if isinstance(data, dict) else {}
+
+
+async def _call_report_job(job_id: str, *, auth_token: Optional[str]) -> Dict[str, Any]:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            f"{API_BASE_URL}/reports/jobs/{job_id}",
+            headers=_build_demo_headers(auth_token=auth_token),
+        )
+    if r.status_code != 200:
+        raise Exception(f"report job 查询失败: {r.status_code} - {r.text}")
+    data = r.json() if r.content else {}
+    return data if isinstance(data, dict) else {}
+
+
+async def _call_get_report(
+    report_id: str, *, auth_token: Optional[str]
+) -> Dict[str, Any]:
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.get(
+            f"{API_BASE_URL}/reports/{report_id}",
+            headers=_build_demo_headers(auth_token=auth_token),
+        )
+    if r.status_code != 200:
+        raise Exception(f"report 查询失败: {r.status_code} - {r.text}")
+    data = r.json() if r.content else {}
+    return data if isinstance(data, dict) else {}
+
+
+
+async def submit_job_handler(img_path, auth_token):
+    """Async Submit (Real): uploads -> /grade (forced async) -> returns job_id + session_id."""
+    # Hardcoded defaults for simplified UI
+    subject = "math"
+    provider = "doubao"
+    llm_provider = "ark"
+
     if hasattr(img_path, "name"):
         img_path = img_path.name
 
     if not img_path:
-        yield [
-            {"role": "assistant", "content": "❌ 请先上传图片文件。"}
-        ], None, None, "❌ 未选择文件"
-        return
+        raise gr.Error("请先上传图片")
 
-    session_id = f"demo_{uuid.uuid4().hex[:8]}"
-    started = time.monotonic()
     auth_token = (auth_token or "").strip() or None
-    history = []
-    image_added = False
+    session_id = f"demo_{uuid.uuid4().hex[:8]}"
 
+    # 1. Upload (Real)
     try:
-        # Step 1: 上传到后端 /uploads（后端落 Supabase Storage，返回 upload_id）
-        yield history, session_id, None, _render_stage_lines(
-            "uploading", int(time.monotonic() - started)
+        # Reuse existing upload logic
+        upload_resp = await asyncio.to_thread(
+            upload_to_backend,
+            img_path,
+            session_id=session_id,
+            auth_token=auth_token,
         )
-
-        upload_task = asyncio.create_task(
-            asyncio.to_thread(
-                upload_to_backend,
-                img_path,
-                session_id=session_id,
-                auth_token=auth_token,
-            )
-        )
-        while not upload_task.done():
-            await asyncio.sleep(0.15)
-            yield history, session_id, None, _render_stage_lines(
-                "uploading", int(time.monotonic() - started)
-            )
-
-        upload_resp = await upload_task
-        upload_id = str(upload_resp.get("upload_id") or "").strip()
-        page_urls = upload_resp.get("page_image_urls") or []
-        if not upload_id:
-            history[-1]["content"] = "❌ 上传失败，未获取到 upload_id。"
-            yield history, session_id, None, "❌ 上传失败"
-            return
-        if not (isinstance(page_urls, list) and page_urls):
-            history[-1]["content"] = "❌ 上传失败，未获取到 page_image_urls。"
-            yield history, session_id, None, "❌ 上传失败"
-            return
-
-        page_url = str(page_urls[0])
-        if page_url and not image_added:
-            history.append(
-                {
-                    "role": "user",
-                    "content": f"![原图]({page_url})\n\n请帮我批改这份作业",
-                }
-            )
-            image_added = True
-        yield history, session_id, page_url, _render_stage_lines(
-            "accepted", int(time.monotonic() - started)
-        )
-
-        # Step 1.5: 过程摘要（紧跟在用户上传消息后，流式更新）
-        process_lines: List[str] = []
-        process_msg = {"role": "assistant", "content": ""}
-        history.append(process_msg)
-        process_lines = _update_process_summary(
-            "grade_start", int(time.monotonic() - started), process_lines, "已开始处理…"
-        )
-        process_msg["content"] = _render_process_summary(process_lines)
-        yield history, session_id, page_url, _render_stage_lines(
-            "accepted", int(time.monotonic() - started)
-        )
-
-        # Step 2: 调用后端 /grade（upload_id -> 后端反查 images）
-        grade_task = asyncio.create_task(
-            call_grade_api(
-                upload_id=upload_id,
-                subject=subject,
-                provider=provider,
-                llm_provider=llm_provider,
-                session_id=session_id,
-                auth_token=auth_token,
-            )
-        )
-
-        last_progress_stage = "accepted"
-        while not grade_task.done():
-            await asyncio.sleep(0.4)
-            p = await call_grade_progress(session_id, auth_token=auth_token)
-            message = ""
-            if isinstance(p, dict):
-                stage = str(p.get("stage") or "").strip() or last_progress_stage
-                message = str(p.get("message") or "").strip()
-                last_progress_stage = stage
-            else:
-                stage = last_progress_stage
-            process_lines = _update_process_summary(
-                stage, int(time.monotonic() - started), process_lines, message
-            )
-            process_msg["content"] = _render_process_summary(process_lines)
-            yield history, session_id, page_url, _render_stage_lines(
-                stage, int(time.monotonic() - started)
-            )
-
-        result = await grade_task
-        process_lines = _update_process_summary(
-            "done", int(time.monotonic() - started), process_lines, "批改结果已生成"
-        )
-        process_msg["content"] = _render_process_summary(process_lines)
-        if page_url and not image_added:
-            history.append(
-                {
-                    "role": "user",
-                    "content": f"![原图]({page_url})\n\n请帮我批改这份作业",
-                }
-            )
-            image_added = True
-        sections = build_grade_report_sections(result)
-        for section in sections:
-            history.append({"role": "assistant", "content": ""})
-            for chunk in _chunk_text_for_stream(section):
-                history[-1]["content"] += chunk
-                yield history, session_id, page_url, _render_stage_lines(
-                    "done", int(time.monotonic() - started)
-                )
-                await asyncio.sleep(0.02)
-        return
-
-    except ValueError as e:
-        history[-1]["content"] = f"❌ {str(e)}"
-        yield history, session_id, None, f"❌ 失败：{e}"
-        return
+        upload_id = upload_resp.get("upload_id")
     except Exception as e:
-        err_msg = str(e)
-        if "20040" in err_msg:
-            err_msg += "\n\n提示：模型无法下载该 URL，建议检查图片是否可公开访问"
-        history[-1]["content"] = f"❌ 系统错误：{err_msg}"
-        yield history, session_id, None, f"❌ 失败：{err_msg}"
-        return
+        raise gr.Error(f"Upload failed: {e}")
+
+    if not upload_id:
+        raise gr.Error("Upload failed: missing upload_id")
+
+    # 2. /grade (Force Async) -> get job_id + session_id
+    try:
+        grade_resp = await call_grade_api(
+            upload_id=str(upload_id),
+            subject=str(subject),
+            provider=str(provider),
+            llm_provider=str(llm_provider),
+            session_id=str(session_id),
+            auth_token=auth_token,
+            force_async=True,
+        )
+    except Exception as e:
+        raise gr.Error(f"/grade failed: {e}")
+
+    job_id = str((grade_resp or {}).get("job_id") or "").strip()
+    session_id_out = str((grade_resp or {}).get("session_id") or session_id).strip()
+    if not job_id:
+        raise gr.Error("grade 响应缺少 job_id（预期 202 异步返回）")
+
+    return (
+        job_id,
+        session_id_out,
+        str(upload_id),
+        "",  # report_job_id_state (reset)
+        "",  # report_id_state (reset)
+        gr.update(visible=True),  # Show Monitor Panel
+        f"✅ 作业已提交 (Async)\n\n- upload_id: `{upload_id}`\n- session_id: `{session_id_out}`\n- job_id: `{job_id}`",
+        gr.update(
+            value="已提交任务，等待 grade_worker ...", visible=True
+        ),
+        # Extra outputs for the new simplified UI layout will be handled by the click binding
+    )
+
+
+async def generate_report_handler(auth_token):
+    """Manually trigger class report generation."""
+    auth_token = (auth_token or "").strip() or None
+    try:
+        resp = await _call_create_report_job(
+            window_days=7,
+            subject="math",
+            auth_token=auth_token
+        )
+        job_id = str(resp.get("job_id") or "").strip()
+        if not job_id:
+            raise gr.Error("Report job creation failed: no job_id")
+        return (
+            job_id,
+            gr.update(interactive=False, value="正在生成报告..."),
+        )
+    except Exception as e:
+        raise gr.Error(f"Generate report failed: {e}")
+
+
+
+async def poll_job_status(
+    job_id: str,
+    report_job_id: str,
+    report_id: str,
+    subject: str,
+    auth_token: Optional[str],
+):
+    """
+    Polls the status of the job and updates the UI components.
+    Returns: (stage1_html, stage2_html, final_report_md, logs, report_job_id, report_id)
+    """
+    if not job_id:
+        return (
+            '<div style="color: gray">⏳ 等待中</div>',
+            '<div style="color: gray">⏳ 等待中</div>',
+            "",
+            "",
+            report_job_id or "",
+            report_id or "",
+        )
+
+    auth_token = (auth_token or "").strip() or None
+
+    # Stage 1: Grade job (/grade async)
+    grade_job: Dict[str, Any] = {}
+    grade_status = "unknown"
+    grade_err = None
+    try:
+        grade_job = await _call_job_status(job_id, auth_token=auth_token)
+        grade_status = str(grade_job.get("status") or "unknown")
+    except Exception as e:
+        grade_err = str(e)
+
+    s1_html = '<div style="color: gray">⏳ grade 等待中</div>'
+    if grade_err:
+        s1_html = '<div style="color: red">❌ grade 查询失败</div>'
+    elif grade_status in {"processing", "queued", "running"}:
+        s1_html = '<div style="color: blue">🔄 grade 处理中...</div>'
+    elif grade_status == "done":
+        s1_html = '<div style="color: green">✅ grade 已完成</div>'
+    elif grade_status == "failed":
+        s1_html = '<div style="color: red">❌ grade 失败</div>'
+
+    grade_result = grade_job.get("result") if isinstance(grade_job, dict) else None
+    grade_report_md = ""
+    if isinstance(grade_result, dict) and grade_status == "done":
+        try:
+            grade_report_md = "\n".join(build_grade_report_sections(grade_result))
+        except Exception:
+            grade_report_md = ""
+
+    # Stage 2: Report job (Postgres-backed)
+    r_job_id = str(report_job_id or "").strip()
+    r_report_id = str(report_id or "").strip()
+    report_job: Dict[str, Any] = {}
+    report_status = "unknown"
+    report_err = None
+
+    # Create report job once after grade is done (best effort).
+    if not r_job_id and grade_status == "done":
+        try:
+            created = await _call_create_report_job(
+                window_days=7, subject=str(subject), auth_token=auth_token
+            )
+            r_job_id = str(created.get("job_id") or "").strip()
+            if not r_job_id:
+                raise RuntimeError("report job 创建返回缺少 job_id")
+            report_status = str(created.get("status") or "queued")
+        except Exception as e:
+            report_err = str(e)
+
+    if r_job_id:
+        try:
+            report_job = await _call_report_job(r_job_id, auth_token=auth_token)
+            report_status = str(report_job.get("status") or report_status or "unknown")
+            if not r_report_id:
+                r_report_id = str(report_job.get("report_id") or "").strip()
+        except Exception as e:
+            report_err = str(e)
+
+    s2_html = '<div style="color: gray">⏳ report 等待中</div>'
+    if not r_job_id and grade_status != "done":
+        s2_html = '<div style="color: gray">⏳ 等待 grade 完成</div>'
+    elif report_err:
+        s2_html = '<div style="color: red">❌ report 查询/创建失败</div>'
+    elif report_status in {"queued", "pending"}:
+        s2_html = '<div style="color: gray">⏳ report 排队中</div>'
+    elif report_status in {"running", "processing"}:
+        s2_html = '<div style="color: blue">🔄 report 生成中...</div>'
+    elif report_status == "done":
+        s2_html = '<div style="color: green">✅ report 已生成</div>'
+    elif report_status == "failed":
+        s2_html = '<div style="color: red">❌ report 失败</div>'
+
+    final_report_md = ""
+    if r_report_id and report_status == "done":
+        try:
+            report_row = await _call_get_report(r_report_id, auth_token=auth_token)
+            content = (
+                report_row.get("content") if isinstance(report_row, dict) else None
+            )
+            if isinstance(content, str) and content.strip():
+                c = content.strip()
+                if c.startswith("{") or c.startswith("["):
+                    final_report_md = f"```json\n{c}\n```"
+                else:
+                    final_report_md = c
+        except Exception as e:
+            report_err = report_err or str(e)
+
+    # Prefer showing final report; otherwise show grade preview.
+    display_md = final_report_md or grade_report_md
+
+    logs_lines: List[str] = []
+    logs_lines.append(f"grade_job_id={job_id} status={grade_status}")
+    if grade_err:
+        logs_lines.append(f"grade_error={grade_err}")
+    if r_job_id:
+        logs_lines.append(f"report_job_id={r_job_id} status={report_status}")
+    else:
+        logs_lines.append("report_job_id=∅ (等待 grade 完成后创建)")
+    if r_report_id:
+        logs_lines.append(f"report_id={r_report_id}")
+    if report_err:
+        logs_lines.append(f"report_error={report_err}")
+    logs = "\n".join(logs_lines)
+
+    return (s1_html, s2_html, display_md, logs, r_job_id, r_report_id)
 
 
 async def vision_debug_logic(img_path, provider, auth_token):
@@ -1371,21 +1510,48 @@ def _make_candidate_handler(idx: int):
     return _handler
 
 
+async def tutor_chat_logic_demo2(
+    message: str,
+    history: List[Dict[str, str]],
+    session_id: str,
+    subject: str,
+    auth_token: Optional[str],
+) -> AsyncGenerator[Tuple[Any, ...], None]:
+    """
+    Demo UI 2.0 adapter:
+    - Reuse the full tutor_chat_logic (which also yields candidate button updates),
+      but only surface (msg, history, tool_status) in this simplified tab.
+    """
+    async for update in tutor_chat_logic(
+        message, history, session_id, subject, auth_token
+    ):
+        msg_value = update[0] if len(update) > 0 else ""
+        hist_value = update[1] if len(update) > 1 else (history or [])
+        tool_status = update[-1] if update else ""
+        yield msg_value, hist_value, tool_status
+
+
 def create_demo():
-    """创建 Gradio Demo"""
+    """创建 Gradio Demo 2.0 (Workflow Console)"""
     blocks_kwargs: Dict[str, Any] = {"title": "作业检查大师 (Homework Agent)"}
     supports_head = "head" in inspect.signature(gr.Blocks.__init__).parameters
     if supports_head:
         blocks_kwargs["head"] = MATHJAX_HEAD
 
     with gr.Blocks(**blocks_kwargs) as demo:
-        # Older gradio: no `head` support, inject MathJax via HTML component.
+        # Older gradio: no `head` support
         if not supports_head:
             gr.HTML(MATHJAX_HEAD)
 
         auth_token_state = gr.State(value=DEMO_AUTH_TOKEN or "")
         auth_user_id_state = gr.State(value="")
+        job_id_state = gr.State(value="")
+        session_id_state = gr.State(value="")
+        upload_id_state = gr.State(value="")
+        report_job_id_state = gr.State(value="")
+        report_id_state = gr.State(value="")
 
+        # Auth helpers (kept local to create_demo for simplicity).
         def _mask_token(token: str) -> str:
             t = (token or "").strip()
             if not t:
@@ -1395,15 +1561,18 @@ def create_demo():
             return f"{t[:10]}…{t[-6:]}"
 
         def _auth_status_md(token: str, user_id: str) -> str:
-            t = (token or "").strip()
-            uid = (user_id or "").strip()
+            t, uid = (token or "").strip(), (user_id or "").strip()
             if t:
-                return f"- Auth: ✅ 已登录（Bearer `{_mask_token(t)}`）\n- user_id: `{uid or 'unknown'}`\n"
+                return (
+                    f"- Auth: ✅ 已登录（Bearer `{_mask_token(t)}`）\n"
+                    f"- user_id: `{uid or 'unknown'}`\n"
+                )
             return (
                 f"- Auth: ⚠️ 未登录（使用开发模式 header: `X-User-Id={DEMO_USER_ID}`）\n"
             )
 
-        def _auth_login(email: str, password: str, cur_token: str, cur_uid: str):
+        # ... (Redefining auth handlers for completeness as they were local functions)
+        def _auth_login(email, password, cur_token, cur_uid):
             try:
                 token, uid = supabase_sign_in_with_password(
                     (email or "").strip(), (password or "").strip()
@@ -1416,7 +1585,7 @@ def create_demo():
                     f"❌ 登录失败：{str(e)}\n\n{_auth_status_md(cur_token, cur_uid)}",
                 )
 
-        def _auth_signup(email: str, password: str, cur_token: str, cur_uid: str):
+        def _auth_signup(email, password, cur_token, cur_uid):
             try:
                 token, uid = supabase_sign_up(
                     (email or "").strip(), (password or "").strip()
@@ -1425,13 +1594,12 @@ def create_demo():
                     return (
                         token,
                         (uid or ""),
-                        f"✅ 注册成功并已登录\n\n{_auth_status_md(token, uid or '')}",
+                        f"✅ 注册成功\n\n{_auth_status_md(token, uid or '')}",
                     )
-                # Email confirmation required / no session returned.
                 return (
                     cur_token,
                     cur_uid,
-                    f"✅ 注册成功（可能需要邮箱确认，暂未获得 access_token）\n\n{_auth_status_md(cur_token, cur_uid)}",
+                    f"✅ 注册成功（需邮箱确认）\n\n{_auth_status_md(cur_token, cur_uid)}",
                 )
             except Exception as e:
                 return (
@@ -1443,37 +1611,13 @@ def create_demo():
         def _auth_logout():
             return "", "", _auth_status_md("", "")
 
-        gr.Markdown(
-            """
-        # 🎓 作业检查大师 (Homework Agent)
+        gr.Markdown("# 🎓 作业检查大师 (Homework Agent)")
 
-        ### 🔄 真实业务场景模拟
-        - **Step 1**: 上传本地文件 → 后端 `/api/v1/uploads`
-        - **Step 2**: 后端写入 Supabase Storage（权威原图），返回 `upload_id` + `page_image_urls`
-        - **Step 3**: 调用后端 `/api/v1/grade`（携带 `upload_id`，后端反查 images 并批改）
-        - **Step 4**: 调用后端 `/api/v1/chat`（SSE）进行苏格拉底辅导
-
-        ### 📝 使用说明
-        - ✅ 支持格式：JPG、PNG、WebP
-        - 🗂️ 支持：HEIC/HEIF 自动转 JPEG，PDF 自动拆前 8 页
-        - ⚠️ 文件大小：≤ 20MB
-        - 📐 尺寸：Qwen3 最小边 ≥28px，Doubao 最小边 ≥14px
-        - 🌍 URL 要求：必须是公网可访问 (禁止 localhost/内网)
-        - 🤖 模型选择：Doubao（默认，仅 URL） / Qwen3（备用，支持 URL+base64）
-        """
-        )
-
-        with gr.Accordion("🔐 登录/注册（Supabase Auth，P0-阶段B）", open=False):
-            gr.Markdown(
-                "说明：\n"
-                "- 登录后，demo 会用 `Authorization: Bearer <access_token>` 调用后端；后端会验证 JWT 并以 token 内的 `user.id` 作为可信 `user_id`。\n"
-                "- 未登录时，demo 会用开发模式 `X-User-Id`（仅用于本地调试；上线前会移除）。\n"
-            )
+        # Auth Accordion
+        with gr.Accordion("🔐 登录/注册（Supabase Auth）", open=False):
             with gr.Row():
-                auth_email = gr.Textbox(label="Email", placeholder="you@example.com")
-                auth_password = gr.Textbox(
-                    label="Password", type="password", placeholder="••••••••"
-                )
+                auth_email = gr.Textbox(label="Email")
+                auth_password = gr.Textbox(label="Password", type="password")
             with gr.Row():
                 btn_login = gr.Button("登录", variant="primary")
                 btn_signup = gr.Button("注册", variant="secondary")
@@ -1481,108 +1625,120 @@ def create_demo():
             auth_status = gr.Markdown(value=_auth_status_md(DEMO_AUTH_TOKEN, ""))
 
             btn_login.click(
-                fn=_auth_login,
-                inputs=[
-                    auth_email,
-                    auth_password,
-                    auth_token_state,
-                    auth_user_id_state,
-                ],
-                outputs=[auth_token_state, auth_user_id_state, auth_status],
-                show_progress=True,
+                _auth_login,
+                [auth_email, auth_password, auth_token_state, auth_user_id_state],
+                [auth_token_state, auth_user_id_state, auth_status],
             )
             btn_signup.click(
-                fn=_auth_signup,
-                inputs=[
-                    auth_email,
-                    auth_password,
-                    auth_token_state,
-                    auth_user_id_state,
-                ],
-                outputs=[auth_token_state, auth_user_id_state, auth_status],
-                show_progress=True,
+                _auth_signup,
+                [auth_email, auth_password, auth_token_state, auth_user_id_state],
+                [auth_token_state, auth_user_id_state, auth_status],
             )
             btn_logout.click(
-                fn=_auth_logout,
-                inputs=None,
-                outputs=[auth_token_state, auth_user_id_state, auth_status],
-                show_progress=False,
+                _auth_logout, None, [auth_token_state, auth_user_id_state, auth_status]
             )
 
         with gr.Tabs():
-            # ========== Tab 1: 统一对话 ==========
-            with gr.Tab("💬 对话"):
-                gr.Markdown(
-                    "上传图片后系统会自动识别与批改，并把**识别原文 + AI 识别依据 + 批改结果**展示在对话框里。\n\n"
-                    "- 你可以直接说：`讲讲第23题` / `再讲讲19题` / `第2题有没有更简便的方法？`\n"
-                    "- 系统会尝试根据题号在本次 session 中定位对应题目。\n"
-                )
+            with gr.Tab("🚀 工作台 (Workflow Console)"):
+                # ================= Input Area =================
                 with gr.Row():
                     with gr.Column(scale=1):
                         input_img = gr.File(
-                            label="📤 上传图片",
-                            file_types=["image"],
-                            height=260,
+                            label="📤 上传图片", file_types=["image"], height=200
                         )
                         subject_dropdown = gr.Dropdown(
-                            choices=["math", "english"],
-                            value="math",
-                            label="📚 学科 (Subject)",
+                            ["math", "english"], value="math", label="📚 学科"
                         )
                         provider_dropdown = gr.Dropdown(
-                            choices=["doubao", "qwen3"],
-                            value="doubao",
-                            label="🤖 视觉模型 (Vision)",
+                            ["doubao", "qwen3"], value="doubao", label="🤖 Vision"
                         )
                         llm_dropdown = gr.Dropdown(
-                            choices=["ark", "silicon"],
-                            value="ark",
-                            label="🧠 批改模型 (LLM)",
-                            info="ark=doubao-seed, silicon=qwen3-max",
+                            ["ark", "silicon"], value="ark", label="🧠 LLM"
                         )
-                        grade_btn = gr.Button("🚀 开始识别/批改", variant="primary")
-                        status_md = gr.Markdown(label="状态")
-                        session_id_state = gr.State()
-                        image_url_state = gr.State()
+                        submit_btn = gr.Button("🚀 提交作业 (Async)", variant="primary")
+                        submission_status_md = gr.Markdown("准备就绪")
 
-                    with gr.Column(scale=1):
-                        chatbot = gr.Chatbot(
-                            label="💬 对话",
-                            height=520,
-                            latex_delimiters=[
-                                {"left": "$$", "right": "$$", "display": True},
-                                {"left": "$", "right": "$", "display": False},
-                            ],
+                # ================= Monitor Area (Hidden Initially) =================
+                with gr.Group(visible=False) as monitor_group:
+                    gr.Markdown("### 📊 实时流水线 (Pipeline Monitor)")
+                    with gr.Row():
+                        s1_html = gr.HTML(
+                            label="Stage 1: Grade",
+                            value='<div style="color: gray">⏳ 等待中</div>',
                         )
-                        tool_status_md = gr.Markdown(label="🔧 工具进度", value="")
-                        candidates_state = gr.State(value=[])
-                        with gr.Row():
-                            candidate_buttons = [
-                                gr.Button(visible=False)
-                                for _ in range(MAX_CANDIDATE_BUTTONS)
-                            ]
-                        msg = gr.Textbox(
-                            label="💭 你的问题",
-                            placeholder="这道题为什么错了？应该怎么思考？",
+                        s2_html = gr.HTML(
+                            label="Stage 2: Report",
+                            value='<div style="color: gray">⏳ 等待中</div>',
                         )
-                        clear_btn = gr.Button("🗑️ 清除历史")
 
-                grade_btn.click(
-                    fn=grade_homework_logic,
+                    logs_box = gr.Textbox(
+                        label="System Logs", lines=5, interactive=False
+                    )
+
+                    with gr.Accordion("🛠️ 调试控制台 (Debug Console)", open=True):
+                        gr.Markdown(
+                            "本页使用真实后端与 Worker：请确保 `grade_worker` 与 `report_worker` 已启动（可选：`facts_worker` 用于加速报表）。"
+                        )
+
+                # ================= Result Area =================
+                final_report_md = gr.Markdown(label="最终报告")
+
+                # Chatbot for follow-up
+                gr.Markdown("### 💬 辅导对话")
+                chatbot_kwargs: Dict[str, Any] = {"height": 400, "label": "AI 助教"}
+                if "type" in inspect.signature(gr.Chatbot.__init__).parameters:
+                    chatbot_kwargs["type"] = "messages"
+                chatbot = gr.Chatbot(**chatbot_kwargs)
+                msg = gr.Textbox(label="你的问题")
+                tool_status_md = gr.Markdown(value="")
+
+                # Logic Wiring
+                # 1. Submit
+                submit_btn.click(
+                    fn=submit_job_handler,
                     inputs=[
                         input_img,
                         subject_dropdown,
                         provider_dropdown,
                         llm_dropdown,
                         auth_token_state,
-                        chatbot,
                     ],
-                    outputs=[chatbot, session_id_state, image_url_state, status_md],
+                    outputs=[
+                        job_id_state,
+                        session_id_state,
+                        upload_id_state,
+                        report_job_id_state,
+                        report_id_state,
+                        monitor_group,
+                        submission_status_md,
+                        logs_box,
+                    ],
                 )
 
-                # 发送消息
+                # 2. Polling (Timer)
+                # Poll every 2 seconds
+                timer = gr.Timer(2.0)
+                timer.tick(
+                    fn=poll_job_status,
+                    inputs=[
+                        job_id_state,
+                        report_job_id_state,
+                        report_id_state,
+                        subject_dropdown,
+                        auth_token_state,
+                    ],
+                    outputs=[
+                        s1_html,
+                        s2_html,
+                        final_report_md,
+                        logs_box,
+                        report_job_id_state,
+                        report_id_state,
+                    ],
+                )
+
                 msg.submit(
-                    fn=tutor_chat_logic,
+                    fn=tutor_chat_logic_demo2,
                     inputs=[
                         msg,
                         chatbot,
@@ -1590,101 +1746,28 @@ def create_demo():
                         subject_dropdown,
                         auth_token_state,
                     ],
-                    outputs=[
-                        msg,
-                        chatbot,
-                        candidates_state,
-                        *candidate_buttons,
-                        tool_status_md,
-                    ],
+                    outputs=[msg, chatbot, tool_status_md],
                 )
 
-                for idx, btn in enumerate(candidate_buttons):
-                    btn.click(
-                        fn=_make_candidate_handler(idx),
-                        inputs=[
-                            chatbot,
-                            session_id_state,
-                            subject_dropdown,
-                            auth_token_state,
-                            candidates_state,
-                        ],
-                        outputs=[
-                            msg,
-                            chatbot,
-                            candidates_state,
-                            *candidate_buttons,
-                            tool_status_md,
-                        ],
-                    )
-
-                # 清除历史
-                clear_btn.click(
-                    fn=lambda: (
-                        [],
-                        "",
-                        [],
-                        *_candidate_button_updates([]),
-                        "",
-                        None,
-                        "",
-                    ),
-                    inputs=None,
-                    outputs=[
-                        chatbot,
-                        msg,
-                        candidates_state,
-                        *candidate_buttons,
-                        tool_status_md,
-                        session_id_state,
-                        status_md,
-                    ],
-                    queue=False,
-                )
-
-            # ========== Tab 2: Vision 调试 ==========
+            # ========== Tab 2: Vision 调试 (Kept as is) ==========
             with gr.Tab("👁️ Vision 调试"):
                 with gr.Row():
                     with gr.Column(scale=1):
                         vision_input = gr.File(
-                            label="上传图片 (JPG/PNG/HEIC/PDF)",
-                            file_types=["image", "pdf"],
-                            height=200,
+                            label="上传图片", file_types=["image"], height=200
                         )
                         vision_provider = gr.Dropdown(
-                            choices=["qwen3", "doubao"], value="qwen3", label="视觉模型"
+                            ["qwen3", "doubao"], value="qwen3", label="视觉模型"
                         )
-                        vision_btn = gr.Button(
-                            "👁️ 运行 Vision 调试", variant="secondary"
-                        )
+                        vision_btn = gr.Button("运行 Vision 调试")
                     with gr.Column(scale=1):
-                        vision_output = gr.Markdown(label="Vision 原始识别文本")
-                        vision_img_url = gr.Textbox(
-                            label="上传后的公网 URL", interactive=False
-                        )
-
+                        vision_output = gr.Markdown()
+                        vision_url = gr.Textbox(interactive=False)
                 vision_btn.click(
-                    fn=vision_debug_logic,
-                    inputs=[vision_input, vision_provider, auth_token_state],
-                    outputs=[vision_output, vision_img_url],
-                    show_progress=True,
+                    vision_debug_logic,
+                    [vision_input, vision_provider, auth_token_state],
+                    [vision_output, vision_url],
                 )
-
-        gr.Markdown(
-            """
-        ---
-        ### 🔧 技术架构
-        - **前端**: Gradio (端口 7890)
-        - **后端**: FastAPI (端口 8000)
-        - **存储**: Supabase Storage（由后端写入，前端不直传）
-        - **模型**: Qwen3-VL (SiliconFlow) / Doubao-Vision (Ark)
-
-        ### ⚡ 性能说明
-        - 首次批改可能需要 30-60 秒 (模型推理时间)
-        - 辅导对话响应较快 (5-10 秒)
-        - 大图片 (>5MB) 建议使用 Qwen3 模型
-        """
-        )
 
     return demo
 

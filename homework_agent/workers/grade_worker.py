@@ -19,7 +19,6 @@ import logging
 import signal
 import time
 from datetime import datetime
-from typing import Any, Optional
 
 from homework_agent.utils.logging_setup import setup_file_logging, silence_noisy_loggers
 from homework_agent.utils.settings import get_settings
@@ -33,7 +32,10 @@ from homework_agent.services.grade_queue import (
     set_job_status,
     GradeJob,
 )
+from homework_agent.services.facts_queue import enqueue_facts_job
 from homework_agent.api.session import IDP_TTL_HOURS
+from homework_agent.api.session import get_question_bank
+from homework_agent.utils.submission_store import update_submission_after_grade
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +96,21 @@ def main() -> int:
                 continue
 
             payload = load_job_request(job.job_id) or {}
-            req_obj = payload.get("grade_request") if isinstance(payload, dict) else None
+            req_obj = (
+                payload.get("grade_request") if isinstance(payload, dict) else None
+            )
             provider = payload.get("provider") if isinstance(payload, dict) else None
             provider = str(provider or job.provider or "").strip() or "ark"
+            grade_image_input_variant = (
+                payload.get("grade_image_input_variant")
+                if isinstance(payload, dict)
+                else None
+            )
+            grade_image_input_variant = (
+                str(grade_image_input_variant).strip().lower()
+                if grade_image_input_variant is not None
+                else ""
+            ) or None
             if not isinstance(req_obj, dict):
                 # Mark failed so clients can see it.
                 set_job_status(
@@ -135,7 +149,87 @@ def main() -> int:
             started = time.monotonic()
             try:
                 req = GradeRequest(**req_obj)
+                if grade_image_input_variant:
+                    try:
+                        setattr(
+                            req, "_grade_image_input_variant", grade_image_input_variant
+                        )
+                    except Exception:
+                        pass
                 result = asyncio.run(perform_grading(req, provider))
+
+                # Best-effort: persist Submission facts + enqueue derived facts job.
+                # NOTE: grade_homework endpoint does this after perform_grading, but worker path must do it too.
+                upload_id = str(getattr(req, "upload_id", "") or "").strip()
+                if upload_id and job.user_id:
+                    try:
+                        bank_now = (
+                            get_question_bank(job.session_id)
+                            if job.session_id
+                            else None
+                        )
+                        meta_now = (
+                            dict(bank_now.get("meta") or {})
+                            if isinstance(bank_now, dict)
+                            and isinstance(bank_now.get("meta"), dict)
+                            else {}
+                        )
+                        # Keep meta small and non-null for audit/debug
+                        meta_now = {k: v for k, v in meta_now.items() if v is not None}
+
+                        page_image_urls = [
+                            str(getattr(img, "url", "") or "").strip()
+                            for img in (getattr(req, "images", None) or [])
+                            if str(getattr(img, "url", "") or "").strip()
+                        ]
+                        subj = (
+                            req.subject.value
+                            if hasattr(req.subject, "value")
+                            else str(req.subject)
+                        )
+                        update_submission_after_grade(
+                            user_id=str(job.user_id),
+                            submission_id=upload_id,
+                            session_id=str(job.session_id),
+                            request_id=job.request_id,
+                            subject=subj,
+                            page_image_urls=page_image_urls or None,
+                            proxy_page_image_urls=None,
+                            vision_raw_text=getattr(result, "vision_raw_text", None),
+                            grade_result=(
+                                result.model_dump()
+                                if hasattr(result, "model_dump")
+                                else {}
+                            ),
+                            warnings=list(getattr(result, "warnings", None) or []),
+                            meta=meta_now or None,
+                        )
+                        enqueue_facts_job(
+                            submission_id=upload_id,
+                            user_id=str(job.user_id),
+                            session_id=str(job.session_id),
+                            request_id=job.request_id,
+                        )
+                        log_event(
+                            logger,
+                            "grade_worker_persisted_submission",
+                            request_id=job.request_id,
+                            session_id=job.session_id,
+                            job_id=job.job_id,
+                            submission_id=upload_id,
+                        )
+                    except Exception as e:
+                        log_event(
+                            logger,
+                            "grade_worker_persist_submission_failed",
+                            level="warning",
+                            request_id=job.request_id,
+                            session_id=job.session_id,
+                            job_id=job.job_id,
+                            submission_id=upload_id,
+                            error_type=e.__class__.__name__,
+                            error=str(e),
+                        )
                 set_job_status(
                     job.job_id,
                     {
@@ -198,4 +292,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

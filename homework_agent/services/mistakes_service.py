@@ -244,4 +244,3 @@ def restore_mistake(
         )
     except Exception as e:
         raise MistakesServiceError(f"failed to delete exclusion: {e}") from e
-

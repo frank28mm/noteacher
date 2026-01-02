@@ -9,9 +9,7 @@ from typing import Any, Dict, Iterable, List
 def _taxonomy_path() -> Path:
     # homework_agent/utils/taxonomy.py -> homework_agent/resources/knowledge_taxonomy_v0.json
     return (
-        Path(__file__).resolve().parents[1]
-        / "resources"
-        / "knowledge_taxonomy_v0.json"
+        Path(__file__).resolve().parents[1] / "resources" / "knowledge_taxonomy_v0.json"
     )
 
 
@@ -64,8 +62,11 @@ def normalize_knowledge_tags(tags: List[str]) -> List[str]:
         s = str(aliases.get(s) or s).strip()
         if not s:
             continue
-        if unknown_policy == "drop" and s not in aliases.values() and s not in deprecated.values():
+        if (
+            unknown_policy == "drop"
+            and s not in aliases.values()
+            and s not in deprecated.values()
+        ):
             continue
         normalized.append(s)
     return _dedupe_keep_order(normalized)
-

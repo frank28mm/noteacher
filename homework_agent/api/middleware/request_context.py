@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import uuid
 from contextvars import ContextVar
-from typing import Optional
 
 from fastapi import Request
 
@@ -114,4 +113,3 @@ async def request_context_middleware(request: Request, call_next):
     finally:
         request_id_var.reset(token_rid)
         session_id_var.reset(token_sid)
-

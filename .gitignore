@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 .env
 .env.local
+homework_agent/.env
+homework_agent/.env.*
 .idea/
 .vscode/
 homework_agent/__pycache__
@@ -16,6 +18,9 @@ logs/
 *.log
 .DS_Store
 qa_metrics/
+tmp/
+docs/reports/_local/
+docs/archive/_local/
 
 # Private live replay inventory (local absolute paths; never commit)
 homework_agent/tests/replay_data/samples_inventory.csv

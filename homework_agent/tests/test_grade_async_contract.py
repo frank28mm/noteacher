@@ -26,4 +26,3 @@ def test_grade_large_batch_returns_202(monkeypatch):
     data = resp.json()
     assert data.get("status") == "processing"
     assert data.get("job_id")
-
