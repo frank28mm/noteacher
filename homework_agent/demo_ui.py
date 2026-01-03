@@ -416,6 +416,28 @@ def format_vision_raw_text(result: Dict[str, Any]) -> str:
     vision_raw = re.sub(r"\\\[", "$$", vision_raw)
     vision_raw = re.sub(r"\\\]", "$$", vision_raw)
 
+    # Improve readability: if OCR text is flattened into a single line, insert best-effort separators.
+    try:
+        raw = str(vision_raw or "")
+        if raw.count("\n") < 3:
+            raw = re.sub(r"\s*(###\s*Page\s*\d+)", r"\n\n\1", raw, flags=re.IGNORECASE)
+            raw = re.sub(r"\s*(###\s*第)", r"\n\n\1", raw)
+            raw = re.sub(r"(第\s*\d{1,3}\s*题)", r"\n\n\1", raw)
+            raw = re.sub(
+                r"(?<!\d)(\d{1,3})[\.．]\s*(?=[^0-9])",
+                r"\n\n\1. ",
+                raw,
+            )
+            raw = re.sub(
+                r"\s*(题目|学生答案|学生作答状态|作答状态|答案|选项|解析|解答)\s*[:：]\s*",
+                r"\n\1：",
+                raw,
+            )
+            raw = re.sub(r"\n{3,}", "\n\n", raw)
+            vision_raw = raw.strip()
+    except Exception:
+        pass
+
     # Use blockquote format to allow LaTeX rendering via MathJax (instead of code block which prevents it)
     # Add blockquote prefix to each line
     lines = vision_raw.split("\n")
@@ -815,6 +837,9 @@ def build_grade_report_sections(result: Dict[str, Any]) -> List[str]:
                 or "url_head status" in warning
                 or "视觉事实" in warning
             ):
+                seen.add(warning)
+                continue
+            if str(warning).strip().lower() in {"preprocess_disabled"}:
                 seen.add(warning)
                 continue
             md += f"- {warning}\n"
@@ -1255,6 +1280,11 @@ async def submit_job_handler(img_path, auth_token):
         )
         timing_ctx["upload_ms"] = _ms_between(t0, _now_m())
         upload_id = upload_resp.get("upload_id")
+        page_image_urls = upload_resp.get("page_image_urls")
+        if not isinstance(page_image_urls, list):
+            page_image_urls = []
+        page_image_urls = [str(u) for u in page_image_urls if str(u).strip()]
+        timing_ctx["uploaded_pages"] = int(len(page_image_urls))
     except Exception as e:
         raise gr.Error(f"Upload failed: {e}")
 
@@ -1284,6 +1314,14 @@ async def submit_job_handler(img_path, auth_token):
 
     timing_ctx["grade_job_submitted_m"] = float(_now_m())
 
+    uploaded_pages_n = int(timing_ctx.get("uploaded_pages") or 0)
+    selected_files_n = int(len(paths))
+    if uploaded_pages_n and uploaded_pages_n != selected_files_n:
+        timing_ctx["upload_page_mismatch"] = {
+            "selected_files": selected_files_n,
+            "uploaded_pages": uploaded_pages_n,
+        }
+
     return (
         job_id,
         session_id_out,
@@ -1291,7 +1329,21 @@ async def submit_job_handler(img_path, auth_token):
         "",  # report_job_id_state (reset)
         "",  # report_id_state (reset)
         gr.update(visible=True),  # Show Monitor Panel
-        f"✅ 作业已提交 (Async)\n\n- files: `{len(paths)}`\n- upload_id: `{upload_id}`\n- session_id: `{session_id_out}`\n- job_id: `{job_id}`",
+        (
+            "✅ 作业已提交 (Async)\n\n"
+            f"- files(selected): `{len(paths)}`\n"
+            f"- pages(uploaded): `{uploaded_pages_n or 'unknown'}`\n"
+            f"- upload_id: `{upload_id}`\n"
+            f"- session_id: `{session_id_out}`\n"
+            f"- job_id: `{job_id}`\n"
+            + (
+                "\n⚠️ 注意：你选择了多张文件，但后端只生成了更少的 `page_image_urls`。"
+                "这通常意味着某些文件格式未被识别/转码（常见：HEIC/HEIF）。"
+                "建议先转成 JPG/PNG 或检查后端是否安装了 HEIC 解码依赖。"
+                if (uploaded_pages_n and uploaded_pages_n != len(paths))
+                else ""
+            )
+        ),
         gr.update(
             value="已提交任务，等待 grade_worker ...", visible=True
         ),
@@ -1301,6 +1353,12 @@ async def submit_job_handler(img_path, auth_token):
         "",  # class_report_md (reset)
         gr.update(interactive=False, value="生成学业报告"),
         timing_ctx,
+        {
+            "total_pages": int(uploaded_pages_n or len(paths)),
+            "done_pages": 0,
+            "page_context": {},
+        },
+        [],
     )
 
 
@@ -1343,6 +1401,7 @@ async def poll_job_status(
     upload_id: str,
     auth_token: Optional[str],
     timing_ctx: Dict[str, Any],
+    page_progress: Dict[str, Any],
 ):
     """
     Polls the status of the job and updates the UI components.
@@ -1355,6 +1414,8 @@ async def poll_job_status(
         return (
             '<div style="color: gray">⏳ 等待中</div>',
             '<div style="color: gray">⏳ 等待中</div>',
+            "",  # pages_progress_md
+            gr.update(choices=[], value=None),  # page_no_dd
             "",
             "",
             "",  # grade_result_md
@@ -1364,6 +1425,7 @@ async def poll_job_status(
             report_id or "",
             gr.update(interactive=False, value="生成学业报告"),
             ctx,
+            dict(page_progress or {"total_pages": 0, "done_pages": 0, "page_context": {}}),
         )
 
     auth_token = (auth_token or "").strip() or None
@@ -1408,6 +1470,117 @@ async def poll_job_status(
         )
     elif grade_status == "failed":
         s1_html = '<div style="color: red">❌ grade 失败</div>'
+
+    # A-6: Multi-page progressive display (single job + partial output)
+    p_state: Dict[str, Any] = dict(page_progress or {})
+    total_pages = 0
+    done_pages = 0
+    page_summaries = []
+    question_cards = []
+    if isinstance(grade_job, dict):
+        try:
+            if grade_job.get("total_pages") is not None:
+                p_state["total_pages"] = int(grade_job.get("total_pages") or 0)
+            if grade_job.get("done_pages") is not None:
+                p_state["done_pages"] = int(grade_job.get("done_pages") or 0)
+            if isinstance(grade_job.get("page_summaries"), list):
+                page_summaries = list(grade_job.get("page_summaries") or [])
+            if isinstance(grade_job.get("question_cards"), list):
+                question_cards = list(grade_job.get("question_cards") or [])
+        except Exception:
+            pass
+    total_pages = int(p_state.get("total_pages") or 0)
+    done_pages = int(p_state.get("done_pages") or 0)
+    if isinstance(page_summaries, list) and page_summaries:
+        context_map: Dict[str, Any] = {}
+        for s in page_summaries:
+            if not isinstance(s, dict):
+                continue
+            idx = s.get("page_index")
+            try:
+                idx_i = int(idx)
+            except Exception:
+                continue
+            ids = s.get("wrong_item_ids")
+            if isinstance(ids, list):
+                context_map[str(idx_i)] = [str(x) for x in ids if str(x).strip()]
+        p_state["page_context"] = context_map
+        # If total_pages is still unknown, infer from max page_index.
+        if not total_pages and context_map:
+            try:
+                total_pages = max(int(k) for k in context_map.keys()) + 1
+                p_state["total_pages"] = int(total_pages)
+            except Exception:
+                pass
+
+    pages_progress_md = ""
+    if total_pages > 0:
+        by_idx: Dict[int, Dict[str, Any]] = {}
+        for s in page_summaries:
+            if isinstance(s, dict) and s.get("page_index") is not None:
+                try:
+                    by_idx[int(s.get("page_index"))] = s
+                except Exception:
+                    continue
+        lines: List[str] = []
+        lines.append(f"#### 📄 逐页进度：`{done_pages}/{total_pages}`")
+        for i in range(total_pages):
+            s = by_idx.get(i)
+            if isinstance(s, dict):
+                wc = s.get("wrong_count")
+                uc = s.get("uncertain_count")
+                bc = s.get("blank_count")
+                nr = "needs_review" if bool(s.get("needs_review")) else "ok"
+                lines.append(
+                    f"- 第 `{i+1}` 页：wrong=`{wc}` · uncertain=`{uc}` · blank=`{bc}` · `{nr}`"
+                )
+            else:
+                lines.append(f"- 第 `{i+1}` 页：⏳ 处理中…")
+
+        if question_cards:
+            lines.append("")
+            lines.append(f"#### 🧩 占位卡：`{len(question_cards)}`")
+            by_page: Dict[int, Dict[str, int]] = {}
+            for c in question_cards:
+                if not isinstance(c, dict):
+                    continue
+                try:
+                    pi = int(c.get("page_index") or 0)
+                except Exception:
+                    continue
+                st = str(c.get("card_state") or "unknown")
+                ans = str(c.get("answer_state") or "unknown")
+                bucket = by_page.setdefault(
+                    pi,
+                    {
+                        "placeholder": 0,
+                        "verdict_ready": 0,
+                        "review_pending": 0,
+                        "review_ready": 0,
+                        "review_failed": 0,
+                        "blank": 0,
+                    },
+                )
+                if st in bucket:
+                    bucket[st] += 1
+                else:
+                    bucket["verdict_ready"] += 1
+                if ans == "blank":
+                    bucket["blank"] += 1
+            for i in range(total_pages):
+                if i not in by_page:
+                    continue
+                b = by_page[i]
+                lines.append(
+                    f"- 第 `{i+1}` 页：placeholder=`{b.get('placeholder', 0)}` · verdict_ready=`{b.get('verdict_ready', 0)}` · review_pending=`{b.get('review_pending', 0)}` · review_ready=`{b.get('review_ready', 0)}` · blank=`{b.get('blank', 0)}`"
+                )
+        pages_progress_md = "\n".join(lines)
+
+    page_choices = [str(i + 1) for i in range(total_pages)] if total_pages > 0 else []
+    page_no_dd_update = gr.update(
+        choices=page_choices,
+        value=str(min(done_pages, total_pages) or 1) if page_choices else None,
+    )
 
     grade_result = grade_job.get("result") if isinstance(grade_job, dict) else None
     grade_report_md = ""
@@ -1531,6 +1704,8 @@ async def poll_job_status(
     return (
         s1_html, 
         s2_html, 
+        pages_progress_md,
+        page_no_dd_update,
         timings_summary_md,
         timings_detail_md,
         grade_report_md, 
@@ -1540,6 +1715,54 @@ async def poll_job_status(
         r_report_id, 
         btn_update,
         ctx,
+        p_state,
+    )
+
+
+def pick_page_for_tutoring(
+    page_no: str,
+    page_progress: Dict[str, Any],
+) -> Tuple[Any, Any, Any]:
+    """
+    Demo helper for A-6:
+    - User picks a page number and clicks "进入辅导（本页）"
+    - We set a suggested starter prompt + attach context_item_ids (wrong_item_ids) for that page.
+    """
+    p = dict(page_progress or {})
+    total_pages = int(p.get("total_pages") or 0)
+    done_pages = int(p.get("done_pages") or 0)
+    page_context = p.get("page_context") if isinstance(p.get("page_context"), dict) else {}
+
+    s = str(page_no or "").strip()
+    if not s or not s.isdigit():
+        return gr.update(value=""), [], "请选择页号后再进入辅导。"
+    page_index = int(s) - 1
+    if page_index < 0:
+        return gr.update(value=""), [], "页号不合法。"
+    if total_pages and page_index >= total_pages:
+        return gr.update(value=""), [], f"页号超出范围（共 {total_pages} 页）。"
+    if done_pages and page_index >= done_pages:
+        return (
+            gr.update(value=""),
+            [],
+            f"第 {page_index+1} 页尚未完成（当前 {done_pages}/{total_pages}）。请稍后再试。",
+        )
+
+    ids = page_context.get(str(page_index)) if isinstance(page_context, dict) else None
+    ids = [str(x) for x in (ids or []) if str(x).strip()]
+    if not ids:
+        return (
+            gr.update(
+                value=f"第 {page_index+1} 页似乎没有可用错题上下文（可能全对或尚未产出）。你也可以直接问“讲第几题”。"
+            ),
+            [],
+            f"已选择第 {page_index+1} 页（但没有错题 item_ids）。",
+        )
+
+    return (
+        gr.update(value=f"我们先从第 {page_index+1} 页的错题里选一题开始辅导。"),
+        ids,
+        f"已选择第 {page_index+1} 页（错题 {len(ids)} 个 item_ids）。",
     )
 
 
@@ -1566,6 +1789,7 @@ async def tutor_chat_logic(
     session_id: str,
     subject: str,
     auth_token: Optional[str],
+    context_item_ids: Optional[List[str | int]] = None,
 ) -> AsyncGenerator[Tuple[Any, ...], None]:
     """苏格拉底辅导逻辑（真实流式：后端 SSE 透传）"""
     history = history or []
@@ -1599,7 +1823,7 @@ async def tutor_chat_logic(
         "question": message,
         "subject": subject,
         "session_id": session_id,
-        "context_item_ids": [],
+        "context_item_ids": context_item_ids or [],
         "llm_model": None,
     }
 
@@ -1763,6 +1987,7 @@ async def tutor_chat_logic_demo2(
     session_id: str,
     subject: str,
     auth_token: Optional[str],
+    context_item_ids: Optional[List[str | int]] = None,
 ) -> AsyncGenerator[Tuple[Any, ...], None]:
     """
     Demo UI 2.0 adapter:
@@ -1770,7 +1995,12 @@ async def tutor_chat_logic_demo2(
       but only surface (msg, history, tool_status) in this simplified tab.
     """
     async for update in tutor_chat_logic(
-        message, history, session_id, subject, auth_token
+        message,
+        history,
+        session_id,
+        subject,
+        auth_token,
+        context_item_ids=context_item_ids,
     ):
         msg_value = update[0] if len(update) > 0 else ""
         hist_value = update[1] if len(update) > 1 else (history or [])
@@ -1798,6 +2028,8 @@ def create_demo():
         report_job_id_state = gr.State(value="")
         report_id_state = gr.State(value="")
         timing_ctx_state = gr.State(value={})
+        page_progress_state = gr.State(value={"total_pages": 0, "done_pages": 0, "page_context": {}})
+        chat_context_item_ids_state = gr.State(value=[])
 
         # Auth helpers (kept local to create_demo for simplicity).
         def _mask_token(token: str) -> str:
@@ -1894,7 +2126,8 @@ def create_demo():
                         with gr.Column(scale=1):
                             file_kwargs: Dict[str, Any] = {
                                 "label": "📤 上传图片（可多选）",
-                                "file_types": ["image"],
+                                # Allow HEIC/HEIF/PDF explicitly (some environments don't classify them as "image").
+                                "file_types": ["image", ".heic", ".heif", ".pdf"],
                                 "height": 200,
                             }
                             if (
@@ -1923,6 +2156,17 @@ def create_demo():
                             label="Stage 2: Report",
                             value='<div style="color: gray">⏳ 等待中</div>',
                         )
+
+                    pages_progress_md = gr.Markdown(value="")
+                    with gr.Row():
+                        page_no_dd = gr.Dropdown(
+                            label="选择页（用于进入辅导）",
+                            choices=[],
+                            value=None,
+                            interactive=True,
+                        )
+                        btn_pick_page = gr.Button("进入辅导（本页）", variant="secondary")
+                    tutor_scope_md = gr.Markdown(value="")
                     
                     btn_gen_report = gr.Button("生成学业报告", variant="secondary", interactive=False)
                     timings_summary_md = gr.Markdown(value="")
@@ -1972,6 +2216,8 @@ def create_demo():
                         class_report_md,
                         btn_gen_report,
                         timing_ctx_state,
+                        page_progress_state,
+                        chat_context_item_ids_state,
                     ],
                 )
 
@@ -1999,10 +2245,13 @@ def create_demo():
                         upload_id_state,
                         auth_token_state,
                         timing_ctx_state,
+                        page_progress_state,
                     ],
                     outputs=[
                         s1_html,
                         s2_html,
+                        pages_progress_md,
+                        page_no_dd,
                         timings_summary_md,
                         timings_detail_md,
                         grade_result_md,
@@ -2012,7 +2261,14 @@ def create_demo():
                         report_id_state,
                         btn_gen_report,
                         timing_ctx_state,
+                        page_progress_state,
                     ],
+                )
+
+                btn_pick_page.click(
+                    fn=pick_page_for_tutoring,
+                    inputs=[page_no_dd, page_progress_state],
+                    outputs=[msg, chat_context_item_ids_state, tutor_scope_md],
                 )
 
                 msg.submit(
@@ -2023,6 +2279,7 @@ def create_demo():
                         session_id_state,
                         gr.State("math"), # Hardcoded subject
                         auth_token_state,
+                        chat_context_item_ids_state,
                     ],
                     outputs=[msg, chatbot, tool_status_md],
                 )

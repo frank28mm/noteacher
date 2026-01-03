@@ -25,7 +25,11 @@ from homework_agent.services.vision import VisionClient
 from homework_agent.services.qindex_locator_siliconflow import SiliconFlowQIndexLocator
 from homework_agent.core.layout_index import crop_and_upload_slices, QuestionLayout
 from homework_agent.api.session import get_question_index
-from homework_agent.core.prompts_autonomous import OCR_FALLBACK_PROMPT, PROMPT_VERSION
+from homework_agent.core.prompts_autonomous import (
+    OCR_FALLBACK_PROMPT,
+    PROMPT_VERSION,
+    QUESTION_CARDS_OCR_PROMPT,
+)
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.cache import get_cache_store
 from homework_agent.utils.supabase_client import get_storage_client
@@ -175,10 +179,28 @@ def _as_imageref(value: str) -> ImageRef:
     return ImageRef(url=value)
 
 
-def _build_ocr_cache_key(*, img_hash: str, provider: str, prompt_version: str) -> str:
+def _build_ocr_cache_key(
+    *, img_hash: str, provider: str, prompt_version: str, prompt_name: str
+) -> str:
     safe_provider = (provider or "unknown").strip() or "unknown"
     safe_version = (prompt_version or "v1").strip() or "v1"
-    return f"{OCR_CACHE_PREFIX}{img_hash}:{safe_provider}:{safe_version}"
+    safe_name = (prompt_name or "default").strip() or "default"
+    return f"{OCR_CACHE_PREFIX}{img_hash}:{safe_provider}:{safe_name}:{safe_version}"
+
+
+def _compute_cache_id_fast(image_url_or_base64: str) -> Optional[str]:
+    """Compute a stable cache id without downloading remote URLs."""
+    try:
+        if image_url_or_base64.startswith("data:image/"):
+            if "," in image_url_or_base64:
+                data = base64.b64decode(image_url_or_base64.split(",", 1)[1])
+            else:
+                data = base64.b64decode(image_url_or_base64)
+            return hashlib.sha256(data).hexdigest()
+        return hashlib.sha256(image_url_or_base64.encode("utf-8")).hexdigest()
+    except Exception as e:
+        logger.debug(f"Failed to compute cache id: {e}")
+        return None
 
 
 def _compute_image_hash(image_url_or_base64: str) -> Optional[str]:
@@ -663,6 +685,7 @@ def ocr_fallback(*, image: str, provider: str) -> Dict[str, Any]:
         cache_key = _build_ocr_cache_key(
             img_hash=img_hash,
             provider=str(provider or "unknown"),
+            prompt_name="fallback",
             prompt_version=PROMPT_VERSION,
         )
         cached = cache.get(cache_key)
@@ -708,6 +731,7 @@ def ocr_fallback(*, image: str, provider: str) -> Dict[str, Any]:
         cache_key = _build_ocr_cache_key(
             img_hash=img_hash,
             provider=str(provider or "unknown"),
+            prompt_name="fallback",
             prompt_version=PROMPT_VERSION,
         )
         cache.set(cache_key, text, ttl_seconds=OCR_CACHE_TTL)
@@ -715,4 +739,64 @@ def ocr_fallback(*, image: str, provider: str) -> Dict[str, Any]:
 
     return _annotate_tool_signals(
         tool_name="ocr_fallback", result={"status": "ok", "text": text}
+    )
+
+
+def ocr_question_cards(*, image: str, provider: str) -> Dict[str, Any]:
+    """OCR for progressive disclosure question cards (structured text, no grading)."""
+    img_id = _compute_cache_id_fast(image)
+    if img_id:
+        cache = get_cache_store()
+        cache_key = _build_ocr_cache_key(
+            img_hash=img_id,
+            provider=str(provider or "unknown"),
+            prompt_name="question_cards",
+            prompt_version=PROMPT_VERSION,
+        )
+        cached = cache.get(cache_key)
+        if cached:
+            logger.info(f"ocr_question_cards: Cache hit for {img_id[:8]}...")
+            return _annotate_tool_signals(
+                tool_name="ocr_question_cards",
+                result={"status": "ok", "text": cached, "source": "cache"},
+            )
+
+    ref = _as_imageref(image)
+    vision_provider = (
+        VisionProvider.QWEN3 if provider == "silicon" else VisionProvider.DOUBAO
+    )
+    client = VisionClient()
+    try:
+        result = client.analyze(
+            images=[ref], prompt=QUESTION_CARDS_OCR_PROMPT, provider=vision_provider
+        )
+    except Exception as e:
+        return _annotate_tool_signals(
+            tool_name="ocr_question_cards",
+            result={
+                "status": "error",
+                "message": str(e),
+                "error_type": e.__class__.__name__,
+            },
+        )
+
+    text = (result.text or "").strip()
+    if not text:
+        return _annotate_tool_signals(
+            tool_name="ocr_question_cards", result={"status": "empty", "text": ""}
+        )
+
+    if img_id:
+        cache = get_cache_store()
+        cache_key = _build_ocr_cache_key(
+            img_hash=img_id,
+            provider=str(provider or "unknown"),
+            prompt_name="question_cards",
+            prompt_version=PROMPT_VERSION,
+        )
+        cache.set(cache_key, text, ttl_seconds=OCR_CACHE_TTL)
+        logger.info(f"Cached question_cards OCR result for {img_id[:8]}...")
+
+    return _annotate_tool_signals(
+        tool_name="ocr_question_cards", result={"status": "ok", "text": text}
     )

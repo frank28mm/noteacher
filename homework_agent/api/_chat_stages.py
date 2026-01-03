@@ -18,6 +18,7 @@ from homework_agent.services.llm import LLMClient
 from homework_agent.api.session import (
     get_question_bank,
     get_question_index,
+    get_mistakes,
     save_qindex_placeholder,
     save_question_bank,
     save_question_index,
@@ -45,6 +46,57 @@ from homework_agent.api.chat import (  # noqa: E402
 import homework_agent.api.chat as chat_api  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_context_ids(raw_ids: Any) -> List[str | int]:
+    """Normalize context ids: strip strings, cast digit strings to int, drop empties."""
+    normalized: List[str | int] = []
+    if not isinstance(raw_ids, list):
+        return normalized
+    for cid in raw_ids:
+        if cid is None:
+            continue
+        if isinstance(cid, str):
+            trimmed = cid.strip()
+            if not trimmed:
+                continue
+            if trimmed.isdigit():
+                try:
+                    normalized.append(int(trimmed))
+                    continue
+                except ValueError:
+                    pass
+            normalized.append(trimmed)
+        elif isinstance(cid, int):
+            normalized.append(cid)
+    return normalized
+
+
+def _resolve_context_items(
+    context_ids: List[str | int], mistakes: Optional[List[Dict[str, Any]]]
+) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Select wrong_items by index or item_id/id. Returns (selected, missing_list)."""
+    if not mistakes:
+        return [], [str(cid) for cid in context_ids]
+
+    selected: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    by_item_id = {str(m.get("item_id")): m for m in mistakes if m.get("item_id")}
+    by_local_id = {str(m.get("id")): m for m in mistakes if m.get("id") is not None}
+
+    for cid in context_ids:
+        if isinstance(cid, int):
+            if 0 <= cid < len(mistakes):
+                selected.append(mistakes[cid])
+            else:
+                missing.append(str(cid))
+        else:
+            item = by_item_id.get(str(cid)) or by_local_id.get(str(cid))
+            if isinstance(item, dict):
+                selected.append(item)
+            else:
+                missing.append(str(cid))
+    return selected, missing
 
 
 def _now_iso_utc() -> str:
@@ -338,8 +390,57 @@ def _prepare_chat_context_or_abort(
         "available_question_numbers": available_qnums[:200],
     }
 
+    # A-6: Optional targeted tutoring: bind focus via selected wrong_items (context_item_ids),
+    # so UI can offer "进入辅导（本页）" without requiring the user to type a question number.
+    requested_qn_from_context: Optional[str] = None
+    requested_qn_page_no: Optional[int] = None
+    try:
+        context_ids = _normalize_context_ids(req.context_item_ids or [])
+        if context_ids:
+            mistakes = get_mistakes(session_id) if session_id else None
+            selected, missing = _resolve_context_items(context_ids, mistakes)
+            if selected:
+                first = selected[0]
+                try:
+                    pn = first.get("page_no") or (
+                        int(first.get("page_index")) + 1
+                        if first.get("page_index") is not None
+                        else None
+                    )
+                    requested_qn_page_no = int(pn) if pn is not None else None
+                except Exception:
+                    requested_qn_page_no = None
+                qn = (
+                    first.get("question_number")
+                    or first.get("question_index")
+                    or first.get("id")
+                )
+                requested_qn_from_context = (
+                    _normalize_question_number(qn) if qn is not None else None
+                )
+                wrong_item_context["context_wrong_items"] = selected[:10]
+            if missing:
+                wrong_item_context["context_missing_ids"] = missing[:10]
+    except Exception as e:
+        logger.debug(f"Resolving context_item_ids failed (best-effort): {e}")
+
+    # A-6: If grading is still running (multi-page progressive), expose progress to the LLM
+    # so it can explicitly say "仅基于已完成页" and avoid referencing unfinished pages.
+    try:
+        meta = qbank.get("meta") if isinstance(qbank.get("meta"), dict) else {}
+        pages_total = meta.get("pages_total")
+        pages_done = meta.get("pages_done")
+        if pages_total is not None:
+            wrong_item_context["grade_pages_total"] = int(pages_total)
+        if pages_done is not None:
+            wrong_item_context["grade_pages_done"] = int(pages_done)
+    except Exception:
+        pass
+
     # Determine requested question number (explicit) and bind focus deterministically.
-    requested_qn = _extract_requested_question_number(req.question)
+    requested_qn = requested_qn_from_context or _extract_requested_question_number(
+        req.question
+    )
     requested_qn = _normalize_question_number(requested_qn) if requested_qn else None
     if requested_qn:
         # If user explicitly asked for a question that does not exist, do NOT keep old focus.
@@ -352,7 +453,17 @@ def _prepare_chat_context_or_abort(
                 or str(k).startswith(requested_qn)
             ]
             if candidates:
-                requested_qn = sorted(candidates, key=len)[0]
+                # If this request came from context_item_ids and includes page info,
+                # prefer the disambiguated key (e.g. "1@p2") over the base "1".
+                if requested_qn_page_no is not None:
+                    preferred_prefix = f"{requested_qn}@p{int(requested_qn_page_no)}"
+                    preferred = [k for k in candidates if str(k).startswith(preferred_prefix)]
+                    if preferred:
+                        requested_qn = sorted(preferred, key=len)[0]
+                    else:
+                        requested_qn = sorted(candidates, key=len)[0]
+                else:
+                    requested_qn = sorted(candidates, key=len)[0]
             else:
                 log_event(
                     logger,

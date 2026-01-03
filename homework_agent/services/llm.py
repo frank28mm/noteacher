@@ -1240,6 +1240,29 @@ class LLMClient:
             pass
 
         messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+        # A-6: Multi-page progressive grading: force the tutor to acknowledge incomplete pages
+        # and never reference unfinished pages as facts.
+        try:
+            if isinstance(wrong_item_context, dict):
+                pages_total = wrong_item_context.get("grade_pages_total")
+                pages_done = wrong_item_context.get("grade_pages_done")
+                if pages_total is not None and pages_done is not None:
+                    pt = int(pages_total)
+                    pd = int(pages_done)
+                    if pt > 0 and 0 <= pd < pt:
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    f"注意：本次多页作业批改仍在进行中，目前仅完成 {pd}/{pt} 页。"
+                                    "你必须在回复里明确说明“当前仅基于已完成页回答”，"
+                                    "且不得引用/猜测未完成页的题目、作答或图形信息。"
+                                    "若用户询问未完成页，请提示等待批改完成或只讨论已完成页。"
+                                ),
+                            }
+                        )
+        except Exception:
+            pass
         # For visually risky questions, force the model to anchor on the image first (facts before reasoning).
         try:
             focus_q = (

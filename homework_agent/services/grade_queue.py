@@ -162,6 +162,8 @@ def enqueue_grade_job(
         },
         ttl_seconds=ttl_seconds,
     )
+    images = grade_request.get("images") if isinstance(grade_request, dict) else None
+    total_pages = len(images) if isinstance(images, list) else 0
     set_job_status(
         job_id,
         {
@@ -169,6 +171,10 @@ def enqueue_grade_job(
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "request": grade_request,
             "result": None,
+            "total_pages": int(total_pages) if total_pages else None,
+            "done_pages": 0 if total_pages else None,
+            "page_summaries": [] if total_pages else None,
+            "question_cards": [] if total_pages else None,
         },
         ttl_seconds=ttl_seconds,
     )

@@ -89,6 +89,12 @@ async def upload_files(
             urls.extend(storage.upload_files(tmp.name, prefix=prefix, min_side=14))
     except HTTPException:
         raise
+    except ValueError as e:
+        # Catch image validation errors (e.g. too small) as 400
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
     except Exception as e:
         log_event(
             logger,
@@ -104,7 +110,7 @@ async def upload_files(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error",
+            detail=f"Internal server error: {str(e)}",  # Expose error for debugging
         )
     finally:
         for tmp_path in tmp_paths:

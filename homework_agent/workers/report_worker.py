@@ -24,8 +24,7 @@ from homework_agent.utils.logging_setup import setup_file_logging, silence_noisy
 from homework_agent.utils.observability import log_event
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.supabase_client import (
-    get_service_role_storage_client,
-    get_storage_client,
+    get_worker_storage_client,
 )
 from homework_agent.utils.taxonomy import taxonomy_version
 from homework_agent.utils.prompt_manager import get_prompt_manager
@@ -59,12 +58,7 @@ def _iso(dt: datetime) -> str:
 
 
 def _safe_table(name: str):
-    # Prefer service role for workers (bypass RLS); fall back to anon for dev-only setups.
-    try:
-        storage = get_service_role_storage_client()
-    except Exception:
-        storage = get_storage_client()
-    return storage.client.table(name)
+    return get_worker_storage_client().client.table(name)
 
 
 def _load_pending_job() -> Optional[Dict[str, Any]]:
@@ -90,11 +84,26 @@ def _lock_job(job_id: str) -> Optional[Dict[str, Any]]:
     now = _iso(_utc_now())
     who = f"{socket.gethostname()}:{os.getpid()}"
     try:
+        attempt = 0
+        try:
+            resp0 = (
+                _safe_table("report_jobs")
+                .select("attempt_count")
+                .eq("id", str(job_id))
+                .limit(1)
+                .execute()
+            )
+            rows0 = getattr(resp0, "data", None)
+            row0 = rows0[0] if isinstance(rows0, list) and rows0 else {}
+            attempt = int(row0.get("attempt_count") or 0) if isinstance(row0, dict) else 0
+        except Exception:
+            attempt = 0
         payload = {
             "status": "running",
             "updated_at": now,
             "locked_at": now,
             "locked_by": who,
+            "attempt_count": attempt + 1,
         }
         resp = (
             _safe_table("report_jobs")

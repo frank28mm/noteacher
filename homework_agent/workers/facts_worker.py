@@ -25,8 +25,7 @@ from homework_agent.utils.logging_setup import setup_file_logging, silence_noisy
 from homework_agent.utils.observability import log_event
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.supabase_client import (
-    get_service_role_storage_client,
-    get_storage_client,
+    get_worker_storage_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,12 +48,7 @@ def _iso_now() -> str:
 
 
 def _safe_table(name: str):
-    # Prefer service role for workers (bypass RLS); fall back to anon for dev-only setups.
-    try:
-        storage = get_service_role_storage_client()
-    except Exception:
-        storage = get_storage_client()
-    return storage.client.table(name)
+    return get_worker_storage_client().client.table(name)
 
 
 def _lock_key(submission_id: str) -> str:

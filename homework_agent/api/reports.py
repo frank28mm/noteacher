@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -30,6 +30,93 @@ class CreateReportRequest(BaseModel):
     # Optional: generate report for a single submission (demo-friendly).
     # When set, the worker should ignore window_days and only use this submission_id.
     submission_id: Optional[str] = Field(default=None, min_length=1)
+
+
+class ReportEligibilityResponse(BaseModel):
+    eligible: bool
+    # Demo UI expects these names.
+    submission_count: int = Field(ge=0)
+    required_count: int = Field(ge=1)
+    # Extra fields for product gating (same-subject distinct days).
+    distinct_days: int = Field(default=0, ge=0)
+    required_days: int = Field(default=0, ge=0)
+    subject: Optional[str] = None
+    reason: Optional[str] = None
+    progress_percent: Optional[int] = Field(default=None, ge=0, le=100)
+    sample_submission_ids: List[str] = Field(default_factory=list)
+
+
+def _parse_utc_day(s: str) -> Optional[str]:
+    """
+    Convert an ISO timestamp string to a UTC day key (YYYY-MM-DD).
+    Accepts 'Z' suffix by normalizing to '+00:00' for Python 3.10.
+    """
+    raw = (s or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(timezone.utc)
+        return dt.date().isoformat()
+    except Exception:
+        return None
+
+
+def _compute_eligibility(
+    *,
+    rows: List[Dict[str, Any]],
+    required_count: int,
+    required_days: int,
+) -> Dict[str, Any]:
+    submission_ids: List[str] = []
+    days: Set[str] = set()
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        sid = str(r.get("submission_id") or "").strip()
+        if sid:
+            submission_ids.append(sid)
+        day = _parse_utc_day(str(r.get("created_at") or ""))
+        if day:
+            days.add(day)
+
+    unique_submission_ids = list(dict.fromkeys([s for s in submission_ids if s]))
+    submission_count = len(unique_submission_ids)
+    distinct_days = len(days)
+    eligible = submission_count >= int(required_count) and distinct_days >= int(
+        required_days
+    )
+    reason: Optional[str] = None
+    if not eligible:
+        if submission_count < int(required_count):
+            reason = "need_more_submissions"
+        elif distinct_days < int(required_days):
+            reason = "need_more_days"
+
+    progress_percent: Optional[int] = None
+    try:
+        if int(required_count) > 0:
+            progress_percent = int(
+                max(0.0, min(1.0, float(submission_count) / float(required_count)))
+                * 100.0
+            )
+    except Exception:
+        progress_percent = None
+
+    return {
+        "eligible": bool(eligible),
+        "submission_count": int(submission_count),
+        "required_count": int(required_count),
+        "distinct_days": int(distinct_days),
+        "required_days": int(required_days),
+        "reason": reason,
+        "progress_percent": progress_percent,
+        "sample_submission_ids": unique_submission_ids[:5],
+    }
 
 
 @router.post("/reports", status_code=status.HTTP_202_ACCEPTED)
@@ -108,6 +195,75 @@ def get_report_job(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"failed to query report job: {e}",
         ) from e
+
+
+@router.get("/reports/eligibility", response_model=ReportEligibilityResponse)
+def get_report_eligibility(
+    *,
+    authorization: Optional[str] = Header(default=None),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    subject: Optional[str] = Query(default=None, min_length=1),
+    mode: str = Query(default="demo"),
+    min_submissions: Optional[int] = Query(default=None, ge=1, le=50),
+    min_distinct_days: Optional[int] = Query(default=None, ge=0, le=365),
+    window_days: int = Query(default=90, ge=1, le=365),
+):
+    """
+    Eligibility endpoint for report gating.
+
+    Notes:
+    - Avoids using /mistakes to infer submission count (perfect submissions would be invisible).
+    - `mode=demo` defaults to: required_count=3, required_days=0
+    - `mode=periodic` defaults to: required_count=3, required_days=3 (same-subject)
+    """
+    user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    mode_norm = str(mode or "").strip().lower() or "demo"
+    if mode_norm not in {"demo", "periodic"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid mode (allowed: demo|periodic)",
+        )
+
+    required_count = int(min_submissions) if min_submissions is not None else 3
+    if mode_norm == "periodic":
+        required_days = (
+            int(min_distinct_days) if min_distinct_days is not None else 3
+        )
+    else:
+        required_days = (
+            int(min_distinct_days) if min_distinct_days is not None else 0
+        )
+
+    since = _utc_now() - timedelta(days=int(window_days))
+    try:
+        q = (
+            _safe_table("submissions")
+            .select("submission_id,created_at,subject")
+            .eq("user_id", str(user_id))
+            .gte("created_at", since.isoformat())
+            .order("created_at", desc=True)
+            .limit(500)
+        )
+        if subject:
+            q = q.eq("subject", str(subject).strip())
+        resp = q.execute()
+        rows = getattr(resp, "data", None)
+        rows = rows if isinstance(rows, list) else []
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"failed to query submissions for eligibility: {e}",
+        ) from e
+
+    computed = _compute_eligibility(
+        rows=[r for r in rows if isinstance(r, dict)],
+        required_count=required_count,
+        required_days=required_days,
+    )
+    return ReportEligibilityResponse(
+        **computed,
+        subject=str(subject).strip() if subject else None,
+    )
 
 
 @router.get("/reports/{report_id}")

@@ -372,6 +372,18 @@ class Settings(BaseSettings):
         default="grade:queue", validation_alias="GRADE_QUEUE_NAME"
     )
 
+    # Review cards (Layer 3: auto re-check for visually risky items)
+    grade_review_cards_enabled: bool = Field(
+        default=True, validation_alias="GRADE_REVIEW_CARDS_ENABLED"
+    )
+    grade_review_cards_max_per_page: int = Field(
+        default=2, validation_alias="GRADE_REVIEW_CARDS_MAX_PER_PAGE"
+    )
+    grade_review_cards_timeout_seconds: int = Field(
+        # Per-item VFE budget (smaller than full grade vision budget).
+        default=60, validation_alias="GRADE_REVIEW_CARDS_TIMEOUT_SECONDS"
+    )
+
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     # CORS: default to explicit dev origins (production must set ALLOW_ORIGINS explicitly).
     allow_origins: list[str] = Field(
@@ -380,6 +392,8 @@ class Settings(BaseSettings):
             "http://127.0.0.1:3000",
             "http://localhost:5173",
             "http://127.0.0.1:5173",
+            "http://localhost:4173",
+            "http://127.0.0.1:4173",
         ],
         validation_alias="ALLOW_ORIGINS",
     )

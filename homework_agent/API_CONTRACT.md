@@ -101,6 +101,7 @@ X-Request-Id: req-123456
     {"url": "https://cdn.example.com/homework1.jpg"},
     {"base64": "data:image/jpeg;base64,/9j/4AAQ..."}
   ],
+  "upload_id": "upl_xxx",
   "subject": "math",
   "batch_id": "batch-20250106-001",
   "session_id": "sess-abc123",
@@ -109,7 +110,8 @@ X-Request-Id: req-123456
 ```
 
 **字段说明**:
-- `images` (必需): 1-20 张图片，每项为 `ImageRef`（url 或 base64 二选一），支持 jpg/png/webp
+- `upload_id` (可选): `POST /uploads` 返回的 id（=submission_id）。当提供 `upload_id` 且 `images` 为空/省略时，后端会从 `submissions.page_image_urls` 反查图片列表。
+- `images` (必需\*): 1-20 张图片，每项为 `ImageRef`（url 或 base64 二选一），支持 jpg/png/webp；\*当 `upload_id` 已提供并可反查时可省略/为空。
 - 上传要求：单文件不超过 20 MB；**强烈推荐公网 URL**（禁止 127/localhost/内网）；若使用 `base64`，必须是 **Data URL**（`data:image/...;base64,...`），且超限直接 400。为减少无效调用，建议入口预检 URL/大小/格式，不合规直接返回 400。
 - `subject` (必需): "math" | "english"
 - `batch_id` (可选): 客户端批次标识，用于日志追踪
@@ -176,13 +178,15 @@ X-Request-Id: req-123456
   "updated_at": "2025-01-06T10:30:45Z",
   "total_pages": null,
   "done_pages": null,
-  "page_summaries": null
+  "page_summaries": null,
+  "question_cards": null
 }
 ```
 
 **补充（多页逐页可用，方案 A）**：
 - 当 submission 为多页/多图时，服务端允许在 `status=running` 期间返回“已完成页”的最小摘要，用于前端逐页展示（不必等全量结束）。
 - 这些字段是 **可选** 的：单页任务可能为 `null` 或缺失；多页任务也可能在早期尚未填充。
+- 另一个可选增强：`question_cards`（三层渐进披露：占位→判定→复核），用于前端“秒级刷出占位卡 + 平滑翻转为结果卡”。
 
 #### 示例：running（多页 partial）
 ```json
@@ -196,10 +200,29 @@ X-Request-Id: req-123456
   "total_pages": 3,
   "done_pages": 1,
   "page_summaries": [
-    {"page_index": 1, "wrong_count": 3, "uncertain_count": 1, "needs_review": true}
+    {"page_index": 0, "wrong_count": 3, "uncertain_count": 1, "blank_count": 1, "needs_review": true}
+  ],
+  "question_cards": [
+    {
+      "item_id": "p1:q:1",
+      "question_number": "1",
+      "page_index": 0,
+      "answer_state": "has_answer",
+      "question_content": "两条平行线被…"
+    }
   ]
 }
 ```
+
+说明：
+- `page_index` 为 0-based（第 1 页为 0）；UI 展示时请用 `page_index + 1`。
+- 服务端可能额外返回 `wrong_item_ids`（用于 Demo “进入辅导（本页）”快速绑定），前端不应依赖其稳定存在。
+- `question_cards` 的最小字段建议：`item_id, question_number, page_index, answer_state, question_content(可选)`；更多字段（verdict/reason/needs_review）可在后续逐层补全。
+- `question_cards` 可选增强（Layer 3 复核卡）：
+  - `card_state`: `placeholder|verdict_ready|review_pending|review_ready|review_failed`
+  - `review_reasons`: string[]（触发原因，如 `verdict_uncertain/visual_risk:*`）
+  - `review_summary`: string（复核提取到的结构化事实摘要，供 UI 展示/辅导引用）
+  - `vfe_gate/vfe_scene_type/vfe_image_source/vfe_image_urls`：复核审计信息（可选）
 
 ---
 
@@ -237,6 +260,7 @@ Cache-Control: no-cache
   "question": "为什么辅助线要这样画？",
   "subject": "math",
   "session_id": "sess-abc123",
+  "submission_id": "upl_xxx",
   "mode": "strict",
   "context_item_ids": [1, "item-abc"]
 }
@@ -246,7 +270,8 @@ Cache-Control: no-cache
 - `history` (必需): 本次会话的历史消息，最多20条
 - `question` (必需): 当前问题
 - `subject` (必需): "math" | "english"
-- `session_id` (必需): 对应的作业批次会话ID（24h 生命周期，持久化）
+- `session_id` (可选): 对应的作业批次会话ID（24h TTL）。服务端也支持从 Header `Last-Event-Id` 兜底恢复 `session_id`（当客户端未持久化 session_id 时使用；当前 demo 前端未接入该 header）。
+- `submission_id` (可选): 用于“历史错题问老师”的 **Chat Rehydrate**。当 `session_id` 缺失/过期且提供 `submission_id` 时，后端会从 `submissions` 真源快照重建最小 qbank，并创建新的 `session_id`（心跳首包返回）。
 - `mode` (可选): "normal" | "strict"（对英语辅导/判分一致）
 - `context_item_ids` (可选): 关联的错题项，支持“索引 (int)”或“item_id (string)”两种写法；若缓存有错题则注入详情，无数据或缺失项将在上下文 note 中标记；last-event-id 断线续接会重放最近助手消息。
 - 幂等键使用 Header `X-Idempotency-Key`，Body 不支持。
@@ -269,7 +294,7 @@ Connection: keep-alive
 X-Accel-Buffering: no
 
 event: heartbeat
-data: {"timestamp": "2025-01-06T10:31:00Z"}
+data: {"timestamp": "2025-01-06T10:31:00Z", "session_id": "sess-abc123"}
 
 event: chat
 id: 1
@@ -283,7 +308,7 @@ event: done
 data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"}
 ```
 
-> 心跳间隔建议 30s；若 90s 内无任何数据（含 heartbeat），服务器或反向代理可主动断开，客户端需重连。另：可用 `CHAT_IDLE_DISCONNECT_SECONDS` 配置“LLM 长时间无输出时主动关闭 SSE”（安全兜底，默认关闭；生产建议先取 120s，上线后按 `chat_llm_first_output` 日志的 p99 再回调）。客户端重连时可携带 `Last-Event-Id`，服务端会恢复 session 并按时间顺序重放最近最多 3 条 assistant 消息（仅当前 session）。
+> 心跳间隔建议 30s；若 90s 内无任何数据（含 heartbeat），服务器或反向代理可主动断开，客户端需重连。另：可用 `CHAT_IDLE_DISCONNECT_SECONDS` 配置“LLM 长时间无输出时主动关闭 SSE”（安全兜底，默认关闭；生产建议先取 120s，上线后按 `chat_llm_first_output` 日志的 p99 再回调）。客户端重连时**可选**携带 `Last-Event-Id`（若未保存 `session_id`），服务端会兜底恢复 session 并按时间顺序重放最近最多 3 条 assistant 消息（仅当前 session）。
 
 **SSE事件类型**:
 1. `heartbeat`: 心跳事件（默认每 30 秒一次；可用 `CHAT_HEARTBEAT_INTERVAL_SECONDS` 配置），保持连接
@@ -420,7 +445,36 @@ data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"
 > 目的：生成可审计、可追溯的学情分析报告（先 Features Layer，后续再接 Narrative Layer）。  
 > 数据来源：`question_attempts`（含正确题，提供分母）+ `question_steps`（过程诊断）+ `mistake_exclusions`（排除语义）。
 
-### 6.1 POST /reports
+### 6.1 GET /reports/eligibility
+**描述**：报告解锁条件查询（前端 Report Tab gating）。
+
+> 说明：严禁用 `/mistakes` 推断 submission 数（全对 submission 会被漏掉）。该接口以 `submissions` 为权威数据源。
+
+**查询参数**：
+- `mode`：`demo|periodic`（默认 `demo`）
+  - `demo`：默认门槛 `required_count=3`、`required_days=0`
+  - `periodic`：默认门槛 `required_count=3`、`required_days=3`（同科目 distinct days）
+- `subject`：可选（`math|english`），用于“同科目门槛”统计
+- `min_submissions`：可选（默认随 mode），最小 submission 数
+- `min_distinct_days`：可选（默认随 mode），最小 distinct days
+- `window_days`：可选（默认 90），统计窗口
+
+**响应（200）**：
+```json
+{
+  "eligible": false,
+  "submission_count": 2,
+  "required_count": 3,
+  "distinct_days": 1,
+  "required_days": 3,
+  "subject": "math",
+  "reason": "need_more_submissions",
+  "progress_percent": 66,
+  "sample_submission_ids": ["upl_xxx", "upl_yyy"]
+}
+```
+
+### 6.2 POST /reports
 **描述**：创建异步报告生成任务，返回 `job_id`。
 
 **请求**：
@@ -435,26 +489,91 @@ data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"
 ```json
 {
   "job_id": "uuid",
-  "status": "pending"
+  "status": "queued"
 }
 ```
 
-### 6.2 GET /reports/jobs/{job_id}
-**描述**：查询报告任务状态（pending/running/done/failed）。
+### 6.3 GET /reports/jobs/{job_id}
+**描述**：查询报告任务状态（queued/pending/running/done/failed）。
 
 **响应**：直接返回 `report_jobs` 行（字段可能随实现演进，以 `status/report_id/error` 为主）。
 
-### 6.3 GET /reports/{report_id}
+### 6.4 GET /reports/{report_id}
 **描述**：获取报告内容（Features Layer 为主）。
 
 **响应**：直接返回 `reports` 行（重点字段：`features_json/evidence_refs/report_version`）。
 
-### 6.4 GET /reports
+### 6.5 GET /reports
 **描述**：列出历史报告（按 `created_at desc`）。
 
 **响应**：
 ```json
 {"items": []}
+```
+
+### 6.6 GET /submissions
+**描述**：作业历史列表（用于 Home Recent Activity / History List；不能用 `/mistakes` 推断，否则全对作业会漏）。
+
+**查询参数**：
+- `subject`：可选（`math|english`）
+- `limit`：可选（默认 20，最大 100）
+- `before`：可选（ISO timestamp；返回 `created_at < before` 的更早记录，用于分页）
+
+**响应（200）**：
+```json
+{
+  "items": [
+    {
+      "submission_id": "upl_xxx",
+      "created_at": "2026-01-03T14:48:43Z",
+      "subject": "math",
+      "total_pages": 3,
+      "done_pages": 3,
+      "session_id": "session_xxx",
+      "summary": {
+        "total_items": 18,
+        "wrong_count": 2,
+        "uncertain_count": 1,
+        "blank_count": 0,
+        "score_text": "95/100"
+      }
+    }
+  ],
+  "next_before": "2026-01-02T00:00:00Z"
+}
+```
+
+### 6.7 GET /submissions/{submission_id}
+**描述**：作业历史详情（方案B：读取 submission 快照直接渲染，不重建 job）。
+
+**响应（200）**：
+```json
+{
+  "submission_id": "upl_xxx",
+  "created_at": "2026-01-03T14:48:43Z",
+  "subject": "math",
+  "total_pages": 3,
+  "done_pages": 3,
+  "session_id": "session_xxx",
+  "page_image_urls": ["https://..."],
+  "vision_raw_text": "（可选）",
+  "page_summaries": [
+    {"page_index": 0, "wrong_count": 2, "uncertain_count": 1, "blank_count": 0, "needs_review": true}
+  ],
+  "question_cards": [
+    {
+      "item_id": "p1:q:1",
+      "question_number": "1",
+      "page_index": 0,
+      "answer_state": "has_answer",
+      "question_content": "两条平行线被…",
+      "card_state": "verdict_ready",
+      "verdict": "incorrect",
+      "reason": "…",
+      "needs_review": true
+    }
+  ]
+}
 ```
 
 ---
@@ -703,31 +822,25 @@ curl /api/v1/jobs/job-789xyz
 
 ### A.2 聊天辅导流程
 ```javascript
-// SSE连接
-const eventSource = new EventSource('/api/v1/chat', {
-  withCredentials: true
-});
-
-// 监听事件
-eventSource.addEventListener('chat', (event) => {
-  const data = JSON.parse(event.data);
-  console.log('新消息:', data.content);
-});
-
-// 发送消息
-fetch('/api/v1/chat', {
+// 注意：/api/v1/chat 是 “POST + SSE响应”，不能用 EventSource 直接连（EventSource 只支持 GET）。
+// 推荐用 fetch 读取 ReadableStream，并按 SSE 协议解析 event/data。
+const res = await fetch('/api/v1/chat', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'X-Idempotency-Key': 'uuid-4'
+    'X-User-Id': 'dev_user',
+    // 若需要断线续接且没保存 session_id，可选带上：'Last-Event-Id': 'sess-abc123'
   },
   body: JSON.stringify({
-    "history": [],
-    "question": "这道题怎么做？",
-    "subject": "math",
-    "session_id": "sess-abc123"
+    history: [],
+    question: '这道题怎么做？',
+    subject: 'math',
+    session_id: 'sess-abc123'
   })
 });
+
+// res.body 是 ReadableStream<Uint8Array>，逐块读取并按 `\\n\\n` 分割成 SSE block，
+// 每个 block 再解析 `event:`/`data:` 行即可。
 ```
 
 ---

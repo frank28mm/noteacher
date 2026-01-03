@@ -8,6 +8,7 @@
 - 需求边界：`product_requirements.md`
 - 接口契约：`homework_agent/API_CONTRACT.md`
 - 架构总览：`system_architecture.md`
+- 前端真源（Stitch UI 对齐）：`docs/frontend_design_spec_v2.md`
 - 工程对齐与约束：`docs/engineering_guidelines.md`
 - 开发规则（门禁/日志/安全/回滚）：`docs/development_rules.md`
 - 数据库 Schema 真源（当前以实际 DB 为准）：`supabase/schema.sql`
@@ -38,6 +39,7 @@
 - 接手结论（阶段性快照）：`docs/archive/reports/cto_takeover_report_20251229.md`
 - 合规性自检：`docs/archive/code_compliance_analysis.md`
 - 项目评估报告：`docs/archive/project_evaluation_report.md`
+- 外部“体检报告”代码核对与口径对齐：`docs/reports/healthcheck_report_code_alignment_20260103.md`
 - /grade 快路径复盘（URL-only + qindex_only）：`docs/reports/grade_perf_fast_path_summary_20260102.md`
 - 性能/优化实验：`docs/archive/reports/archived/optimization_plan_v2.md`
 - 智能提升路线图（已被 Backlog 吸收）：`docs/archive/reports/archived/agent_intelligence_improvement_plan.md`

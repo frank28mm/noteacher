@@ -273,3 +273,26 @@ def get_service_role_storage_client() -> SupabaseStorageClient:
     Only intended for worker processes / offline maintenance scripts.
     """
     return SupabaseStorageClient(role="service")
+
+
+def get_worker_storage_client() -> SupabaseStorageClient:
+    """
+    Worker-safe Supabase client selection.
+
+    - Prefer service role (bypass RLS)
+    - Allow fallback to anon for local dev only
+
+    Controls:
+    - WORKER_REQUIRE_SERVICE_ROLE=1 forces service role (no fallback)
+    """
+    require = os.getenv("WORKER_REQUIRE_SERVICE_ROLE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    try:
+        return get_service_role_storage_client()
+    except Exception:
+        if require:
+            raise
+        return get_storage_client()

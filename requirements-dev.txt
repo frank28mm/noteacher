@@ -4,3 +4,4 @@ bandit>=1.7.7
 pylint>=3.2.0
 black>=24.0.0
 ruff>=0.5.0
+psycopg[binary]>=3.1.18

@@ -28,6 +28,8 @@ from homework_agent.api.session import (
     get_session,
     save_session,
     delete_session,
+    persist_question_bank,
+    save_mistakes,
     get_question_bank,
     save_question_bank,
     _merge_bank_meta,
@@ -40,8 +42,12 @@ from homework_agent.utils.user_context import require_user_id
 from homework_agent.utils.errors import build_error_payload, ErrorCode
 from homework_agent.utils.submission_store import (
     touch_submission,
+    link_session_to_submission,
 )
 from homework_agent.utils.supabase_image_proxy import _create_proxy_image_urls
+from homework_agent.utils.supabase_client import get_storage_client
+
+from homework_agent.core.qbank_builder import build_question_bank
 
 from homework_agent.models.vision_facts import GateResult, SceneType, VisualFacts
 from homework_agent.services.vision_facts import (
@@ -56,6 +62,11 @@ from homework_agent.services.vision_facts import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _safe_table(name: str):
+    storage = get_storage_client()
+    return storage.client.table(name)
 
 # 并发保护：防止线程池堆积导致“越跑越慢/无响应”
 _settings_for_limits = get_settings()
@@ -1273,6 +1284,129 @@ def _touch_submission_best_effort(*, user_id: str, session_id: str) -> None:
         logger.debug(f"touch_submission failed (best-effort): {e}")
 
 
+def _load_submission_snapshot_for_chat(
+    *, user_id: str, submission_id: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Load a durable submission snapshot for chat rehydrate.
+    Returns None if not found.
+    """
+    uid = (user_id or "").strip()
+    sid = (submission_id or "").strip()
+    if not uid or not sid:
+        return None
+    try:
+        resp = (
+            _safe_table("submissions")
+            .select(
+                "submission_id,user_id,subject,created_at,session_id,page_image_urls,grade_result,vision_raw_text,warnings"
+            )
+            .eq("user_id", str(uid))
+            .eq("submission_id", str(sid))
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None)
+        row = (
+            rows[0]
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict)
+            else None
+        )
+        return row if isinstance(row, dict) else None
+    except Exception:
+        return None
+
+
+def _rehydrate_session_from_submission_or_abort(
+    *,
+    req: ChatRequest,
+    request_id: str,
+    user_id: str,
+    submission_id: str,
+    now_ts: float,
+) -> tuple[str, Dict[str, Any]]:
+    """
+    Create a new session_id and seed minimal session/qbank/mistakes from durable submission facts.
+    Returns (new_session_id, new_session_data). Aborts the SSE stream on deterministic failures.
+    """
+    row = _load_submission_snapshot_for_chat(user_id=user_id, submission_id=submission_id)
+    if not isinstance(row, dict):
+        _abort_with_error_event("SUBMISSION_NOT_FOUND", "submission not found")
+
+    subj = str(row.get("subject") or "").strip().lower()
+    req_subj = getattr(req.subject, "value", str(req.subject)).strip().lower()
+    if subj and req_subj and subj != req_subj:
+        _abort_with_error_event("SUBJECT_MISMATCH", "subject mismatch for submission")
+
+    grade_result = row.get("grade_result") if isinstance(row.get("grade_result"), dict) else {}
+    questions = grade_result.get("questions")
+    if not isinstance(questions, list) or not questions:
+        _abort_with_error_event("SUBMISSION_NOT_GRADED", "submission has no grade_result.questions")
+
+    page_image_urls = row.get("page_image_urls") if isinstance(row.get("page_image_urls"), list) else []
+    page_image_urls = [str(u).strip() for u in page_image_urls if str(u).strip()]
+    vision_raw_text = str(row.get("vision_raw_text") or "")
+
+    new_session_id = f"session_{uuid.uuid4().hex[:8]}"
+
+    # Seed qbank from durable facts (OCR text + structured questions).
+    bank = build_question_bank(
+        session_id=new_session_id,
+        subject=req.subject,
+        questions=[q for q in questions if isinstance(q, dict)],
+        vision_raw_text=vision_raw_text,
+        page_image_urls=page_image_urls,
+        visual_facts_map=None,
+    )
+
+    warnings = grade_result.get("warnings") if isinstance(grade_result.get("warnings"), list) else []
+    grade_summary = str(grade_result.get("summary") or "").strip()
+    persist_question_bank(
+        session_id=new_session_id,
+        bank=_merge_bank_meta(bank, {"rehydrated_from_submission_id": str(submission_id)}),
+        grade_status="done",
+        grade_summary=grade_summary,
+        grade_warnings=[str(w) for w in warnings if str(w).strip()],
+        request_id=request_id,
+        timings_ms=None,
+    )
+
+    # Seed mistakes for context_item_ids routing (optional; but required for "Ask Teacher" deep links).
+    wrong_items = grade_result.get("wrong_items")
+    if isinstance(wrong_items, list) and wrong_items:
+        save_mistakes(new_session_id, [w for w in wrong_items if isinstance(w, dict)])
+
+    # Seed session. Keep it minimal and deterministic.
+    session_data: Dict[str, Any] = {
+        "history": req.history or [],
+        "interaction_count": 0,
+        "created_at": now_ts,
+        "updated_at": now_ts,
+        "context_item_ids": normalize_context_ids(req.context_item_ids or []),
+        "submission_id": str(submission_id),
+    }
+    try:
+        from homework_agent.security.safety import sanitize_session_data_for_persistence
+
+        sanitize_session_data_for_persistence(session_data)
+    except Exception as e:
+        logger.debug(f"Sanitizing rehydrated session failed (best-effort): {e}")
+    save_session(new_session_id, session_data)
+
+    # Best-effort link for observability + future slice lookups.
+    try:
+        link_session_to_submission(
+            user_id=str(user_id),
+            submission_id=str(submission_id),
+            session_id=str(new_session_id),
+            subject=req_subj or None,
+        )
+    except Exception:
+        pass
+
+    return new_session_id, session_data
+
+
 def _ensure_chat_session_or_abort(
     *,
     req: ChatRequest,
@@ -1334,7 +1468,9 @@ def _emit_initial_events(
                 {
                     "timestamp": datetime.now(timezone.utc)
                     .isoformat()
-                    .replace("+00:00", "Z")
+                    .replace("+00:00", "Z"),
+                    # Clients may use this to persist the (possibly rehydrated) session_id immediately.
+                    "session_id": session_id,
                 },
                 ensure_ascii=False,
             ),
@@ -1879,6 +2015,43 @@ async def chat_stream(
             request_id_override=request_id_override,
         )
     )
+
+    submission_id = str(getattr(req, "submission_id", "") or "").strip()
+    rehydrated = False
+    if submission_id:
+        # If the client explicitly provides a submission_id, prefer rehydrate when:
+        # - session is missing, OR
+        # - session exists but is expired (TTL), OR
+        # - client did not provide session_id explicitly.
+        expired = False
+        try:
+            if session_data:
+                updated_ts = _coerce_ts(session_data.get("updated_at")) or now_ts
+                expired = (now_ts - float(updated_ts)) > float(SESSION_TTL_SECONDS)
+        except Exception:
+            expired = False
+        if (not session_data) or expired or (not req.session_id):
+            # Best-effort: build a new session from durable submission facts.
+            # This keeps "Ask Teacher" usable for historical submissions.
+            try:
+                session_id, session_data = await asyncio.to_thread(
+                    _rehydrate_session_from_submission_or_abort,
+                    req=req,
+                    request_id=request_id,
+                    user_id=user_id,
+                    submission_id=submission_id,
+                    now_ts=now_ts,
+                )
+            except _ChatAbort as abort:
+                for c in abort.chunks:
+                    yield c
+                return
+            try:
+                req.session_id = session_id
+            except Exception:
+                pass
+            rehydrated = True
+
     log_event(
         logger,
         "chat_request",
@@ -1888,6 +2061,8 @@ async def chat_stream(
         subject=getattr(req.subject, "value", str(req.subject)),
         question_len=len(req.question or ""),
         has_last_event_id=bool(last_event_id),
+        submission_id=submission_id or None,
+        rehydrated=rehydrated,
     )
 
     _touch_submission_best_effort(user_id=user_id, session_id=session_id)

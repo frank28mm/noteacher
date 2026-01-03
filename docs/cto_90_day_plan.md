@@ -25,6 +25,7 @@
   - Submission 持久化：`/uploads` 与 `/grade` 结果入库（Postgres）可按用户/时间查询
   - 错题本产品化：支持按 `user_id` 聚合历史错题、排除/恢复误判、基础统计（按 `knowledge_tags`）
   - 报告链路打底：引入 `report_jobs/reports`（异步生成、可查询、可重跑），为“学情分析师 subagent”提供落点（实施方案：`docs/archive/design/mistakes_reports_learning_analyst_design.md`）
+  - 报告解锁口径统一（Eligibility）：Demo 用“≥3 次 submission”快速联调；产品用“同科目≥3天 + 最小 submissions/attempts”门槛，避免数据不足误生成
   - 会话/切片 TTL 策略固化：明确“短期数据”和“长期数据”的清理职责边界
 - E2E 自动化：
   - CI 保留 offline replay 门禁；新增“无外部依赖”的 E2E 冒烟（stub LLM/Vision）
@@ -35,9 +36,10 @@
     - 策略：先 OCR（可缓存）→ 文本聚合（Ark 推理模型），避免 deep-vision 在快路径里长时间思考/拉图
     - 证据：`docs/reports/grade_perf_url_n3_fast_finalize_12000_20260102.md`（同图重复可复现）
     - 视觉题触发规则与验证（A‑5）：`docs/reports/grade_perf_visual_validation_20260102.md`
-  - Demo 体验（多页作业）：
-    - 多页逐页可用：第 1 页先出摘要，不等待全量（方案 A：单 job + partial 输出）
-    - 可选进入辅导：用户点击“进入辅导（本页）”才进入 chat；chat 只基于已完成页回答并标注范围
+- Demo 体验（多页作业）：
+  - 多页逐页可用：第 1 页先出摘要，不等待全量（方案 A：单 job + partial 输出）
+  - 可选进入辅导：用户点击“进入辅导（本页）”才进入 chat；chat 只基于已完成页回答并标注范围
+  - 复核卡（Layer 3）：少量视觉高风险题异步复核（`review_pending→review_ready/failed`），不阻塞 grade 完成，且可解释/可审计
 - 生产形态：
   - Redis 必选开关（`REQUIRE_REDIS=1`）与 worker 部署拓扑落地（grade/qindex worker）
   - Metrics/Logs/Tracing 统一采集与告警阈值（先最小集：错误率/延迟/成本/队列堆积）

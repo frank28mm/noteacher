@@ -78,3 +78,35 @@ def test_focus_switch_without_target_prompts_user(monkeypatch: pytest.MonkeyPatc
             user_id="user",
             session_data=session_data,
         )
+
+
+def test_focus_bound_from_context_item_ids(monkeypatch: pytest.MonkeyPatch):
+    _stub_qbank(monkeypatch)
+    monkeypatch.setattr(
+        chat_stages,
+        "get_mistakes",
+        lambda session_id: [
+            {"item_id": "p1:q:20", "question_number": "20", "page_index": 0}
+        ],
+    )
+    session_data = {
+        "history": [],
+        "interaction_count": 0,
+    }
+    req = ChatRequest(
+        history=[],
+        question="开始辅导本页错题",
+        subject=Subject.MATH,
+        session_id="sess_ctx_ids",
+        context_item_ids=["p1:q:20"],
+    )
+
+    ctx = chat_stages._prepare_chat_context_or_abort(
+        req=req,
+        session_id="sess_ctx_ids",
+        request_id="req_ctx_ids",
+        user_id="user",
+        session_data=session_data,
+    )
+
+    assert ctx["focus_question_number"] == "20"

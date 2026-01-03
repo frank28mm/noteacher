@@ -62,6 +62,58 @@
 
 ---
 
+#### WL‑P0‑013：历史错题复习（Chat Rehydrate：不依赖 24h TTL）
+
+**为什么**：现阶段 session/qbank 等短期缓存有 24h TTL；用户两天后点历史错题“问老师”不应被迫重新上传，否则体验很差且浪费资源。
+
+**执行计划入口（唯一）**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑A：A‑8）。
+
+**状态**：✅ 已实现并联调通过（后端支持 `submission_id` 复习模式；前端“错题本/历史详情”可直接问老师，无需重新上传）
+
+**交付物**：
+- 扩展 `POST /api/v1/chat` 支持“复习模式”（基于 `submission_id + context_item_ids` 从 `submissions` 真源快照重建最小 qbank，并生成新的 `session_id`）
+- SSE 首包返回 `session_id`（前端保存后续继续同一会话）
+- 回答必须标注证据边界：仅基于该 submission 的证据；证据不足必须 `uncertain/needs_review`
+
+**验收标准**：
+- 对 ≥48h 前的 submission，仍能从错题详情进入辅导，不提示“请重新上传/题库快照不存在”
+- `submission_id/item_id/session_id` 三者可串联排查（可观测、可审计）
+
+---
+
+#### WL‑P0‑014：作业历史列表（Submissions/History API）
+
+**为什么**：Stitch UI 的 Home “Recent Activity / View all” 与 Report Tab 的历史列表需要权威的“作业记录列表”。此口径必须来自 `submissions`（不能用 `/mistakes` 推断，否则“全对作业”会消失）。
+
+**执行计划入口（唯一）**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑C：C‑5）。
+
+**状态**：✅ 已实现并联调通过（`GET /api/v1/submissions` + `GET /api/v1/submissions/{submission_id}`；Home Recent / 周报页历史区均已接入权威数据源）
+
+**交付物**：
+- 新增接口：`GET /api/v1/submissions?subject=math&limit=20&before=...`
+- 返回最小字段：
+  - `submission_id/created_at/subject/total_pages/done_pages`
+  - `summary`（可选）：`total_items/wrong_count/uncertain_count/blank_count/score_text`
+  - `session_id`（可选，若仍有效可直接辅导；否则走 WL‑P0‑013 Rehydrate）
+- 契约更新：写入 `homework_agent/API_CONTRACT.md` 并补最小测试（确保排序/分页/全对作业可见）
+
+**验收标准**：
+- Home 能展示最近 N 次作业（包含全对作业）
+- History 列表点击能回放到单次 Result Screen（demo 允许“触发回放 job”方式实现）
+
+**伪代码（查询）**：
+```python
+def list_submissions(user_id: str, *, subject: str | None, limit: int, before: datetime | None):
+    q = db.table("submissions").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(limit)
+    if subject:
+        q = q.eq("subject", subject)
+    if before:
+        q = q.lt("created_at", before.isoformat())
+    return q.execute()
+```
+
+---
+
 ### P0（1–2 周）：把“可回归 + 可观测 + 可控”做成日常
 
 #### WL‑P0‑001：Replay Golden Set v0 扩充（最优先）
@@ -269,6 +321,8 @@ async def call_llm_with_budget(*, stage: str, prompt: str, budget, request_ctx):
 
 **执行计划入口（唯一）**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑B/WS‑C）。
 
+**状态**：✅ 已落地并验收（worker 运行环境启用 `SUPABASE_SERVICE_ROLE_KEY` + `WORKER_REQUIRE_SERVICE_ROLE=1`；report/facts worker 可稳定写库）
+
 **交付物**：
 - 运行手册口径：
   - service role key 只存在于 worker 进程环境变量（Secret Manager/部署平台），**禁止**写入仓库/镜像层/前端
@@ -281,6 +335,49 @@ async def call_llm_with_budget(*, stage: str, prompt: str, budget, request_ctx):
 **验收标准**：
 - 任意 PR 都会运行 `python3 scripts/check_no_secrets.py`，且能拦截 `.env/.env.example` 中的 service role key
 - worker 在 service role 下可完成：`report_jobs` 抢占锁 + 状态更新 +（如启用）facts 回填写入
+
+---
+
+#### WL‑P0‑009：复核卡（Layer 3）验收闭环（前端阻塞项）
+
+**为什么**：复核卡是“视觉高风险题”的差异化关键能力，也是前端当前验收阻塞点。目标是做到：grade 先完成；少量题进入 `review_pending`；复核完成后卡片升级为 `review_ready/review_failed`，且 UI 可解释、可审计。
+
+**执行计划入口（唯一）**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑A：A‑7.1）。
+
+**状态**：✅ 已闭环验收（前后端口径已对齐：前端不会在 `done` 时提前停止轮询；复核卡可稳定观察到最终态）
+
+**关键对齐点（请前端按此验收）**：
+- `question_cards[].card_state`：`review_pending → review_ready/review_failed`
+- `question_cards[].review_reasons[]` + `review_summary`：用于 UI 文案与审计
+- 轮询策略：**不能在 `job.status=done` 立即停止 polling**；应在“无 `review_pending` 卡片”或“达到 timeout”后停止（否则看不到复核结果）
+- 状态口径：后端不存在 `status=reviewing`；复核进度以 `question_cards[].card_state` 表达（避免前端写错字段）
+
+**验收标准**：
+- 有 `review_needed` 的卡：≤ 1 次 polling 内进入 `review_pending`
+- 复核完成后：≤ 1 次 polling 内进入 `review_ready/review_failed`，并返回 `review_summary/review_reasons`
+- 非复核题不受影响：仍为 `verdict_ready`，总体耗时不被全量拖慢
+
+---
+
+#### WL‑P0‑012：Demo UI 2.0 前端契约修复（/api/v1 + 稳定轮询 + 多图上传）
+
+**为什么**：前端要尽量简单，所有功能尽可能交由后端；但 Demo 2.0 需要先把“能跑通且不崩”的基础设施修好，避免因路径/轮询/同步分支导致联调误判。
+
+**执行计划入口（唯一）**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑A：A‑7.1‑FE）。
+
+**状态**：✅ 已完成（/api/v1 对齐、强制异步、稳健轮询、多图上传打通；周报页白屏的 Hooks 竞态已修复）
+
+**交付物**：
+- 路径对齐：前端统一调用 `/api/v1/...`，Vite proxy 透传 `/api/v1`（无 rewrite）
+- Robust Polling：停止条件为 `(done/failed) AND (无 review_pending 卡)`，并设置最大等待上限
+- `/grade` 分支统一：推荐固定 `X-Force-Async: 1`，确保始终拿到 `job_id`
+- 多图上传真正生效：`input[multiple]` + `onUpload(files[])` + `FormData.append('file', f)` 循环
+- Dev 用户注入：如需 `X-User-Id` 兜底，改为 dev 环境变量控制（例如 `VITE_DEV_USER_ID`），避免硬编码进前端代码
+
+**验收标准**：
+- 任意一次上传→grade 都能进入同一套 “job_id + /jobs/{job_id} 轮询” 流程（避免 sync done 无 job_id 崩溃）
+- `review_pending→review_ready/failed` 能在 UI 上稳定观察到（done 不会提前停轮询）
+- 多图上传时后端返回 `pages(uploaded)=N`，并能逐页产出摘要与卡片
 
 ---
 
@@ -414,6 +511,29 @@ def log_run_versions(request_ctx, *, prompt_meta, model_meta, thresholds):
 - 报告生成不阻塞主请求；失败可重跑；产物可追溯到输入 submissions
 - 报告输出字段固定（schema），并可用回归样本评估（避免 prompt 漂移）
 
+---
+
+#### WL‑P1‑011：Report 解锁 Eligibility 接口（产品/演示口径统一）
+
+**为什么**：前端“Report 解锁”不能通过 `/mistakes` 推断（全对 submission 会被漏掉）。需要后端提供权威统计口径，前端只负责展示进度条/禁用态，避免口径漂移与误伤“全对用户”。
+
+**执行计划入口（唯一）**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑C：C‑4）。
+
+**状态**：✅ 已实现（`GET /api/v1/reports/eligibility`）。
+
+**交付物**：
+- 新增接口：`GET /api/v1/reports/eligibility?subject=math&min_distinct_days=3&min_submissions=3`
+- 返回结构（示例）：
+  - `eligible`（bool）
+  - `current_submissions/current_distinct_days`（int）
+  - `required_submissions/required_distinct_days`（int）
+  - `reason`（string，例：`need_more_days`）
+- 数据源：优先 `submissions`（按 `created_at+subject+user_id` 聚合），避免依赖 `mistakes`
+
+**验收标准**：
+- Demo：同科目 ≥3 次 submission 立即解锁（不看对错）
+- 产品：同科目 ≥3 天且满足最小 submissions/attempts 才解锁（阈值可配置）
+
 #### WL‑P1‑001：Baseline 阈值治理（从“允许缺失”→“强阻断”）
 
 **交付物**：
@@ -545,6 +665,8 @@ while True:
 
 **执行计划入口（唯一）**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑A：A‑6）。
 
+**状态**：✅ 已实现（2026‑01‑02；实现位置：`homework_agent/workers/grade_worker.py`, `homework_agent/demo_ui.py`, `homework_agent/api/_chat_stages.py`, `homework_agent/services/llm.py`）
+
 **前端用户感受（Demo UI 2.0）**：
 - 上传 N 张图后立刻出现 N 个页卡（第 1/N…N/N）。
 - 第 1 页先出摘要（错题数/待确认/needs_review），不等后续页。
@@ -565,6 +687,38 @@ while True:
 - 成本/稳定性：并发（grade + chat）不应显著提高失败率；若 provider 限流，需要有可见提示与降级策略。
 
 ---
+
+#### WL‑P1‑007：三层渐进披露（Question Cards：占位→判定→复核）
+
+**为什么**：把“等待批改”从黑盒等待变成秒级可见、逐步变清晰、可中途交互的过程；支撑前端“占位卡刷出 + 翻转动画 + 追更模式”，显著降低用户焦虑。
+
+**设计对齐文档**：`docs/design_progressive_disclosure_question_cards.md`
+
+**状态**：✅ 后端已实现（2026‑01‑03；占位→判定→复核卡均已落地；实现位置：`homework_agent/workers/grade_worker.py`, `homework_agent/workers/review_cards_worker.py`, `homework_agent/services/grade_queue.py`, `homework_agent/services/review_cards_queue.py`, `homework_agent/services/autonomous_tools.py`, `homework_agent/core/question_cards.py`, `homework_agent/core/review_cards_policy.py`）
+
+**当前执行优先级说明**：
+- 近期验收以 **WL‑P0‑009（Layer 3 复核卡）** 为先（前端阻塞项）。
+- Layer 1/2（占位/判定卡）后端已具备，前端可先隐藏/不强调，避免把 Demo 交互复杂度拉高；后续需要“翻转/追更”动效时再启用即可。
+
+**后端交付物（最小契约）**：
+- `/jobs/{job_id}` 在 `status=running` 时新增 `question_cards[]`（轻量列表，支持局部更新，不闪屏）：
+  - `item_id`（string, stable key）
+  - `question_number`（string）
+  - `page_index`（int, 0-based）
+  - `answer_state`（`blank|has_answer|unknown`）
+  - `question_content`（可选但强烈建议：题干前 10–20 字）
+- 空题口径：用 `answer_state=blank` 表达客观事实；不再使用“无法确认原因”误导用户；不做“不会/遗忘”等动机归因。
+- 时间展示口径：前端以 `elapsed_ms/page_elapsed_ms` 展示（避免后台 Tab 降频导致 wall time 虚高）。
+
+**前端交付物（Demo/产品通用）**：
+- 以 `item_id` 作为列表 key，卡片可从占位态平滑翻转为判定态（局部更新不闪屏）
+- 按 `page_index` 分组动效；允许部分完成即可进入辅导
+- 空题渲染为灰色虚线卡片（中性提示文案）
+
+**验收标准**：
+- 上传完成后 ≤ 1 次 polling 内出现占位卡列表（非空）
+- 每页完成后 ≤ 1 次 polling 内，该页卡片批量翻转为 verdict（或补全判定字段）
+- 时间展示不再出现“后台挂起导致 700s”的误导（使用后端 elapsed）
 
 #### WL‑P1‑005：模型 B（FastAPI 唯一入口）与生产安全开关
 

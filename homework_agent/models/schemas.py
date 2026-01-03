@@ -193,8 +193,10 @@ class WrongItem(BaseModel):
 
 
 class GradeRequest(BaseModel):
+    # NOTE: images may be omitted when `upload_id` is provided (backend will resolve from durable submission).
+    # Validation is enforced in the /grade endpoint: images must be present OR upload_id must resolve to images.
     images: List[ImageRef] = Field(
-        ..., description="List of image references (url or base64)"
+        default_factory=list, description="List of image references (url or base64)"
     )
     upload_id: Optional[str] = Field(
         None,
@@ -260,6 +262,13 @@ class ChatRequest(BaseModel):
     subject: Subject
     session_id: Optional[str] = Field(
         None, description="Session identifier for context continuation"
+    )
+    submission_id: Optional[str] = Field(
+        None,
+        description=(
+            "Optional submission identifier for chat rehydrate (load durable snapshot "
+            "and create a new session if the previous session expired)."
+        ),
     )
     mode: Optional[SimilarityMode] = Field(
         None, description="normal/strict, aligns with grading mode"
