@@ -120,6 +120,8 @@ def list_submissions(user_id: str, *, subject: str | None, limit: int, before: d
 
 **为什么**：没有稳定样本集，“变聪明”无法验证，线上问题会逼着补。
 
+**状态**：🔄 已扩充仓库内离线样本到 15 个（text-only，使用 `or_base64` 占位图），并刷新 `.github/baselines/metrics_baseline.json`；仍需逐步补到 20–30 个，并维护私有 inventory（本机绝对路径）做真实 live 回归。
+
 **交付物**：
 - 扩充离线回归样本 `homework_agent/tests/replay_data/samples/`（建议 20–30 个）
 - 可选（若选择“不入库”）：维护本机私有样本清单 `homework_agent/tests/replay_data/samples_inventory.csv`（仅保存绝对路径+标签，不提交图片）
@@ -157,6 +159,8 @@ def list_submissions(user_id: str, *, subject: str | None, limit: int, before: d
 #### WL‑P0‑002：把 replay + metrics 变成 PR 日常门禁（轻门禁 → 严门禁）
 
 **为什么**：只跑 `pytest -q` 不足以约束 agent 行为变更；要把“行为回归”变成 PR 默认门禁。
+
+**状态**：✅ 已在 `.github/workflows/ci.yml` 默认执行（`pytest` + `test_replay.py` + `collect_replay_metrics.py` + `check_baseline.py`），并已将 `scripts/check_observability.py` 切换为 `--strict`（0 warning 才通过）。
 
 **交付物**：
 - CI：PR 阶段跑 replay + metrics（轻门禁，不做 baseline 阻断或只允许 missing baseline）

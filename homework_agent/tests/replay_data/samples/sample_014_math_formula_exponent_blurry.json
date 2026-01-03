@@ -1,0 +1,20 @@
+{
+  "sample_id": "sample_014_math_formula_exponent_blurry",
+  "description": "Offline replay sample for blurry exponents / superscripts (common OCR failure mode).",
+  "subject": "math",
+  "input": {
+    "or_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6nP0UAAAAASUVORK5CYII=",
+    "mode": "embedded_base64"
+  },
+  "expected_output": {
+    "must_have_fields": ["results", "summary", "warnings"],
+    "notes": "When live, prefer uncertain/needs_review over overconfident correctness."
+  },
+  "metadata": {
+    "difficulty": "hard",
+    "category": "ocr",
+    "allow_uncertain": true
+  },
+  "tags": ["offline", "math", "ocr", "exponent"]
+}
+

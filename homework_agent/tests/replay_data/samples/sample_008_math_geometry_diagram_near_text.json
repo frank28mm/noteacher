@@ -1,0 +1,20 @@
+{
+  "sample_id": "sample_008_math_geometry_diagram_near_text",
+  "description": "Offline replay sample for geometry where diagram is adjacent to the question text.",
+  "subject": "math",
+  "input": {
+    "or_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6nP0UAAAAASUVORK5CYII=",
+    "mode": "embedded_base64"
+  },
+  "expected_output": {
+    "must_have_fields": ["results", "summary", "warnings"],
+    "notes": "When live, expect visual_risk or review_needed on some items if evidence is weak."
+  },
+  "metadata": {
+    "difficulty": "medium",
+    "category": "geometry",
+    "allow_uncertain": true
+  },
+  "tags": ["offline", "math", "geometry", "diagram"]
+}
+

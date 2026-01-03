@@ -1,0 +1,21 @@
+{
+  "sample_id": "sample_007_math_multipage_3pages",
+  "description": "Offline replay sample representing a multi-page submission (progressive disclosure / per-page summaries).",
+  "subject": "math",
+  "input": {
+    "or_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6nP0UAAAAASUVORK5CYII=",
+    "mode": "embedded_base64",
+    "notes": "For live runs, replace with 3-4 page images via local_images or image_urls (not committed)."
+  },
+  "expected_output": {
+    "must_have_fields": ["results", "summary", "warnings"],
+    "notes": "Expect total_pages>=3 and early TTV for page 1 in progressive mode."
+  },
+  "metadata": {
+    "difficulty": "medium",
+    "category": "multipage",
+    "allow_uncertain": true
+  },
+  "tags": ["offline", "math", "multipage", "progressive_disclosure"]
+}
+

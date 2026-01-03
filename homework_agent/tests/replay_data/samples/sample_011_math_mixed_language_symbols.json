@@ -1,0 +1,19 @@
+{
+  "sample_id": "sample_011_math_mixed_language_symbols",
+  "description": "Offline replay sample for math with mixed Chinese/English symbols and unit notations.",
+  "subject": "math",
+  "input": {
+    "or_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6nP0UAAAAASUVORK5CYII=",
+    "mode": "embedded_base64"
+  },
+  "expected_output": {
+    "must_have_fields": ["results", "summary", "warnings"]
+  },
+  "metadata": {
+    "difficulty": "medium",
+    "category": "mixed_language",
+    "allow_uncertain": true
+  },
+  "tags": ["offline", "math", "mixed_language"]
+}
+

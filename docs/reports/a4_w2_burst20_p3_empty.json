@@ -1,0 +1,3303 @@
+{
+  "generated_at": "a4_w2_burst20_p3_empty",
+  "api_base": "http://localhost:8000/api/v1",
+  "user_id": "demo_perf_20260101_qindex_only_01",
+  "worker_count": 2,
+  "burst_submissions": 20,
+  "pages_per_submission": 3,
+  "subject": "math",
+  "vision_provider": "doubao",
+  "llm_provider": "ark",
+  "upload_concurrency": 4,
+  "grade_concurrency": 20,
+  "poll_interval_seconds": 2.0,
+  "timeout_seconds": 3600,
+  "runs": [
+    {
+      "run_index": 0,
+      "upload_id": "upl_ebd968382be045f9",
+      "session_id": "a4_a4_w2_burst20_p3_empty_0_ad47b4",
+      "job_id": "job_b4283fdbb06b4c1f",
+      "pages": 3,
+      "upload_ms": 64687,
+      "grade_submit_ms": 5591,
+      "queue_wait_ms": 533122,
+      "ttv_first_page_ms": 699644,
+      "ttd_done_ms": 1036261,
+      "job_status": "done",
+      "job_elapsed_ms": 503139,
+      "per_page_ready_ms": {
+        "0": 699644,
+        "1": 902344,
+        "2": 1036684
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_0_ad47b4",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4791,
+        "questions_count": 45,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "5@p3",
+          "6@p3",
+          "7@p3",
+          "8@p3",
+          "9@p3",
+          "15(1)",
+          "15(2)",
+          "10@p3",
+          "11@p3",
+          "12@p3",
+          "13@p3",
+          "14@p3",
+          "N/A@p2",
+          "N/A@p3",
+          "15(1)@p3",
+          "15(2)@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_0_ad47b4"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_021767464446037d6b0e46812eb6ca5f421e6552139c58c4dfc4f",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:22:16.666192",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 11 道（未作答 10 题）",
+          "warnings": [
+            "部分题目未提供答案",
+            "存在符号运算和公式应用错误",
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。",
+            "部分题目未填写答案，无法评分"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 1294,
+            "tool_ocr_fallback_ms": 1294,
+            "compress_total_ms": 2930,
+            "compress_download_ms": 1002,
+            "compress_decode_ms": 31,
+            "compress_resize_ms": 53,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 1840,
+            "llm_aggregate_call_ms": 78954,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 83183
+          },
+          "vision_raw_len": 4791,
+          "questions_count": 45,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5",
+              "resolved_as": "5@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6",
+              "resolved_as": "6@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "9",
+              "resolved_as": "9@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "10",
+              "resolved_as": "10@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "11",
+              "resolved_as": "11@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "12",
+              "resolved_as": "12@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "13",
+              "resolved_as": "13@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "14",
+              "resolved_as": "14@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(1)",
+              "resolved_as": "15(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(2)",
+              "resolved_as": "15(2)@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 1,
+      "upload_id": "upl_9401a9f39fe340d0",
+      "session_id": "a4_a4_w2_burst20_p3_empty_1_3aff23",
+      "job_id": "job_2fd713cd729d4ed3",
+      "pages": 3,
+      "upload_ms": 39769,
+      "grade_submit_ms": 24918,
+      "queue_wait_ms": 0,
+      "ttv_first_page_ms": 205163,
+      "ttd_done_ms": 538418,
+      "job_status": "done",
+      "job_elapsed_ms": 538418,
+      "per_page_ready_ms": {
+        "0": 205163,
+        "1": 414359,
+        "2": 538713
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_1_3aff23",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4973,
+        "questions_count": 37,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "7",
+          "8",
+          "5",
+          "6",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "5@p3",
+          "6@p3",
+          "7@p3",
+          "8@p3",
+          "15(1)",
+          "15(2)",
+          "N/A@p2",
+          "N/A@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_1_3aff23"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_021767463935858b24228fc6121af27473abf46a7e0aad2a11719",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:13:53.724972",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 7 道（未作答 5 题）",
+          "warnings": [
+            "第1题的角位置分析需结合图形，可能存在理解误差，但根据选项逻辑判断学生答案错误",
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。",
+            "第1题学生对平行线判定的角位置关系判断错误"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 934,
+            "tool_ocr_fallback_ms": 934,
+            "compress_total_ms": 3259,
+            "compress_download_ms": 1329,
+            "compress_decode_ms": 31,
+            "compress_resize_ms": 54,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 1842,
+            "llm_aggregate_call_ms": 86194,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 90390
+          },
+          "vision_raw_len": 4973,
+          "questions_count": 37,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5",
+              "resolved_as": "5@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6",
+              "resolved_as": "6@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 2,
+      "upload_id": "upl_3d7d9a0cbfec4be3",
+      "session_id": "a4_a4_w2_burst20_p3_empty_2_4b9ccb",
+      "job_id": "job_8818c4be2766408d",
+      "pages": 3,
+      "upload_ms": 62674,
+      "grade_submit_ms": 5810,
+      "queue_wait_ms": 532909,
+      "ttv_first_page_ms": 805833,
+      "ttd_done_ms": 1118382,
+      "job_status": "done",
+      "job_elapsed_ms": 585473,
+      "per_page_ready_ms": {
+        "0": 805833,
+        "1": 970460,
+        "2": 1118960
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_2_4b9ccb",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4791,
+        "questions_count": 45,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "5@p3",
+          "6@p3",
+          "7@p3",
+          "8@p3",
+          "9@p3",
+          "15(1)",
+          "15(2)",
+          "10@p3",
+          "11@p3",
+          "12@p3",
+          "13@p3",
+          "14@p3",
+          "N/A@p2",
+          "N/A@p3",
+          "15(1)@p3",
+          "15(2)@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_2_4b9ccb"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_0217674645154314a1893a7016da6ddb77c20742a6044e9aa3a29",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:23:37.049996",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 12 道（未作答 10 题）",
+          "warnings": [
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 1344,
+            "tool_ocr_fallback_ms": 1344,
+            "compress_total_ms": 3083,
+            "compress_download_ms": 932,
+            "compress_decode_ms": 28,
+            "compress_resize_ms": 54,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 2065,
+            "llm_aggregate_call_ms": 89935,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 94366
+          },
+          "vision_raw_len": 4791,
+          "questions_count": 45,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5",
+              "resolved_as": "5@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6",
+              "resolved_as": "6@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "9",
+              "resolved_as": "9@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "10",
+              "resolved_as": "10@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "11",
+              "resolved_as": "11@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "12",
+              "resolved_as": "12@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "13",
+              "resolved_as": "13@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "14",
+              "resolved_as": "14@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(1)",
+              "resolved_as": "15(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(2)",
+              "resolved_as": "15(2)@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 3,
+      "upload_id": "upl_62c6e8d60ba94fc6",
+      "session_id": "a4_a4_w2_burst20_p3_empty_3_291ec2",
+      "job_id": "job_4d24cce902504266",
+      "pages": 3,
+      "upload_ms": 56041,
+      "grade_submit_ms": 12425,
+      "queue_wait_ms": 0,
+      "ttv_first_page_ms": 180137,
+      "ttd_done_ms": 534227,
+      "job_status": "done",
+      "job_elapsed_ms": 534227,
+      "per_page_ready_ms": {
+        "0": 180137,
+        "1": 362333,
+        "2": 532863
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_3_291ec2",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4973,
+        "questions_count": 39,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "7",
+          "8",
+          "5",
+          "6",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "7@p3",
+          "8@p3",
+          "15(1)",
+          "15(2)",
+          "N/A@p2",
+          "N/A@p3",
+          "5(1)@p3",
+          "5(2)@p3",
+          "6(1)@p3",
+          "6(2)@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_3_291ec2"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_021767463900486943be5294e080788be4ca008f262f4f3991ab6",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:13:51.428751",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 9 道（未作答 5 题）",
+          "warnings": [
+            "第1题误判平行直线（选C，正确为D）",
+            "第6(2)题平行直线判断错误（写PC∥AB，正确为AB∥CD）",
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。",
+            "部分题目未填写答案",
+            "Q14题目计算结果非整数，可能存在错误",
+            "部分题目（如题1、6(2)）的平行线判定应用错误，需加强三线八角的理解。"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 1221,
+            "tool_ocr_fallback_ms": 1221,
+            "compress_total_ms": 3161,
+            "compress_download_ms": 1084,
+            "compress_decode_ms": 27,
+            "compress_resize_ms": 51,
+            "compress_encode_ms": 1,
+            "compress_upload_ms": 1995,
+            "llm_aggregate_call_ms": 119264,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 123648
+          },
+          "vision_raw_len": 4973,
+          "questions_count": 39,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5(1)",
+              "resolved_as": "5(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5(2)",
+              "resolved_as": "5(2)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6(1)",
+              "resolved_as": "6(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6(2)",
+              "resolved_as": "6(2)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 4,
+      "upload_id": "upl_60d8ec4008114ab1",
+      "session_id": "a4_a4_w2_burst20_p3_empty_4_598ab2",
+      "job_id": "job_2ca3508838dc4a69",
+      "pages": 3,
+      "upload_ms": 81509,
+      "grade_submit_ms": 14352,
+      "queue_wait_ms": 1454298,
+      "ttv_first_page_ms": 1652778,
+      "ttd_done_ms": 2135041,
+      "job_status": "done",
+      "job_elapsed_ms": 680743,
+      "per_page_ready_ms": {
+        "0": 1652778,
+        "1": 1811159,
+        "2": 2134191
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_4_598ab2",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4791,
+        "questions_count": 45,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "5@p3",
+          "6@p3",
+          "7@p3",
+          "8@p3",
+          "9@p3",
+          "15(1)",
+          "15(2)",
+          "10@p3",
+          "11@p3",
+          "12@p3",
+          "13@p3",
+          "14@p3",
+          "N/A@p2",
+          "N/A@p3",
+          "15(1)@p3",
+          "15(2)@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_4_598ab2"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_0217674654204465915fedfb2d82554863c3fe578618fa293c5e4",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:41:41.023654",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 11 道（未作答 10 题）",
+          "warnings": [
+            "部分题目未填写答案（Q5、Q8、Q10、Q11、Q13），无法判断对错",
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 1178,
+            "tool_ocr_fallback_ms": 1178,
+            "compress_total_ms": 3207,
+            "compress_download_ms": 1104,
+            "compress_decode_ms": 32,
+            "compress_resize_ms": 54,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 2013,
+            "llm_aggregate_call_ms": 143844,
+            "llm_aggregate_parse_ms": 0,
+            "llm_aggregate_parse_retry_ms": 0,
+            "grade_total_duration_ms": 273291
+          },
+          "vision_raw_len": 4791,
+          "questions_count": 45,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5",
+              "resolved_as": "5@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6",
+              "resolved_as": "6@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "9",
+              "resolved_as": "9@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "10",
+              "resolved_as": "10@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "11",
+              "resolved_as": "11@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "12",
+              "resolved_as": "12@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "13",
+              "resolved_as": "13@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "14",
+              "resolved_as": "14@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(1)",
+              "resolved_as": "15(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(2)",
+              "resolved_as": "15(2)@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 5,
+      "upload_id": "upl_fc98384152884ffe",
+      "session_id": "a4_a4_w2_burst20_p3_empty_5_d494e2",
+      "job_id": "job_e65431d6504349b1",
+      "pages": 3,
+      "upload_ms": 65236,
+      "grade_submit_ms": 14352,
+      "queue_wait_ms": 1051815,
+      "ttv_first_page_ms": 1220233,
+      "ttd_done_ms": 1592180,
+      "job_status": "done",
+      "job_elapsed_ms": 540365,
+      "per_page_ready_ms": {
+        "0": 1220233,
+        "1": 1400770,
+        "2": 1591324
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_5_d494e2",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 5082,
+        "questions_count": 39,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "7",
+          "8",
+          "5",
+          "6",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "7@p3",
+          "8@p3",
+          "15(1)",
+          "15(2)",
+          "N/A@p2",
+          "N/A@p3",
+          "5(1)@p3",
+          "5(2)@p3",
+          "6(1)@p3",
+          "6(2)@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_5_d494e2"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_0217674650100855ed129591da48e074cf9db74a161503f409794",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:32:37.313905",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 7 道（未作答 5 题）",
+          "warnings": [
+            "OCR识别可能存在误差，部分作答以图片为准",
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。",
+            "第1题对平行线判定的内错角识别有误，需加强练习"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 1260,
+            "tool_ocr_fallback_ms": 1260,
+            "compress_total_ms": 3360,
+            "compress_download_ms": 1570,
+            "compress_decode_ms": 28,
+            "compress_resize_ms": 54,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 1704,
+            "llm_aggregate_call_ms": 135611,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 140233
+          },
+          "vision_raw_len": 5082,
+          "questions_count": 39,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5(1)",
+              "resolved_as": "5(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5(2)",
+              "resolved_as": "5(2)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6(1)",
+              "resolved_as": "6(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6(2)",
+              "resolved_as": "6(2)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 6,
+      "upload_id": "upl_a06911741a384af6",
+      "session_id": "a4_a4_w2_burst20_p3_empty_6_aea232",
+      "job_id": "job_1dacf8178fc54c6e",
+      "pages": 3,
+      "upload_ms": 76591,
+      "grade_submit_ms": 1987,
+      "queue_wait_ms": 1585701,
+      "ttv_first_page_ms": 1732202,
+      "ttd_done_ms": 2031612,
+      "job_status": "done",
+      "job_elapsed_ms": 445911,
+      "per_page_ready_ms": {
+        "0": 1732202,
+        "1": 1894766,
+        "2": 2031262
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_6_aea232",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4791,
+        "questions_count": 45,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "5@p3",
+          "6@p3",
+          "7@p3",
+          "8@p3",
+          "9@p3",
+          "15(1)",
+          "15(2)",
+          "10@p3",
+          "11@p3",
+          "12@p3",
+          "13@p3",
+          "14@p3",
+          "N/A@p2",
+          "N/A@p3",
+          "15(1)@p3",
+          "15(2)@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_6_aea232"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_02176746550294213d48c4760d2f20ff0aabc46dcd14fa849485d",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:40:03.273880",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 11 道（未作答 10 题）",
+          "warnings": [
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 1210,
+            "tool_ocr_fallback_ms": 1210,
+            "compress_total_ms": 2866,
+            "compress_download_ms": 1012,
+            "compress_decode_ms": 29,
+            "compress_resize_ms": 54,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 1767,
+            "llm_aggregate_call_ms": 88645,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 92724
+          },
+          "vision_raw_len": 4791,
+          "questions_count": 45,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5",
+              "resolved_as": "5@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6",
+              "resolved_as": "6@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "9",
+              "resolved_as": "9@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "10",
+              "resolved_as": "10@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "11",
+              "resolved_as": "11@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "12",
+              "resolved_as": "12@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "13",
+              "resolved_as": "13@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "14",
+              "resolved_as": "14@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(1)",
+              "resolved_as": "15(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(2)",
+              "resolved_as": "15(2)@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 7,
+      "upload_id": "upl_c61fea2cf1434d65",
+      "session_id": "a4_a4_w2_burst20_p3_empty_7_26f40b",
+      "job_id": "job_30abc5b6abcb40b7",
+      "pages": 3,
+      "upload_ms": 42961,
+      "grade_submit_ms": 19775,
+      "queue_wait_ms": 979795,
+      "ttv_first_page_ms": 1132199,
+      "ttd_done_ms": 1463235,
+      "job_status": "done",
+      "job_elapsed_ms": 483440,
+      "per_page_ready_ms": {
+        "0": 1132199,
+        "1": 1290594,
+        "2": 1463170
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_7_26f40b",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4973,
+        "questions_count": 39,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "7",
+          "8",
+          "5",
+          "6",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "7@p3",
+          "8@p3",
+          "15(1)",
+          "15(2)",
+          "N/A@p2",
+          "N/A@p3",
+          "5(1)@p3",
+          "5(2)@p3",
+          "6(1)@p3",
+          "6(2)@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_7_26f40b"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_021767464885349b4e125166fe9f384feaafba36acd7e4830dd8c",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:30:20.224349",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 7 道（未作答 5 题）",
+          "warnings": [
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。",
+            "部分题目未填写答案，无法判断；部分题目答案不完整或计算错误"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 845,
+            "tool_ocr_fallback_ms": 845,
+            "compress_total_ms": 2829,
+            "compress_download_ms": 913,
+            "compress_decode_ms": 28,
+            "compress_resize_ms": 54,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 1831,
+            "llm_aggregate_call_ms": 123203,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 126880
+          },
+          "vision_raw_len": 4973,
+          "questions_count": 39,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5(1)",
+              "resolved_as": "5(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5(2)",
+              "resolved_as": "5(2)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6(1)",
+              "resolved_as": "6(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6(2)",
+              "resolved_as": "6(2)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 8,
+      "upload_id": "upl_71826bafe8e445dc",
+      "session_id": "a4_a4_w2_burst20_p3_empty_8_218ec3",
+      "job_id": "job_4e467a2617314142",
+      "pages": 3,
+      "upload_ms": 60067,
+      "grade_submit_ms": 11856,
+      "queue_wait_ms": 1994948,
+      "ttv_first_page_ms": 2145612,
+      "ttd_done_ms": 2532692,
+      "job_status": "done",
+      "job_elapsed_ms": 537744,
+      "per_page_ready_ms": {
+        "0": 2145612,
+        "1": 2318171,
+        "2": 2530933
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_8_218ec3",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4791,
+        "questions_count": 45,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "5@p3",
+          "6@p3",
+          "7@p3",
+          "8@p3",
+          "9@p3",
+          "15-1",
+          "15-2",
+          "15(1)",
+          "15(2)",
+          "10@p3",
+          "11@p3",
+          "12@p3",
+          "13@p3",
+          "14@p3",
+          "N/A@p2",
+          "N/A@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_8_218ec3"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_021767466006388013359aa4be1d50f017ce693675296f17184b1",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:49:00.964807",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 12 道（未作答 10 题）",
+          "warnings": [
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。",
+            "部分题目未填写答案，无法评估其正确性"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 1285,
+            "tool_ocr_fallback_ms": 1285,
+            "compress_total_ms": 3036,
+            "compress_download_ms": 1119,
+            "compress_decode_ms": 30,
+            "compress_resize_ms": 53,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 1830,
+            "llm_aggregate_call_ms": 122886,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 127210
+          },
+          "vision_raw_len": 4791,
+          "questions_count": 45,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5",
+              "resolved_as": "5@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6",
+              "resolved_as": "6@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "9",
+              "resolved_as": "9@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "10",
+              "resolved_as": "10@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "11",
+              "resolved_as": "11@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "12",
+              "resolved_as": "12@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "13",
+              "resolved_as": "13@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "14",
+              "resolved_as": "14@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 9,
+      "upload_id": "upl_eaccd9c0722d4ea3",
+      "session_id": "a4_a4_w2_burst20_p3_empty_9_b68e0f",
+      "job_id": "job_e8f9c21da46e4f4b",
+      "pages": 3,
+      "upload_ms": 49886,
+      "grade_submit_ms": 15554,
+      "queue_wait_ms": 2085108,
+      "ttv_first_page_ms": 2263564,
+      "ttd_done_ms": 2606422,
+      "job_status": "done",
+      "job_elapsed_ms": 521314,
+      "per_page_ready_ms": {
+        "0": 2263564,
+        "1": 2436054,
+        "2": 2604531
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_9_b68e0f",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4973,
+        "questions_count": 39,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "7",
+          "8",
+          "5",
+          "6",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "7@p3",
+          "8@p3",
+          "15(1)",
+          "15(2)",
+          "N/A@p2",
+          "N/A@p3",
+          "5(1)@p3",
+          "5(2)@p3",
+          "6(1)@p3",
+          "6(2)@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_9_b68e0f"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_0217674660969324a1893a7016da6ddb77c20742a6044e944c010",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:50:21.894276",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 7 道（未作答 5 题）",
+          "warnings": [
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 1196,
+            "tool_ocr_fallback_ms": 1196,
+            "compress_total_ms": 3947,
+            "compress_download_ms": 2037,
+            "compress_decode_ms": 31,
+            "compress_resize_ms": 55,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 1821,
+            "llm_aggregate_call_ms": 113343,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 118491
+          },
+          "vision_raw_len": 4973,
+          "questions_count": 39,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5(1)",
+              "resolved_as": "5(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5(2)",
+              "resolved_as": "5(2)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6(1)",
+              "resolved_as": "6(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6(2)",
+              "resolved_as": "6(2)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 10,
+      "upload_id": "upl_67d90192edc04265",
+      "session_id": "a4_a4_w2_burst20_p3_empty_10_6aa8bd",
+      "job_id": "job_001bd8645d424e3f",
+      "pages": 3,
+      "upload_ms": 65442,
+      "grade_submit_ms": 1734,
+      "queue_wait_ms": 2522049,
+      "ttv_first_page_ms": 2682543,
+      "ttd_done_ms": 2994761,
+      "job_status": "done",
+      "job_elapsed_ms": 472712,
+      "per_page_ready_ms": {
+        "0": 2682543,
+        "1": 2847273,
+        "2": 2993822
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_10_6aa8bd",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4791,
+        "questions_count": 45,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "5@p3",
+          "6@p3",
+          "7@p3",
+          "8@p3",
+          "9@p3",
+          "15(1)",
+          "15(2)",
+          "10@p3",
+          "11@p3",
+          "12@p3",
+          "13@p3",
+          "14@p3",
+          "N/A@p2",
+          "N/A@p3",
+          "15(1)@p3",
+          "15(2)@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_10_6aa8bd"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_021767466519533636b2bbc085fdc04ce653f47fa25fd564bd159",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:56:53.611662",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 11 道（未作答 10 题）",
+          "warnings": [
+            "部分题目未作答，需补充完整",
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 1101,
+            "tool_ocr_fallback_ms": 1101,
+            "compress_total_ms": 3288,
+            "compress_download_ms": 1400,
+            "compress_decode_ms": 32,
+            "compress_resize_ms": 55,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 1798,
+            "llm_aggregate_call_ms": 82389,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 86781
+          },
+          "vision_raw_len": 4791,
+          "questions_count": 45,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5",
+              "resolved_as": "5@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6",
+              "resolved_as": "6@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "9",
+              "resolved_as": "9@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "10",
+              "resolved_as": "10@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "11",
+              "resolved_as": "11@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "12",
+              "resolved_as": "12@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "13",
+              "resolved_as": "13@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "14",
+              "resolved_as": "14@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(1)",
+              "resolved_as": "15(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(2)",
+              "resolved_as": "15(2)@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 11,
+      "upload_id": "upl_14c0fb6cb41145d9",
+      "session_id": "a4_a4_w2_burst20_p3_empty_11_ca1f98",
+      "job_id": "job_0d201cd90264493b",
+      "pages": 3,
+      "upload_ms": 59234,
+      "grade_submit_ms": 1947,
+      "queue_wait_ms": 2592335,
+      "ttv_first_page_ms": 2754954,
+      "ttd_done_ms": 3064241,
+      "job_status": "done",
+      "job_elapsed_ms": 471906,
+      "per_page_ready_ms": {
+        "0": 2754954,
+        "1": 2909510,
+        "2": 3064058
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_11_ca1f98",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4973,
+        "questions_count": 39,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "7",
+          "8",
+          "5",
+          "6",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "7@p3",
+          "8@p3",
+          "15(1)",
+          "15(2)",
+          "N/A@p2",
+          "N/A@p3",
+          "5(1)@p3",
+          "5(2)@p3",
+          "6(1)@p3",
+          "6(2)@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_11_ca1f98"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_021767466574070af079c8b3daea2503bdca6879dc89b1f9e1ee8",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:58:14.355843",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 7 道（未作答 5 题）",
+          "warnings": [
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。",
+            "部分题目未填写答案",
+            "存在运算符号及公式应用错误",
+            "题1对平行线判定的角位置判断错误"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 912,
+            "tool_ocr_fallback_ms": 912,
+            "compress_total_ms": 2891,
+            "compress_download_ms": 939,
+            "compress_decode_ms": 28,
+            "compress_resize_ms": 53,
+            "compress_encode_ms": 1,
+            "compress_upload_ms": 1867,
+            "llm_aggregate_call_ms": 108606,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 112414
+          },
+          "vision_raw_len": 4973,
+          "questions_count": 39,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5(1)",
+              "resolved_as": "5(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5(2)",
+              "resolved_as": "5(2)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6(1)",
+              "resolved_as": "6(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6(2)",
+              "resolved_as": "6(2)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 12,
+      "upload_id": "upl_56d7cdda68ab4249",
+      "session_id": "a4_a4_w2_burst20_p3_empty_12_c784d7",
+      "job_id": "job_667cc38a4aab4321",
+      "pages": 3,
+      "upload_ms": 55329,
+      "grade_submit_ms": 9074,
+      "queue_wait_ms": 3032468,
+      "ttv_first_page_ms": 3168884,
+      "ttd_done_ms": 3495434,
+      "job_status": "done",
+      "job_elapsed_ms": 462966,
+      "per_page_ready_ms": {
+        "0": 3168884,
+        "1": 3333426,
+        "2": 3494031
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_12_c784d7",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4791,
+        "questions_count": 45,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "5@p3",
+          "6@p3",
+          "7@p3",
+          "8@p3",
+          "9@p3",
+          "15(1)",
+          "15(2)",
+          "10@p3",
+          "11@p3",
+          "12@p3",
+          "13@p3",
+          "14@p3",
+          "N/A@p2",
+          "N/A@p3",
+          "15(1)@p3",
+          "15(2)@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_12_c784d7"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_0217674670507894fe949375ac26682761f342713cef3328ac4c2",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T03:05:57.106199",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 12 道（未作答 10 题）",
+          "warnings": [
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。",
+            "部分题目未提供学生答案"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 1168,
+            "tool_ocr_fallback_ms": 1168,
+            "compress_total_ms": 2936,
+            "compress_download_ms": 939,
+            "compress_decode_ms": 33,
+            "compress_resize_ms": 54,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 1905,
+            "llm_aggregate_call_ms": 94643,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 98750
+          },
+          "vision_raw_len": 4791,
+          "questions_count": 45,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5",
+              "resolved_as": "5@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6",
+              "resolved_as": "6@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "9",
+              "resolved_as": "9@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "10",
+              "resolved_as": "10@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "11",
+              "resolved_as": "11@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "12",
+              "resolved_as": "12@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "13",
+              "resolved_as": "13@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "14",
+              "resolved_as": "14@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(1)",
+              "resolved_as": "15(1)@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "15(2)",
+              "resolved_as": "15(2)@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 13,
+      "upload_id": "upl_b567e29298e74b65",
+      "session_id": "a4_a4_w2_burst20_p3_empty_13_11aaf4",
+      "job_id": "job_075841e3130442d2",
+      "pages": 3,
+      "upload_ms": 45006,
+      "grade_submit_ms": 6871,
+      "queue_wait_ms": 2961240,
+      "ttv_first_page_ms": 3141768,
+      "ttd_done_ms": 3504229,
+      "job_status": "done",
+      "job_elapsed_ms": 542989,
+      "per_page_ready_ms": {
+        "0": 3141768,
+        "1": 3286264,
+        "2": 3503106
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_w2_burst20_p3_empty_13_11aaf4",
+        "subject": "math",
+        "page_image_urls_count": 3,
+        "vision_raw_len": 4973,
+        "questions_count": 37,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "7",
+          "8",
+          "5",
+          "6",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "7@p2",
+          "8@p2",
+          "1@p3",
+          "2@p3",
+          "3@p3",
+          "4@p3",
+          "5@p3",
+          "6@p3",
+          "7@p3",
+          "8@p3",
+          "15(1)",
+          "15(2)",
+          "N/A@p2",
+          "N/A@p3"
+        ],
+        "meta": {
+          "pages_total": 3,
+          "pages_done": 3,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_w2_burst20_p3_empty_13_11aaf4"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_021767466986922efbbaf1e4382fe9087cb4ac5bb5b3b6419c89a",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T03:05:56.698043",
+          "grade_status": "done",
+          "grade_summary": "共 3 页：错题 6 道（未作答 5 题）",
+          "warnings": [
+            "preprocess_disabled",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 1198,
+            "tool_ocr_fallback_ms": 1198,
+            "compress_total_ms": 3220,
+            "compress_download_ms": 1261,
+            "compress_decode_ms": 27,
+            "compress_resize_ms": 54,
+            "compress_encode_ms": 2,
+            "compress_upload_ms": 1874,
+            "llm_aggregate_call_ms": 158087,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 162509
+          },
+          "vision_raw_len": 4973,
+          "questions_count": 37,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "5",
+              "resolved_as": "5@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "6",
+              "resolved_as": "6@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p3",
+              "page_index": 2
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p3",
+              "page_index": 2
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    },
+    {
+      "run_index": 14,
+      "upload_id": "",
+      "session_id": "a4_a4_w2_burst20_p3_empty_14_0ac5f6",
+      "job_id": "",
+      "pages": 3,
+      "upload_ms": 0,
+      "grade_submit_ms": 0,
+      "queue_wait_ms": 0,
+      "ttv_first_page_ms": null,
+      "ttd_done_ms": null,
+      "job_status": "failed",
+      "job_elapsed_ms": null,
+      "per_page_ready_ms": {},
+      "qbank_meta": null,
+      "error": "job timed out after 3600s: job_f10a86ac86394c15"
+    },
+    {
+      "run_index": 15,
+      "upload_id": "",
+      "session_id": "a4_a4_w2_burst20_p3_empty_15_4bf4bf",
+      "job_id": "",
+      "pages": 3,
+      "upload_ms": 0,
+      "grade_submit_ms": 0,
+      "queue_wait_ms": 0,
+      "ttv_first_page_ms": null,
+      "ttd_done_ms": null,
+      "job_status": "failed",
+      "job_elapsed_ms": null,
+      "per_page_ready_ms": {},
+      "qbank_meta": null,
+      "error": "job timed out after 3600s: job_1239474857324b80"
+    },
+    {
+      "run_index": 16,
+      "upload_id": "",
+      "session_id": "a4_a4_w2_burst20_p3_empty_16_0c1795",
+      "job_id": "",
+      "pages": 3,
+      "upload_ms": 0,
+      "grade_submit_ms": 0,
+      "queue_wait_ms": 0,
+      "ttv_first_page_ms": null,
+      "ttd_done_ms": null,
+      "job_status": "failed",
+      "job_elapsed_ms": null,
+      "per_page_ready_ms": {},
+      "qbank_meta": null,
+      "error": "job timed out after 3600s: job_370ac3cf8aa34982"
+    },
+    {
+      "run_index": 17,
+      "upload_id": "",
+      "session_id": "a4_a4_w2_burst20_p3_empty_17_a00750",
+      "job_id": "",
+      "pages": 3,
+      "upload_ms": 0,
+      "grade_submit_ms": 0,
+      "queue_wait_ms": 0,
+      "ttv_first_page_ms": null,
+      "ttd_done_ms": null,
+      "job_status": "failed",
+      "job_elapsed_ms": null,
+      "per_page_ready_ms": {},
+      "qbank_meta": null,
+      "error": "job timed out after 3600s: job_a4b2a137ea6d4b3a"
+    },
+    {
+      "run_index": 18,
+      "upload_id": "",
+      "session_id": "a4_a4_w2_burst20_p3_empty_18_787afa",
+      "job_id": "",
+      "pages": 3,
+      "upload_ms": 0,
+      "grade_submit_ms": 0,
+      "queue_wait_ms": 0,
+      "ttv_first_page_ms": null,
+      "ttd_done_ms": null,
+      "job_status": "failed",
+      "job_elapsed_ms": null,
+      "per_page_ready_ms": {},
+      "qbank_meta": null,
+      "error": "job timed out after 3600s: job_56598a8647cc4e1d"
+    },
+    {
+      "run_index": 19,
+      "upload_id": "",
+      "session_id": "a4_a4_w2_burst20_p3_empty_19_09c134",
+      "job_id": "",
+      "pages": 3,
+      "upload_ms": 0,
+      "grade_submit_ms": 0,
+      "queue_wait_ms": 0,
+      "ttv_first_page_ms": null,
+      "ttd_done_ms": null,
+      "job_status": "failed",
+      "job_elapsed_ms": null,
+      "per_page_ready_ms": {},
+      "qbank_meta": null,
+      "error": "job timed out after 3600s: job_5f9e5f4c12234ca3"
+    }
+  ],
+  "summary": {
+    "n_total": 20,
+    "n_ok": 14,
+    "n_failed": 6,
+    "failed_job_ids": [
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ],
+    "queue_wait_ms": {
+      "p50": 1454298,
+      "p95": 2961240,
+      "max": 3032468
+    },
+    "ttv_first_page_ms": {
+      "p50": 1652778,
+      "p95": 3141768,
+      "max": 3168884
+    },
+    "ttd_done_ms": {
+      "p50": 2031612,
+      "p95": 3495434,
+      "max": 3504229
+    },
+    "worker_elapsed_ms": {
+      "p50": 521314,
+      "p95": 585473,
+      "max": 680743
+    }
+  }
+}

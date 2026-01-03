@@ -1,7 +1,11 @@
 {
+  "eval_id": "eval_offline_1767462492",
+  "generated_at": 1767462492,
+  "git_commit": "514c8eeb60dfdc69d8eb0dd12b089a8134cc4476",
+  "git_branch": "dev/开发分支",
   "metrics_mode": "offline",
-  "total_samples": 5,
-  "success_count": 5,
+  "total_samples": 15,
+  "success_count": 15,
   "error_count": 0,
   "success_rate": 1.0,
   "latency": {
@@ -29,18 +33,30 @@
   },
   "dataset": {
     "subjects": {
-      "math": 4,
-      "english": 1
+      "math": 12,
+      "english": 3
     },
     "tags": {
-      "offline": 5,
+      "offline": 15,
       "arithmetic": 1,
-      "geometry": 1,
-      "diagram": 1,
-      "ocr": 1,
-      "english": 1,
-      "multi_question": 1
+      "geometry": 3,
+      "diagram": 3,
+      "ocr": 3,
+      "english": 3,
+      "multi_question": 1,
+      "math": 8,
+      "blank": 1,
+      "answer_state": 1,
+      "multipage": 1,
+      "progressive_disclosure": 1,
+      "association_risk": 1,
+      "low_contrast": 1,
+      "mixed_language": 1,
+      "paragraph": 1,
+      "fill_blank": 1,
+      "exponent": 1,
+      "layout": 1,
+      "segmentation": 1
     }
   }
 }
-

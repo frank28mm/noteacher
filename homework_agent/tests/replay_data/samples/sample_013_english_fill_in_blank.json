@@ -1,0 +1,20 @@
+{
+  "sample_id": "sample_013_english_fill_in_blank",
+  "description": "Offline replay sample for English fill-in-the-blank question.",
+  "subject": "english",
+  "input": {
+    "or_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6nP0UAAAAASUVORK5CYII=",
+    "mode": "embedded_base64"
+  },
+  "expected_output": {
+    "must_have_fields": ["results", "summary", "warnings"],
+    "notes": "When live, expect answer normalization and concise rationale."
+  },
+  "metadata": {
+    "difficulty": "easy",
+    "category": "english",
+    "allow_uncertain": true
+  },
+  "tags": ["offline", "english", "fill_blank"]
+}
+

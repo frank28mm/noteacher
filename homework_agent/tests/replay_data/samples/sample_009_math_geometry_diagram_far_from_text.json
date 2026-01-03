@@ -1,0 +1,20 @@
+{
+  "sample_id": "sample_009_math_geometry_diagram_far_from_text",
+  "description": "Offline replay sample for geometry where diagram is far from the question text (page-level association risk).",
+  "subject": "math",
+  "input": {
+    "or_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6nP0UAAAAASUVORK5CYII=",
+    "mode": "embedded_base64"
+  },
+  "expected_output": {
+    "must_have_fields": ["results", "summary", "warnings"],
+    "notes": "When live, expect higher visual_risk and needs_review rate vs near-text diagram."
+  },
+  "metadata": {
+    "difficulty": "hard",
+    "category": "geometry",
+    "allow_uncertain": true
+  },
+  "tags": ["offline", "math", "geometry", "diagram", "association_risk"]
+}
+

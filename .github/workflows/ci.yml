@@ -22,8 +22,8 @@ jobs:
         run: python3 -m compileall -q homework_agent
       - name: Test
         run: pytest -q
-      - name: Observability (Best-Effort)
-        run: python3 scripts/check_observability.py
+      - name: Observability (Strict)
+        run: python3 scripts/check_observability.py --strict
       - name: Security Scan (Minimal)
         run: |
           python3 -m bandit -r homework_agent -c bandit.yaml -x homework_agent/demo_ui.py -q

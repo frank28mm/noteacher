@@ -1,0 +1,185 @@
+{
+  "generated_at": "a4_smoke_w2_p2_burst1_empty",
+  "api_base": "http://localhost:8000/api/v1",
+  "user_id": "demo_perf_20260101_qindex_only_01",
+  "worker_count": 2,
+  "burst_submissions": 1,
+  "pages_per_submission": 2,
+  "subject": "math",
+  "vision_provider": "doubao",
+  "llm_provider": "ark",
+  "upload_concurrency": 1,
+  "grade_concurrency": 1,
+  "poll_interval_seconds": 2.0,
+  "timeout_seconds": 1800,
+  "runs": [
+    {
+      "run_index": 0,
+      "upload_id": "upl_b6822a1cc9804765",
+      "session_id": "a4_a4_smoke_w2_p2_burst1_empty_0_e8c35a",
+      "job_id": "job_638612c1abd74ebe",
+      "pages": 2,
+      "upload_ms": 8804,
+      "grade_submit_ms": 1852,
+      "queue_wait_ms": 0,
+      "ttv_first_page_ms": 156337,
+      "ttd_done_ms": 395801,
+      "job_status": "done",
+      "job_elapsed_ms": 395801,
+      "per_page_ready_ms": {
+        "0": 156337,
+        "1": 396845
+      },
+      "qbank_meta": {
+        "session_id": "a4_a4_smoke_w2_p2_burst1_empty_0_e8c35a",
+        "subject": "math",
+        "page_image_urls_count": 2,
+        "vision_raw_len": 3254,
+        "questions_count": 28,
+        "questions_with_options": 0,
+        "question_numbers": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "N/A",
+          "1@p2",
+          "2@p2",
+          "3@p2",
+          "4@p2",
+          "5(1)",
+          "5(2)",
+          "6(1)",
+          "6(2)",
+          "7@p2",
+          "8@p2",
+          "15(1)",
+          "15(2)",
+          "N/A@p2"
+        ],
+        "meta": {
+          "pages_total": 2,
+          "pages_done": 2,
+          "vision_provider_requested": "doubao",
+          "vision_used_base64_fallback": false,
+          "vision_used_proxy_url": false,
+          "llm_provider_requested": "ark",
+          "llm_used_fallback": false,
+          "experiments": {
+            "grade.autonomous_loop": {
+              "enabled": false,
+              "variant": "",
+              "reason": "missing",
+              "key": "a4_a4_smoke_w2_p2_burst1_empty_0_e8c35a"
+            }
+          },
+          "grade_image_input_variant": "url",
+          "ark_response_id": "resp_021767463272931e90bb41e29889bfd3490746bb2652e40873185",
+          "ark_image_process_requested": false,
+          "ark_image_process_enabled": false,
+          "updated_at": "2026-01-04T02:03:36.276545",
+          "grade_status": "done",
+          "grade_summary": "共 2 页：错题 6 道（未作答 5 题）",
+          "warnings": [
+            "preprocess_disabled",
+            "题1答案错误，正确应为D（∠BAC=∠ACD内错角相等判定AB∥CD）",
+            "作业中有和图像有关的题目，建议生成切片以提升定位与辅导准确性。"
+          ],
+          "timings_ms": {
+            "preprocess_total_ms": 0,
+            "tools_total_ms": 28588,
+            "tool_ocr_fallback_ms": 28588,
+            "compress_total_ms": 2916,
+            "compress_download_ms": 856,
+            "compress_decode_ms": 28,
+            "compress_resize_ms": 53,
+            "compress_encode_ms": 1,
+            "compress_upload_ms": 1975,
+            "llm_aggregate_call_ms": 131672,
+            "llm_aggregate_parse_ms": 0,
+            "grade_total_duration_ms": 163181
+          },
+          "vision_raw_len": 3254,
+          "questions_count": 28,
+          "questions_with_options": 0,
+          "question_number_collisions": [
+            {
+              "question_number": "N/A",
+              "resolved_as": "N/A@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "1",
+              "resolved_as": "1@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "2",
+              "resolved_as": "2@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "3",
+              "resolved_as": "3@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "4",
+              "resolved_as": "4@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "7",
+              "resolved_as": "7@p2",
+              "page_index": 1
+            },
+            {
+              "question_number": "8",
+              "resolved_as": "8@p2",
+              "page_index": 1
+            }
+          ]
+        },
+        "qindex_available": false,
+        "qindex_warnings": []
+      },
+      "error": null
+    }
+  ],
+  "summary": {
+    "n_total": 1,
+    "n_ok": 1,
+    "n_failed": 0,
+    "failed_job_ids": [],
+    "queue_wait_ms": {
+      "p50": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "ttv_first_page_ms": {
+      "p50": 156337,
+      "p95": 156337,
+      "max": 156337
+    },
+    "ttd_done_ms": {
+      "p50": 395801,
+      "p95": 395801,
+      "max": 395801
+    },
+    "worker_elapsed_ms": {
+      "p50": 395801,
+      "p95": 395801,
+      "max": 395801
+    }
+  }
+}

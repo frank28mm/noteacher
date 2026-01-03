@@ -1,0 +1,20 @@
+{
+  "sample_id": "sample_006_math_blank_unattempted",
+  "description": "Offline replay sample for the 'blank/unattempted answer' branch (UI should not treat as incorrect).",
+  "subject": "math",
+  "input": {
+    "or_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6nP0UAAAAASUVORK5CYII=",
+    "mode": "embedded_base64"
+  },
+  "expected_output": {
+    "must_have_fields": ["results", "summary", "warnings"],
+    "notes": "Expect answer_state='blank' for at least one card when running live."
+  },
+  "metadata": {
+    "difficulty": "easy",
+    "category": "blank",
+    "allow_uncertain": true
+  },
+  "tags": ["offline", "math", "blank", "answer_state"]
+}
+
