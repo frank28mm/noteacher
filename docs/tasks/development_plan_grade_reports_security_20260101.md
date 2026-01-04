@@ -301,6 +301,15 @@
 
 > 目的：扩容不是“越多越好”，而是“可控地把排队压低”。这些参数必须提前定默认值与调整策略，避免线上临时拍脑袋。
 
+- **容量规划口径（已确认，作为预设假设）**
+  - 峰值窗口：学期内 18:00–22:00（其余时间平峰≈0）
+  - 地域：华东
+  - 体验 SLO：`p95(queue_wait_ms) ≤ 30s`（“尽量不排队”）
+  - 峰值集中度：18–22 时段内“峰值一分钟”≈均值的 `6×`
+  - DAU 假设（付费+刚需，保守高预估）：`100→50% / 1000→40% / 10000→30%`
+  - 估算基线（来自 A‑4、3页/份）：`grade_worker job_elapsed_ms` p50≈521s，p95≈681s
+  - 并发粗算（只针对 `grade_worker`，pod 并发=1）：`pods_needed ≈ λ_peak(份/分钟) × 11.35(分钟)`（用 p95 服务时间估算，满足严格 queue_wait SLO）
+
 - **API（HPA）**
   - `api.minReplicas / api.maxReplicas`
   - `api.targetCPUUtilizationPercentage`（或并发指标）
