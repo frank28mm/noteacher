@@ -771,6 +771,10 @@ def upload_endpoint(file):
 - Secret/ConfigMap 规范：ARK keys、SUPABASE service role key 仅在运行环境；CI 继续做防泄露门禁
 - 生产化最小代码补齐（不改业务逻辑）：API `/healthz`+`/readyz`、worker SIGTERM 优雅退出、启动时必需 env 自检（见 WS‑D D‑1/D‑5）
 
+**已确认的关键决策（作为 WL‑P2‑001 的前置约束）**：
+- 承载：**ECS 常驻 + VCI 承接 burst**（稳态成本可控，峰值快速扩）
+- `grade_worker`：`max_inflight_per_pod=1`（先稳，靠扩 Pod 数承接峰值）
+
 **验收标准**：
 - `grade_worker` 可从 0 自动扩到 N（队列积压触发），队列清空后缩回
 - 滚动升级不中断/可恢复（worker SIGTERM 优雅退出，避免丢任务）

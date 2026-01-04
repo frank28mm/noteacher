@@ -240,6 +240,10 @@
 > 背景：你已确认优先使用火山生态（Doubao/Ark），因此部署优先选 **火山 VKE（托管 K8s）**。  
 > 目标：把系统拆成 `api + 4 workers`，并做到“按需独立扩容 + 不丢任务 + 可观测 + 可控成本/限流”，为全国推广做准备。  
 > 方案选择（结论）：采用 **方案一（VKE/K8s + HPA + KEDA）**；不采用“单实例内自扩容”的幻想（单机只能手动/固定进程数，无法按队列自动伸缩），也不优先采用“方案二（Serverless App Engine）”来承载复杂 worker 编排。
+>
+> ✅ 运营侧参数决策（已确认）：
+> - **承载方式**：选择 **方案 B：ECS 常驻 + VCI 承接 burst**（常驻稳态 + 峰值按需弹性）。
+> - **grade_worker 单 Pod 并发**：`1`（优先稳态/低失败率，再用“扩 Pod 数”承接峰值）。
 
 #### D‑0 架构拆分（部署视角）
 
@@ -273,7 +277,7 @@
 - `grade_worker`：KEDA（队列深度驱动）
   - 触发源：Redis List `grade:queue`（注意包含 `CACHE_PREFIX` 时需用实际 key）
   - 建议：
-    - `minReplicaCount=0`（无任务可缩到 0）
+    - `minReplicaCount=0..2`（若采用“ECS 常驻”，可设为 1–2 以降低冷启动；若完全依赖 VCI 承接峰值可为 0）
     - `maxReplicaCount=50`（先设保守上限，防止一键打爆上游）
     - `listLength=10`（示例：队列每积压 10 个 job，扩 1 个 Pod；后续用 A‑4.2 数据校准）
     - `cooldownPeriod=300`（避免抖动）
