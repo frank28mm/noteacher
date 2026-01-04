@@ -755,6 +755,27 @@ def upload_endpoint(file):
 
 ---
 
+### P2（上线前必须做｜不阻塞当前迭代）：部署与扩缩容（VKE/K8s）
+
+#### WL‑P2‑001：VKE/K8s 生产化部署（5 组件拆分 + 按需扩缩容方案落地）
+
+**为什么**：A‑4 已证明峰值下瓶颈主要来自 `grade_worker` 并发不足导致排队；上线前必须把系统拆成 `api + workers` 并支持“按需扩容 + 不中断升级 + 不丢任务”。
+
+**唯一执行计划入口**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑D）。
+
+**交付物**（建议落到 infra 仓库或 `deploy/` 目录）：
+- 5 个 Deployment：`api / grade_worker / review_cards_worker / facts_worker / report_worker`
+- HPA：`api`（CPU/内存/并发）
+- KEDA：`grade_worker`（Redis 队列深度驱动扩缩容）
+- 节点扩容：NodePool autoscaler 或 VCI/Serverless 节点（用于突发峰值）
+- Secret/ConfigMap 规范：ARK keys、SUPABASE service role key 仅在运行环境；CI 继续做防泄露门禁
+- 生产化最小代码补齐（不改业务逻辑）：API `/healthz`+`/readyz`、worker SIGTERM 优雅退出、启动时必需 env 自检（见 WS‑D D‑1/D‑5）
+
+**验收标准**：
+- `grade_worker` 可从 0 自动扩到 N（队列积压触发），队列清空后缩回
+- 滚动升级不中断/可恢复（worker SIGTERM 优雅退出，避免丢任务）
+- 429/限流/排队/失败可观测（能定位“模型侧 vs 存储侧 vs 本地”）
+
 ### P2（1–2 月）：规模化工程（灰度/告警/平台监控/Reviewer 工具）
 
 只在确有上线与规模需求时再推进：

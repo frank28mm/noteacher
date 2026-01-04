@@ -77,6 +77,7 @@
 - ✅ WS‑C 已完成（运行态确认）：
   - C‑1 report_worker 稳定化：`queued→running→done/failed` 可观测，锁字段写入与 report_id 落库生效。
 - 🧭 新增 P0（本次新增）：A‑8 历史错题复习（Chat Rehydrate，见下）
+- ⏳ WS‑D（P2：上线前必须做）：VKE/K8s 部署与按需扩缩容（方案已定，尚未落地 IaC/YAML）
 
 ### 1.4 外部“体检报告”口径校对（以代码为准）
 
@@ -231,6 +232,112 @@
   - 关键约定（必须对齐前端）：**即使 `job.status=done`，`job.question_cards[]` 仍可能在短时间内继续被复核 worker 更新**
     - 前端轮询策略：不能在 `done` 立即停止 polling；应在“无 `review_pending` 卡片”或“达到 timeout”后停止
   - 后端实现：`homework_agent/services/review_cards_queue.py`（入队+防重锁）+ `homework_agent/workers/review_cards_worker.py`（消费队列并 patch job 卡片）
+
+---
+
+### WS‑D（P2：上线前必须做，但不阻塞当前迭代）：VKE/K8s 部署与按需扩缩容（生产化）
+
+> 背景：你已确认优先使用火山生态（Doubao/Ark），因此部署优先选 **火山 VKE（托管 K8s）**。  
+> 目标：把系统拆成 `api + 4 workers`，并做到“按需独立扩容 + 不丢任务 + 可观测 + 可控成本/限流”，为全国推广做准备。  
+> 方案选择（结论）：采用 **方案一（VKE/K8s + HPA + KEDA）**；不采用“单实例内自扩容”的幻想（单机只能手动/固定进程数，无法按队列自动伸缩），也不优先采用“方案二（Serverless App Engine）”来承载复杂 worker 编排。
+
+#### D‑0 架构拆分（部署视角）
+
+- 5 个 Deployment（或同等工作负载）：
+  - `api`：FastAPI/uvicorn（无状态，横向扩容）
+  - `grade_worker`：消费 `grade:queue`（最吃资源/最需要弹性扩容）
+  - `review_cards_worker`：消费 `review_cards:queue`（小流量，少量常驻即可）
+  - `facts_worker`：消费 `facts:queue`（中等流量，少量常驻即可）
+  - `report_worker`：查询/锁定 `report_jobs`（小流量，少量常驻即可）
+- Redis/DB/对象存储采用托管服务（集群外部依赖），Pod 只做计算与编排。
+
+#### D‑1 健康检查与可恢复性（不丢任务的底线）
+
+- API healthz（Liveness/Readiness）：
+  - `/healthz`（liveness）：进程活着即可
+  - `/readyz`（readiness）：关键依赖可用（至少 Redis 可用；可选：Supabase 连接可用）
+- Worker readiness（建议提供最小“自检”能力）：
+  - 检查必需 env（`REDIS_URL`、`ARK_API_KEY`、`SUPABASE_*` 等）
+  - Redis ping（必须）
+  - 可选：Supabase PostgREST 探活（避免启动后立即因权限/网络失败而反复 crash）
+- Worker 优雅退出：
+  - 收到 SIGTERM：停止拉新任务，处理完当前任务后退出（避免滚动升级丢任务/重复消费）
+
+#### D‑2 扩缩容策略（先定方案，后续落地为 IaC/YAML）
+
+> 原则：只对“最影响排队”的 `grade_worker` 做强弹性；其他 worker 小副本常驻即可。  
+> 扩容目标：优先降低 `queue_wait_ms`，满足“先可用（第一页 2–3 分钟内可问）”。
+
+- `api`：K8s HPA（CPU/内存/并发指标）
+  - 建议：`minReplicas=2`，`maxReplicas=20`，CPU target 60%
+- `grade_worker`：KEDA（队列深度驱动）
+  - 触发源：Redis List `grade:queue`（注意包含 `CACHE_PREFIX` 时需用实际 key）
+  - 建议：
+    - `minReplicaCount=0`（无任务可缩到 0）
+    - `maxReplicaCount=50`（先设保守上限，防止一键打爆上游）
+    - `listLength=10`（示例：队列每积压 10 个 job，扩 1 个 Pod；后续用 A‑4.2 数据校准）
+    - `cooldownPeriod=300`（避免抖动）
+- `review_cards_worker / facts_worker / report_worker`：
+  - 建议：常驻 `replicas=1..2`；必要时也可用 KEDA，但上限应很小（例如 max=2..5）
+
+#### D‑3 上游限流/成本护栏（“能扩”不等于“该扩”）
+
+> 你已查到 Ark 模型配额：RPM=30000、TPM=5000000。模型侧通常不是首个瓶颈，但仍必须做护栏，防止扩容把失败率推高。
+
+- `grade_worker` 并发护栏（两层）：
+  1) **编排层**：KEDA 的 `maxReplicaCount`（第一层硬上限）
+  2) **应用层**：预留开关/参数（未来落地）：
+     - `GRADE_WORKER_MAX_INFLIGHT_PER_POD`（每 Pod 并发，默认 1）
+     - `ARK_MAX_CONCURRENT_REQUESTS` / `ARK_RPM_SOFT_LIMIT` / `ARK_TPM_SOFT_LIMIT`（软限流，超过则降级/排队/needs_review）
+- 对象存储（未来迁移到 Ark/TOS）护栏：
+  - 参考（TOS 约束限制）：`https://www.volcengine.com/docs/6349/74823`
+  - 关键：监控 429/流控 header（如 `x-tos-qos-delay-time`）并做重试/退避
+
+#### D‑3.1 扩容“开关/参数”（上线前必须冻结口径）
+
+> 目的：扩容不是“越多越好”，而是“可控地把排队压低”。这些参数必须提前定默认值与调整策略，避免线上临时拍脑袋。
+
+- **API（HPA）**
+  - `api.minReplicas / api.maxReplicas`
+  - `api.targetCPUUtilizationPercentage`（或并发指标）
+- **grade_worker（KEDA）**
+  - `grade_worker.minReplicaCount / maxReplicaCount`
+  - `pollingInterval / cooldownPeriod`
+  - `listLength`（队列阈值：每积压多少 job 触发扩容 1 个 Pod）
+  - （可选）`activationListLength`（低水位不扩容，避免抖动）
+- **节点层（NodePool Autoscaler / VCI）**
+  - `nodepool.min/max`（或 VCI 最大并发上限）
+  - 优先把 `grade_worker` 放到“可快速扩容”的节点池（或 Serverless 节点池）
+- **应用层并发护栏（与 D‑3 对齐，未来落地到代码/配置）**
+  - `GRADE_WORKER_MAX_INFLIGHT_PER_POD`（默认 1）
+  - `ARK_MAX_CONCURRENT_REQUESTS`（默认 1～2，结合 A‑4.2 校准）
+  - “到达率高 + 上游波动”时的降级开关：复核卡比例下调 / `needs_review` 兜底 / 超时不视为失败
+
+#### D‑4 运营视角的“最低可上线”验收
+
+- 部署验收：
+  - `api` 至少 2 副本，滚动升级不中断（或中断 ≤ 30s 可接受）
+  - `grade_worker` 可从 0 自动扩到 N，并在队列清空后缩回
+  - 任一 worker 崩溃可自动拉起，不丢任务（允许幂等重复消费，但最终结果一致）
+- 可观测性验收：
+  - 能按 `job_id/request_id/session_id` 串联一次批改（排队/执行/复核/写库）
+  - 能区分：模型 429 vs 存储 429 vs 本地超时 vs 网络波动
+
+#### D‑5 代码是否需要修改？（结论：K8s/KEDA 不强依赖，但生产化需要“最小必需”改动）
+
+> 结论口径（给团队统一）：**采用方案一不需要为了“能跑”去改业务逻辑**；但为了“可运维/可扩容/可滚动升级”，需要补齐少量生产化接口与信号处理。
+
+- 不需要改代码也能跑的部分：
+  - K8s Deployment/HPA/KEDA 本身不要求改 `/uploads`/`/grade`/`/jobs` 的业务逻辑
+  - worker 拆分为 4 个部署也不要求改任务模型（只要环境变量/入口正确）
+- 建议补齐的“最小必需”（上线前要做，避免运维踩坑）：
+  - API：
+    - `/healthz`（liveness）与 `/readyz`（readiness，至少 Redis 可用）
+  - Workers：
+    - SIGTERM 优雅退出（停止拉新任务，处理完当前任务再退出）
+    - 启动时 fail-fast：缺关键 env（如 `REDIS_URL`、`ARK_API_KEY`、`SUPABASE_SERVICE_ROLE_KEY`）直接退出并告警
+  - 观测：
+    - 统一输出 `request_id/job_id/session_id`，便于排队/执行/复核/写库全链路定位
 
 - 复核数据来源与调用约束
   - 优先复用：qindex 产出的 bbox/slice；若无切片则临时降级为整页复核（更慢更贵，只用于少量题）
