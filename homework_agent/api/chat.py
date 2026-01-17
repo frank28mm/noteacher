@@ -40,6 +40,7 @@ from homework_agent.services.qindex_queue import enqueue_qindex_job  # noqa: F40
 from homework_agent.utils.observability import get_request_id_from_headers, log_event
 from homework_agent.utils.user_context import require_user_id
 from homework_agent.utils.errors import build_error_payload, ErrorCode
+from homework_agent.services.quota_service import load_wallet
 from homework_agent.utils.submission_store import (
     touch_submission,
     link_session_to_submission,
@@ -1004,8 +1005,9 @@ async def _relook_focus_question_via_vision(
 def _format_math_for_display(text: str) -> str:
     """
     Make math in assistant messages more readable in demo UI:
-    - Strip LaTeX delimiters like \\( \\) \\[ \\]
-    - Replace a few common TeX commands with Unicode (× ÷ ± ∠ ·)
+    - Normalize LaTeX delimiters to $ and $$ for KaTeX rendering
+    - Auto-wrap bare LaTeX expressions (e.g., a^{12} -> $a^{12}$)
+    - Strip markdown artifacts
     This is best-effort and should never raise.
     """
     if not text:
@@ -1022,16 +1024,58 @@ def _format_math_for_display(text: str) -> str:
         # Strip unicode combining long stroke (strikethrough-like) if present.
         s = re.sub(r"[\u0336\u0335\u0334\u0333]", "", s)
 
-        # Best-effort normalization:
-        # - keep TeX in-place (Gradio Chatbot handles LaTeX rendering via latex_delimiters)
-        # - normalize \(...\), \[...\] to $...$, $$...$$
-        # - strip boldsymbol wrappers for readability
+        # Normalize LaTeX delimiters for KaTeX:
+        # IMPORTANT: Only replace actual delimiters, not LaTeX commands like \left[ \right
+        # Replace \\[ ... \\] first (double backslash = display math delimiter)
         s = s.replace("\\[", "$$").replace("\\]", "$$")
+        # Then replace \( ... \) (single backslash = inline math delimiter)
         s = s.replace("\\(", "$").replace("\\)", "$")
-        s = re.sub(r"\\boldsymbol\{([^{}]+)\}", r"\1", s)
 
-        # Removed aggressive "smart" fixes (double-escaped LaTeX, programming powers)
-        # because they were causing issues with valid text and creating display artifacts.
+        # Auto-wrap bare LaTeX math expressions that aren't already wrapped
+        # This catches patterns like a^{12}, \frac{1}{2}, \sqrt{x}, etc.
+        # Pattern: backslash followed by LaTeX command OR {}/[]/^_
+        # But only if not already between $ signs
+        def wrap_bare_latex(match):
+            content = match.group(0)
+            # Don't wrap if already has $ delimiters nearby
+            if "$" in content:
+                return content
+            # Wrap in $ delimiters
+            return f"${content}$"
+
+        # Pattern 1: Things like \frac{...}{...}, \sqrt[...]{...}, \sum, \int, etc.
+        # Pattern 2: Things followed by ^{...} or _{...}
+        # Pattern 3: Things like a^{b}, x_{n}, etc.
+        latex_patterns = [
+            r'\\[a-zA-Z]+\{[^}]*\}(?:\{[^}]*\})?',  # \frac{a}{b}, \sqrt{a}
+            r'\\[a-zA-Z]+',  # \alpha, \beta, \sum, \int (without args)
+            r'[a-zA-Z0-9]+\^\{[^}]+\}',  # a^{12}, x^2
+            r'[a-zA-Z0-9]+_\{[^}]+\}',  # x_{n}, a_{i}
+            r'\\\{[^}]+\\\}',  # \{ ... \} for grouping
+            r'\\[a-zA-Z]+\[[^\]]*\](?:\{[^}]*\})?',  # \sqrt[n]{x}
+        ]
+
+        # Apply patterns, but be careful not to wrap things that are already wrapped
+        # First, mark existing $...$ sections to avoid double-wrapping
+        placeholder_marker = "__MATH_BLOCK__"
+        math_blocks = []
+        def preserve_math(match):
+            math_blocks.append(match.group(0))
+            return f"{placeholder_marker}{len(math_blocks)-1}__"
+
+        # Temporarily replace existing math blocks
+        s = re.sub(r'\$\$[^$]+\$\$|\$[^$]+\$', preserve_math, s)
+
+        # Now apply auto-wrapping to remaining text
+        for pattern in latex_patterns:
+            s = re.sub(pattern, wrap_bare_latex, s)
+
+        # Restore preserved math blocks
+        for i, block in enumerate(math_blocks):
+            s = s.replace(f"{placeholder_marker}{i}__", block)
+
+        # Clean up boldsymbol wrappers
+        s = re.sub(r"\\boldsymbol\{([^{}]+)\}", r"\1", s)
 
         # Re-apply tilde ban in case the model emitted it inside math blocks.
         s = s.replace("~", "").replace("～", "")
@@ -1175,7 +1219,18 @@ def _init_chat_request(
 
 def _format_session_history_for_display(session_data: Dict[str, Any]) -> None:
     """Best-effort: normalize past assistant messages for UI display."""
-    hist = session_data.get("history") or []
+    # Get question-specific history if focus_question_number is set
+    focus_q = session_data.get("focus_question_number")
+    if focus_q:
+        from homework_agent.api.session import get_question_history
+        q_hist = get_question_history(session_data, focus_q)
+        if q_hist:
+            hist = q_hist
+        else:
+            hist = session_data.get("history") or []
+    else:
+        hist = session_data.get("history") or []
+
     if isinstance(hist, list):
         for m in hist:
             if (
@@ -1450,6 +1505,7 @@ def _ensure_chat_session_or_abort(
 
 def _emit_initial_events(
     *,
+    req: "ChatRequest",
     session_id: str,
     session_data: Dict[str, Any],
     last_event_id: Optional[str],
@@ -1476,20 +1532,47 @@ def _emit_initial_events(
             ),
         )
     ]
-    if (
-        last_event_id
-        and (not has_explicit_session_id)
-        and (session_data.get("history") or [])
-    ):
-        replay_msgs = assistant_tail(session_data.get("history") or [], max_messages=3)
-        for msg in replay_msgs:
-            payload = ChatResponse(
-                messages=[msg],
-                session_id=session_id,
-                retry_after_ms=None,
-                cross_subject_flag=None,
-            )
-            chunks.append(_sse_event("chat", payload.model_dump_json()))
+
+    # Try to extract focus question number from context_item_ids BEFORE _prepare_chat_context_or_abort updates it
+    # This ensures we get the correct question history when switching questions
+    focus_q = None
+    if req.context_item_ids:
+        from homework_agent.api._chat_stages import _try_extract_qn_from_context_id, _normalize_context_ids
+        context_ids = _normalize_context_ids(req.context_item_ids or [])
+        for cid in context_ids:
+            if isinstance(cid, str):
+                qn = _try_extract_qn_from_context_id(cid)
+                if qn:
+                    focus_q = qn
+                    break
+
+    # Fall back to session_data focus_question_number if not found in context_item_ids
+    if not focus_q:
+        focus_q = session_data.get("focus_question_number")
+
+    logger.debug(f"[DEBUG _emit_initial_events] session_id={session_id}, focus_q={focus_q}, question_histories keys={list((session_data.get('question_histories') or {}).keys())}")
+
+    question_history = None
+    if focus_q:
+        from homework_agent.api.session import get_question_history
+        question_history = get_question_history(session_data, focus_q)
+        logger.debug(f"[DEBUG _emit_initial_events] question_history for focus_q={focus_q}: {len(question_history) if question_history else 0} messages")
+
+    # Use question-specific history if available, otherwise fall back to global history
+    history_to_send = question_history if question_history else (session_data.get("history") or [])
+
+    # Send full history in a single chat event (not one message per event)
+    # This ensures chat history persists when re-entering a question
+    if history_to_send:
+        logger.debug(f"[DEBUG _emit_initial_events] Sending {len(history_to_send)} messages to client")
+        payload = ChatResponse(
+            messages=history_to_send,
+            session_id=session_id,
+            retry_after_ms=None,
+            cross_subject_flag=None,
+        )
+        chunks.append(_sse_event("chat", payload.model_dump_json()))
+
     return chunks
 
 
@@ -1815,6 +1898,7 @@ async def _stream_socratic_llm_to_sse(
     llm_client: LLMClient,
     req: ChatRequest,
     session_id: str,
+    user_id: str,
     session_data: Dict[str, Any],
     wrong_item_context: Dict[str, Any],
     current_turn: int,
@@ -1822,6 +1906,7 @@ async def _stream_socratic_llm_to_sse(
     model_override: Optional[str],
     prompt_variant: Optional[str],
     request_id: str,
+    idempotency_key: Optional[str],
     started_m: float,
 ) -> AsyncIterator[bytes]:
     from homework_agent.api._chat_stages import _stream_socratic_llm_to_sse as _impl
@@ -1830,6 +1915,7 @@ async def _stream_socratic_llm_to_sse(
         llm_client=llm_client,
         req=req,
         session_id=session_id,
+        user_id=user_id,
         session_data=session_data,
         wrong_item_context=wrong_item_context,
         current_turn=current_turn,
@@ -1837,6 +1923,7 @@ async def _stream_socratic_llm_to_sse(
         model_override=model_override,
         prompt_variant=prompt_variant,
         request_id=request_id,
+        idempotency_key=idempotency_key,
         started_m=started_m,
     ):
         yield chunk
@@ -1849,6 +1936,7 @@ async def _run_chat_turn(
     session_id: str,
     request_id: str,
     user_id: str,
+    idempotency_key: Optional[str],
     session_data: Dict[str, Any],
     started_m: float,
 ) -> AsyncIterator[bytes]:
@@ -1980,6 +2068,7 @@ async def _run_chat_turn(
         llm_client=llm_client,
         req=req,
         session_id=session_id,
+        user_id=user_id,
         session_data=session_data,
         wrong_item_context=wrong_item_context,
         current_turn=current_turn,
@@ -1987,6 +2076,7 @@ async def _run_chat_turn(
         model_override=model_override,
         prompt_variant=prompt_variant,
         request_id=request_id,
+        idempotency_key=idempotency_key,
         started_m=started_m,
     ):
         yield chunk
@@ -2015,6 +2105,20 @@ async def chat_stream(
             request_id_override=request_id_override,
         )
     )
+    idempotency_key = str(request.headers.get("X-Idempotency-Key") or "").strip() or None
+
+    # Client may request a history-only replay (no new LLM turn, no quota charge).
+    # Used by frontend to show chat history immediately when entering AITutor page.
+    is_init = str(request.headers.get("X-Chat-Init") or "").strip() == "1"
+
+    settings = get_settings()
+    if (not is_init) and str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
+        wallet = load_wallet(user_id=user_id)
+        if not wallet or wallet.bt_spendable <= 0:
+            _abort_with_error_event(
+                "quota_insufficient",
+                "额度不足：请升级订阅或购买算力后再使用 AI 辅导。",
+            )
 
     submission_id = str(getattr(req, "submission_id", "") or "").strip()
     rehydrated = False
@@ -2075,12 +2179,17 @@ async def chat_stream(
     )
 
     for c in _emit_initial_events(
+        req=req,
         session_id=session_id,
         session_data=session_data,
         last_event_id=last_event_id,
         has_explicit_session_id=bool(req.session_id),
     ):
         yield c
+
+    if is_init:
+        yield _sse_event("done", json.dumps({"status": "ready", "session_id": session_id}))
+        return
 
     try:
         async for chunk in _run_chat_turn(
@@ -2089,6 +2198,7 @@ async def chat_stream(
             session_id=session_id,
             request_id=request_id,
             user_id=user_id,
+            idempotency_key=idempotency_key,
             session_data=session_data,
             started_m=started_m,
         ):

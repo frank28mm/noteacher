@@ -60,7 +60,56 @@ def _derive_question_severity(q: Dict[str, Any]) -> Optional[str]:
             ssev = s.get("severity")
             if isinstance(ssev, str) and ssev.strip():
                 return ssev.strip().lower()
-    return None
+    # Best-effort fallback: infer from grader reason/judgment text when explicit severity is missing.
+    # Keep conservative defaults to avoid over-confident misclassification.
+    answer_state = str(q.get("answer_state") or "").strip().lower()
+    if answer_state == "blank":
+        return "unknown"
+    reason = str(q.get("reason") or "").strip()
+    judgment_basis = str(q.get("judgment_basis") or "").strip()
+    text = f"{reason}\n{judgment_basis}".strip()
+    if not text:
+        return None
+    # Unknown: unreadable / not answered / insufficient evidence
+    if any(k in text for k in ("未作答", "未填写", "空白", "看不清", "识别不清", "无法判定", "证据不足")):
+        return "unknown"
+    # Calculation error hints
+    if any(
+        k in text
+        for k in (
+            "计算",
+            "算错",
+            "运算",
+            "符号",
+            "移项",
+            "约分",
+            "通分",
+            "合并同类项",
+            "展开",
+            "乘除",
+            "加减",
+            "代入",
+        )
+    ):
+        return "calculation"
+    # Format / writing issues
+    if any(
+        k in text
+        for k in (
+            "步骤",
+            "过程",
+            "格式",
+            "书写",
+            "单位",
+            "未按要求",
+            "表达不清",
+            "写法",
+            "漏写",
+        )
+    ):
+        return "format"
+    # Default: concept/application issues
+    return "concept"
 
 
 def _diagnose_step_codes(step: Dict[str, Any]) -> List[str]:

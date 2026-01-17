@@ -61,6 +61,7 @@ from homework_agent.utils.observability import (
     trace_span,
 )
 from homework_agent.utils.user_context import require_user_id
+from homework_agent.utils.profile_context import require_profile_id
 from homework_agent.utils.feature_flags import decide as decide_feature_flag
 from homework_agent.utils.versioning import stable_json_hash, stable_text_hash
 from homework_agent.utils.submission_store import (
@@ -75,6 +76,11 @@ from homework_agent.utils.url_image_helpers import (
     _strip_base64_prefix,
 )
 from homework_agent.services.high_risk import enforce_conservative_grading
+from homework_agent.services.quota_service import (
+    bt_from_usage,
+    charge_bt_spendable,
+    load_wallet,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -766,6 +772,19 @@ async def _perform_autonomous_grading(
                         session_id=ctx.session_id,
                         response_id=rid,
                     )
+                llm_usage = llm_trace.get("llm_usage")
+                if isinstance(llm_usage, dict):
+                    ctx.meta_base["llm_usage"] = {
+                        "prompt_tokens": int(llm_usage.get("prompt_tokens") or 0),
+                        "completion_tokens": int(llm_usage.get("completion_tokens") or 0),
+                        "total_tokens": int(llm_usage.get("total_tokens") or 0),
+                    }
+                llm_model = llm_trace.get("llm_model")
+                if isinstance(llm_model, str) and llm_model.strip():
+                    ctx.meta_base["llm_model"] = llm_model.strip()
+                llm_provider = llm_trace.get("llm_provider")
+                if isinstance(llm_provider, str) and llm_provider.strip():
+                    ctx.meta_base["llm_provider"] = llm_provider.strip()
                 if "ark_image_process_requested" in llm_trace:
                     ctx.meta_base["ark_image_process_requested"] = bool(
                         llm_trace.get("ark_image_process_requested")
@@ -946,7 +965,11 @@ def validate_images(images: List[Any], provider: VisionProvider):
 
 
 def _resolve_images_from_upload_id(
-    upload_id: str, *, user_id: str, prefer_proxy: bool = True
+    upload_id: str,
+    *,
+    user_id: str,
+    profile_id: Optional[str] = None,
+    prefer_proxy: bool = True,
 ) -> List[str]:
     """
     Backward-compatible name: we treat upload_id as submission_id (one upload == one Submission).
@@ -957,6 +980,7 @@ def _resolve_images_from_upload_id(
         for u in (
             resolve_page_image_urls(
                 user_id=user_id,
+                profile_id=profile_id,
                 submission_id=str(upload_id),
                 prefer_proxy=bool(prefer_proxy),
             )
@@ -974,6 +998,7 @@ async def grade_homework(
     background_tasks: BackgroundTasks,
     x_idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key"),
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    x_profile_id: Optional[str] = Header(None, alias="X-Profile-Id"),
     x_force_async: Optional[str] = Header(None, alias="X-Force-Async"),
     x_grade_image_input_variant: Optional[str] = Header(
         None, alias="X-Grade-Image-Input-Variant"
@@ -986,7 +1011,16 @@ async def grade_homework(
     user_id = require_user_id(
         authorization=request.headers.get("Authorization"), x_user_id=x_user_id
     )
+    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
     settings = get_settings()
+    # WS-E: Quota enforcement is enabled when we're not in pure dev auth mode.
+    if str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
+        wallet = load_wallet(user_id=user_id)
+        if not wallet or wallet.bt_spendable <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail="quota_insufficient",
+            )
     upload_id = (getattr(req, "upload_id", None) or "").strip()
 
     variant_raw = (
@@ -1015,7 +1049,7 @@ async def grade_homework(
 
     if upload_id and not (req.images or []):
         urls = _resolve_images_from_upload_id(
-            upload_id, user_id=user_id, prefer_proxy=prefer_proxy
+            upload_id, user_id=user_id, profile_id=profile_id, prefer_proxy=prefer_proxy
         )
         if not urls:
             raise HTTPException(
@@ -1058,7 +1092,7 @@ async def grade_homework(
     # Best-effort: touch Submission last_active_at (180-day inactivity cleanup uses this).
     if upload_id:
         try:
-            touch_submission(user_id=user_id, submission_id=upload_id)
+            touch_submission(user_id=user_id, profile_id=profile_id, submission_id=upload_id)
         except Exception as e:
             logger.debug(f"touch_submission failed (best-effort): {e}")
 
@@ -1142,6 +1176,7 @@ async def grade_homework(
                 user_id=user_id,
                 ttl_seconds=ttl_seconds,
                 grade_image_input_variant=grade_image_input_variant,
+                idempotency_key=idempotency_key or request_id,
             )
         except Exception as e:
             if require_redis:
@@ -1242,6 +1277,7 @@ async def grade_homework(
                     user_id=user_id,
                     submission_id=upload_id,
                     session_id=session_for_ctx,
+                    profile_id=profile_id,
                     request_id=request_id,
                     subject=subj,
                     page_image_urls=(
@@ -1362,6 +1398,69 @@ async def grade_homework(
                         save_qindex_placeholder(
                             session_for_ctx, "qindex skipped: redis_unavailable"
                         )
+
+        # WS-E: bill grade by LLM usage (BT = prompt + 10 * completion).
+        if str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
+            try:
+                bank_now = get_question_bank(session_for_ctx) if session_for_ctx else None
+                meta_now = (bank_now or {}).get("meta") if isinstance(bank_now, dict) else None
+                meta_now = meta_now if isinstance(meta_now, dict) else {}
+                usage = meta_now.get("llm_usage") if isinstance(meta_now, dict) else None
+                if isinstance(usage, dict):
+                    bt_cost = bt_from_usage(
+                        prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                        completion_tokens=int(usage.get("completion_tokens") or 0),
+                    )
+                    ok, err = charge_bt_spendable(
+                        user_id=user_id,
+                        bt_cost=int(bt_cost),
+                        idempotency_key=idempotency_key or request_id,
+                        request_id=request_id,
+                        endpoint="/api/v1/grade",
+                        stage="grade",
+                        model=str(meta_now.get("llm_model") or "") or None,
+                        usage={
+                            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                            "completion_tokens": int(usage.get("completion_tokens") or 0),
+                            "total_tokens": int(usage.get("total_tokens") or 0),
+                        },
+                    )
+                    if not ok:
+                        log_event(
+                            logger,
+                            "quota_charge_failed",
+                            level="warning",
+                            request_id=request_id,
+                            session_id=session_for_ctx,
+                            user_id=user_id,
+                            endpoint="/api/v1/grade",
+                            stage="grade",
+                            error=str(err or ""),
+                        )
+                else:
+                    log_event(
+                        logger,
+                        "quota_usage_missing",
+                        level="warning",
+                        request_id=request_id,
+                        session_id=session_for_ctx,
+                        user_id=user_id,
+                        endpoint="/api/v1/grade",
+                        stage="grade",
+                    )
+            except Exception as e:
+                log_event(
+                    logger,
+                    "quota_charge_exception",
+                    level="warning",
+                    request_id=request_id,
+                    session_id=session_for_ctx,
+                    user_id=user_id,
+                    endpoint="/api/v1/grade",
+                    stage="grade",
+                    error_type=e.__class__.__name__,
+                    error=str(e),
+                )
         if idempotency_key:
             cache_response(
                 idempotency_key, response, fingerprint=_idempotency_fingerprint(req)

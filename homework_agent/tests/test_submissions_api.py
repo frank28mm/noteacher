@@ -233,3 +233,176 @@ def test_get_submission_detail_returns_cards(monkeypatch: pytest.MonkeyPatch):
     assert payload["done_pages"] == 2
     assert isinstance(payload["question_cards"], list) and payload["question_cards"]
     assert {c["page_index"] for c in payload["question_cards"]} == {0, 1}
+
+
+def test_move_submission_profile_moves_derived_facts(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_ANON_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+
+    @dataclass
+    class _Resp2:
+        data: Any
+
+    class _FakeTable2:
+        def __init__(self, name: str, db: Dict[str, List[Dict[str, Any]]]):
+            self._name = name
+            self._db = db
+            self._filters: List[Tuple[str, str, Any]] = []
+            self._limit: Optional[int] = None
+            self._mode: str = "select"
+            self._update_payload: Optional[Dict[str, Any]] = None
+            self._upsert_payload: Optional[Dict[str, Any]] = None
+
+        def select(self, _cols: str):  # noqa: ARG002
+            self._mode = "select"
+            return self
+
+        def eq(self, key: str, value: Any):
+            self._filters.append(("eq", str(key), value))
+            return self
+
+        def limit(self, n: int):
+            self._limit = int(n)
+            return self
+
+        def update(self, payload: Dict[str, Any]):
+            self._mode = "update"
+            self._update_payload = dict(payload)
+            return self
+
+        def delete(self):
+            self._mode = "delete"
+            return self
+
+        def upsert(self, payload: Dict[str, Any], on_conflict: str):  # noqa: ARG002
+            self._mode = "upsert"
+            self._upsert_payload = dict(payload)
+            return self
+
+        def execute(self):
+            rows = list(self._db.get(self._name, []))
+
+            def _match(r: Dict[str, Any]) -> bool:
+                for op, k, v in self._filters:
+                    if op == "eq" and str(r.get(k) or "") != str(v):
+                        return False
+                return True
+
+            if self._mode == "update":
+                updated: List[Dict[str, Any]] = []
+                kept: List[Dict[str, Any]] = []
+                for r in rows:
+                    if _match(r):
+                        nr = dict(r)
+                        nr.update(self._update_payload or {})
+                        updated.append(nr)
+                        kept.append(nr)
+                    else:
+                        kept.append(r)
+                self._db[self._name] = kept
+                return _Resp2(data=updated)
+
+            if self._mode == "delete":
+                kept = [r for r in rows if not _match(r)]
+                self._db[self._name] = kept
+                return _Resp2(data=kept)
+
+            if self._mode == "upsert":
+                payload = dict(self._upsert_payload or {})
+                uid = str(payload.get("user_id") or "")
+                pid = str(payload.get("profile_id") or "")
+                sid = str(payload.get("submission_id") or "")
+                iid = str(payload.get("item_id") or "")
+                kept2: List[Dict[str, Any]] = []
+                replaced = False
+                for r in rows:
+                    if (
+                        str(r.get("user_id") or "") == uid
+                        and str(r.get("profile_id") or "") == pid
+                        and str(r.get("submission_id") or "") == sid
+                        and str(r.get("item_id") or "") == iid
+                    ):
+                        kept2.append(payload)
+                        replaced = True
+                    else:
+                        kept2.append(r)
+                if not replaced:
+                    kept2.append(payload)
+                self._db[self._name] = kept2
+                return _Resp2(data=[payload])
+
+            # select
+            out = [r for r in rows if _match(r)]
+            if self._limit is not None:
+                out = out[: self._limit]
+            return _Resp2(data=out)
+
+    db: Dict[str, List[Dict[str, Any]]] = {
+        "submissions": [
+            {
+                "submission_id": "s1",
+                "user_id": "u1",
+                "profile_id": "p_from",
+                "created_at": "2026-01-03T11:00:00Z",
+                "last_active_at": "2026-01-03T11:00:00Z",
+            }
+        ],
+        "qindex_slices": [
+            {
+                "user_id": "u1",
+                "profile_id": "p_from",
+                "submission_id": "s1",
+                "question_number": "1",
+            }
+        ],
+        "question_attempts": [
+            {
+                "user_id": "u1",
+                "profile_id": "p_from",
+                "submission_id": "s1",
+                "item_id": "i1",
+            }
+        ],
+        "question_steps": [
+            {
+                "user_id": "u1",
+                "profile_id": "p_from",
+                "submission_id": "s1",
+                "item_id": "i1",
+                "step_index": 0,
+            }
+        ],
+        "mistake_exclusions": [
+            {
+                "user_id": "u1",
+                "profile_id": "p_from",
+                "submission_id": "s1",
+                "item_id": "i1",
+                "reason": "x",
+                "excluded_at": "2026-01-03T11:10:00Z",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "homework_agent.api.submissions._safe_table",
+        lambda name: _FakeTable2(name, db),
+    )
+
+    resp = client.post(
+        "/api/v1/submissions/s1/move_profile",
+        json={"to_profile_id": "p_to"},
+        headers={"X-User-Id": "u1", "X-Profile-Id": "p_from"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+    assert db["submissions"][0]["profile_id"] == "p_to"
+    assert db["qindex_slices"][0]["profile_id"] == "p_to"
+    assert db["question_attempts"][0]["profile_id"] == "p_to"
+    assert db["question_steps"][0]["profile_id"] == "p_to"
+    # Exclusion moved (old removed, new created)
+    assert len(db["mistake_exclusions"]) == 1
+    assert db["mistake_exclusions"][0]["profile_id"] == "p_to"

@@ -306,6 +306,10 @@ class LLMClient:
         self.max_tool_calls = int(getattr(settings, "max_tool_calls", 3))
         self.tool_choice = getattr(settings, "tool_choice", "auto") or "auto"
 
+        # Best-effort last-call audit fields (used for billing/verification in workers).
+        self.last_usage: Optional[Dict[str, Any]] = None
+        self.last_response_id: Optional[str] = None
+
     def _image_blocks_from_refs(
         self, images: List["ImageRef"], provider: str
     ) -> List[Dict[str, Any]]:
@@ -1361,16 +1365,38 @@ class LLMClient:
             yield tool_content
             return
 
-        stream = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.4,
-            # Allow longer tutoring responses; UI streaming handles incremental rendering.
-            max_tokens=1600,
-            stream=True,
-        )
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.4,
+                # Allow longer tutoring responses; UI streaming handles incremental rendering.
+                max_tokens=1600,
+                # Best-effort: include usage in the final stream event (if provider supports it).
+                stream_options={"include_usage": True},
+                stream=True,
+            )
+        except TypeError:
+            # Older openai client may not support stream_options.
+            stream = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.4,
+                max_tokens=1600,
+                stream=True,
+            )
+        usage_out: Optional[Dict[str, Any]] = None
         for event in stream:
             try:
+                usage = getattr(event, "usage", None)
+                if isinstance(usage, dict):
+                    usage_out = usage
+                elif usage is not None:
+                    try:
+                        # openai python may expose usage as a pydantic-like object
+                        usage_out = dict(usage)
+                    except Exception:
+                        usage_out = usage_out
                 choice = (getattr(event, "choices", None) or [None])[0]
                 delta = getattr(choice, "delta", None)
                 text = getattr(delta, "content", None)
@@ -1378,6 +1404,15 @@ class LLMClient:
                     yield text
             except Exception:
                 continue
+        if isinstance(usage_out, dict):
+            yield {
+                "event": "llm_usage",
+                "data": {
+                    "prompt_tokens": int(usage_out.get("prompt_tokens") or 0),
+                    "completion_tokens": int(usage_out.get("completion_tokens") or 0),
+                    "total_tokens": int(usage_out.get("total_tokens") or 0),
+                },
+            }
 
     @retry(
         retry=retry_if_exception_type(
@@ -1783,6 +1818,24 @@ class LLMClient:
                 max_tokens=4000,
                 response_format={"type": "json_object"},
             )
+
+            # Best-effort: store usage/response_id for downstream billing and audit.
+            try:
+                usage = getattr(response, "usage", None)
+                if isinstance(usage, dict):
+                    self.last_usage = usage
+                elif usage is not None:
+                    try:
+                        self.last_usage = dict(usage)
+                    except Exception:
+                        self.last_usage = None
+            except Exception:
+                self.last_usage = None
+            try:
+                rid = getattr(response, "id", None)
+                self.last_response_id = str(rid).strip() if rid else None
+            except Exception:
+                self.last_response_id = None
 
             content = response.choices[0].message.content
             logger.info(f"[generate_report] content_len={len(content or '')}")

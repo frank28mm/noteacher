@@ -404,8 +404,38 @@ class Settings(BaseSettings):
     )
 
     # Auth (Phase A): when enabled, endpoints require Authorization: Bearer <jwt>
-    # and will derive user_id from Supabase Auth token; otherwise dev fallback applies.
+    # and will derive user_id from token; otherwise dev fallback applies.
     auth_required: bool = Field(default=False, validation_alias="AUTH_REQUIRED")
+
+    # Auth provider mode:
+    # - dev: accept X-User-Id / DEV_USER_ID fallback (AUTH_REQUIRED must be 0)
+    # - supabase: verify Supabase Auth JWT via /auth/v1/user
+    # - local: verify locally-issued JWT (phone login)
+    auth_mode: str = Field(default="dev", validation_alias="AUTH_MODE")
+
+    # Local JWT (phone login)
+    jwt_secret: str = Field(default="", validation_alias="JWT_SECRET")
+    jwt_issuer: str = Field(default="noteacher", validation_alias="JWT_ISSUER")
+    jwt_access_token_ttl_seconds: int = Field(
+        default=7 * 24 * 3600, validation_alias="JWT_ACCESS_TOKEN_TTL_SECONDS"
+    )
+
+    # SMS auth
+    sms_provider: str = Field(default="mock", validation_alias="SMS_PROVIDER")
+    sms_code_ttl_seconds: int = Field(
+        default=5 * 60, validation_alias="SMS_CODE_TTL_SECONDS"
+    )
+    sms_send_cooldown_seconds: int = Field(
+        default=60, validation_alias="SMS_SEND_COOLDOWN_SECONDS"
+    )
+    sms_return_code_in_response: bool = Field(
+        # Dev-only convenience; production should keep this false.
+        default=True,
+        validation_alias="SMS_RETURN_CODE_IN_RESPONSE",
+    )
+
+    # Admin API (WS-G): token-based gate for the first iteration (no admin auth UI yet).
+    admin_token: str = Field(default="", validation_alias="ADMIN_TOKEN")
 
 
 @lru_cache(maxsize=1)

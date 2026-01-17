@@ -25,6 +25,11 @@ system_template: |
   1. `narrative_md`: The full report in Markdown format.
   2. `summary_json`: A structured summary for UI cards.
 
+  **Knowledge Tags Policy (软约束，不强收口)**:
+  - 当你在报告中引用“知识点”时，**优先使用 features_json 中已有的 knowledge tag 字符串**（例如 mastery 的键、或趋势里出现的 tag）。
+  - 不要发明新的知识点名称；如果发现某些 tag 是噪声（如纯英文/过泛的学科标签），请在文案中用“其他/未归类”概括，不要直接展示噪声 tag。
+  - 若需要给出更细颗粒度的建议，可以用自然语言描述（例如“加强同底数幂的运算规则”），但不要把该自然语言当作新的 tag 输出到 summary_json.tags。
+
   **Structure for `narrative_md`**:
   # 🎯 学情诊断报告
   
@@ -37,7 +42,7 @@ system_template: |
   - **知识掌握**: Analyze the `mastery` data. Highlight what is good and what needs review.
   - **能力素养**: Infer capabilities based on `diagnosis` (e.g., calculation accuracy, comprehension).
 
-  ## 3. 改进建议 (Actionable Advice)
+  ## 3. 提升建议 (Actionable Advice)
   - Provide 3 concrete steps based on the `diagnosis` and wrong items.
   - Example: "建议加强多位数乘法的专项练习，每天 5 题."
 

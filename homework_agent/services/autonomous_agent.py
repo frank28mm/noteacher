@@ -974,6 +974,21 @@ class AggregatorAgent:
             state.partial_results.setdefault("llm_trace", {})[
                 "ark_response_id"
             ] = response_id
+        try:
+            usage = getattr(text, "usage", None)
+        except Exception:
+            usage = None
+        if isinstance(usage, dict):
+            # Keep only the standard keys for downstream billing/audit.
+            state.partial_results.setdefault("llm_trace", {})["llm_usage"] = {
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+                "total_tokens": int(usage.get("total_tokens") or 0),
+            }
+        state.partial_results.setdefault("llm_trace", {})["llm_model"] = str(model or "")
+        state.partial_results.setdefault("llm_trace", {})["llm_provider"] = str(
+            self.provider or ""
+        )
         state.partial_results.setdefault("llm_trace", {})[
             "ark_image_process_requested"
         ] = bool(use_image_tools)

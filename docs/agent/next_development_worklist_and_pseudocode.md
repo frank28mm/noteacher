@@ -39,6 +39,56 @@
 
 > 说明：每项包含：为什么做 → 交付物 → 验收标准 → 伪代码/接口草案。
 
+### Frontend‑H5（对齐 `docs/frontend_design_spec_v2.md`）：执行 Backlog（不另开文档）
+
+> 说明：前端的页面命名/跳转/文案规则以 `docs/frontend_design_spec_v2.md` 为唯一真源；本文只作为“可执行拆解清单”。  
+> 核心冻结：拟态阴影 **全站统一 tokens**；Primary CTA 统一为 `START`；底部导航中英全切换；编号永远 `#` 前缀；HOME/Back 规则按真源 §2。
+
+#### FE‑P0（先做：避免全局返工）
+
+- FE‑P0‑01 统一 Shadow Tokens v1（全站拟态统一，含 `shadowRaised/Pressed/Inset/Icon`）（0.5–1d）
+  - 验收：Home/题目详情/报告详情三页对照截图观感一致；全站只使用这一套 tokens。
+- FE‑P0‑02 文字体系落地（按真源 `§1.6 Copy & Typography Rules` 的锚点与中英文案）（0.5–1d）
+  - 验收：Page Title/Section Header/Subheader/Card Title/Primary CTA/Empty/Warning/Error/Success 全命中；中文全中文、英文全英文。
+- FE‑P0‑03 路由骨架 + HOME/Back 规则（1d）
+  - 验收：`AI辅导/登录注册/订阅/历史筛选弹窗` 无 HOME；其它页面按真源显示 HOME 或 Back。
+- FE‑P0‑04 API Client 对齐（`/api/v1` + 401/错误统一处理）（0.5–1d）
+  - 验收：任何 401 必然进入登录流；错误提示文案使用真源 §1.6.4。
+- FE‑P0‑05 Job 轮询状态机（不误判失败，使用 `elapsed_ms`，降频轮询）（1–1.5d）
+  - 验收：超时不进入错误页；仍持续追更直到后端 `job.status=done/failed`；策略满足真源 §4.1（2s/5s/10s + max_wait）。
+
+#### FE‑P1（主链路：先“能跑通且符合流程”）
+
+- FE‑P1‑01 拍照页（H5 先用 `<input capture>`；不追求原生相机取景框能力）（1d）
+- FE‑P1‑02 预览/上传 → 自动进入批改（无“提交批改”按钮；固定 `X-Force-Async: 1`）（1d）
+- FE‑P1‑03 批改结果（逐页披露页）（1–2d）
+  - 验收：Page1 先出即可点题/问 AI；Page2/3 后台逐页补齐（真源 §3.1/§4.2）。
+- FE‑P1‑04 批改结果（汇总/最终页）（1d）
+  - 验收：整单 done 后进入；题卡可点题/问 AI（真源 §4.3）。
+- FE‑P1‑05 题目详情（有图/无图）+ MathRichText（1–2d）
+  - 验收：数学推导正文使用真源 §1.6 的 `MathRichText` 锚点（`docs/frontend_ui_page_code.md:1596`/`:1749`）。
+- FE‑P1‑06 AI辅导整页（仅 Back，无 HOME；按题上下文；聊天可续）（1–2d）
+
+#### FE‑P2（数据/历史/分析链路补齐：支撑你新 IA）
+
+- FE‑P2‑01 DATA：错题面板 → 分类面板/列表页 → 题目详情（含“点错题进详情”）（1–2d）
+- FE‑P2‑02 DATA：OK 不可逆归档 → 已掌握面板同构（分类→列表→详情→问 AI）（1–2d）
+- FE‑P2‑03 HISTORY：批改历史列表（条目显示 `#编号`）（1d）
+- FE‑P2‑04 HISTORY：历史作业详情页（快照回放，可继续问 AI）（1–2d）
+- FE‑P2‑05 HISTORY：历史筛选弹窗（无 HOME，仅关闭）（0.5–1d）
+- FE‑P2‑06 ANALYSIS：科目 + 周期（3/7/30）内嵌筛选（无筛选弹窗）（1d）
+- FE‑P2‑07 Start → 报告详情页；报告记录列表条目显示 `#编号`（2d）
+- FE‑P2‑08 家庭-子女（Profile）账户切换（Home 头像快捷切换 + 关键流程强提示 + “传错账户”可补救）（1–2d）
+  - 状态：🟡 部分已完成（Home 2 头像并排切换 + `X-Profile-Id` 注入已具备；后端 `/api/v1/me/profiles` 与 move_profile 已可用）
+  - 待补：拍照/上传/开始批改/结果/历史详情的“提交到/归属”强提示统一口径；“移动到其他孩子”入口全路径对齐；Mine 子女管理 CRUD（见 WS‑F：F‑5）
+
+#### FE‑P3（体验增强：不阻塞主链路；✅ 已完成）
+
+**状态**：✅ 已完成（按你确认：本轮无需再排期；若后续发现回归/缺页，再回到本段补条目）
+
+- FE‑P3‑01 “新页到达”提示（可后置，先保证卡片可靠更新）（0.5–1d）
+- FE‑P3‑02 Skeleton / 转场动效（按统一 tokens）（1–2d）
+
 ### P0‑Product（1–2 周）：把“错题→复盘→报告”闭环打通到可用
 
 #### WL‑P0‑010：错题本 MVP（历史检索 + 排除/恢复 + 知识点基础统计）
@@ -538,6 +588,53 @@ def log_run_versions(request_ctx, *, prompt_meta, model_meta, thresholds):
 - Demo：同科目 ≥3 次 submission 立即解锁（不看对错）
 - 产品：同科目 ≥3 天且满足最小 submissions/attempts 才解锁（阈值可配置）
 
+---
+
+#### WL‑P1‑012：报告趋势（知识点 Top5 + 错因 Top3，自适应 3 天分桶）
+
+**为什么**：Reporter 详情页需要“趋势图”展示本周期内的变化；仅有整体聚合会缺失“相对变化”信息，且 30 天周期会出现点数爆炸/曲线噪声。
+
+**唯一执行计划入口**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑C：C‑7）。
+
+**交付物**：
+- 在 reports 的 features/stats 中新增 `trends` 字段（稳定 schema）：
+  - `granularity=submission|bucket_3d`
+  - `points[]`（按时间升序，包含 `knowledge_top5` 与 `cause_top3` 的“绝对错题数”）
+  - `selected_knowledge_tags[]` / `selected_causes[]`（用于前端图例）
+- 防爆规则：
+  - `distinct_submission_count <= 15` → 每次作业一个点
+  - `> 15` → 按 UTC 日期 3 天游标分桶求和
+- 口径要求：
+  - 错题绝对数 = `verdict in {'incorrect','uncertain'}` 的题目数
+  - 错因优先用题目级 `attempts.severity`（calculation/concept/format/unknown；**只统计错/待定题目**）
+  - 必须与 `mistake_exclusions` 过滤口径一致
+
+**验收标准**：
+- 3/7 天周期：趋势点数=作业次数（≤15）；Top5/Top3 图例稳定，曲线不乱序、不缺点。
+- 30 天周期：趋势点数≈ `ceil(days/3)`；`granularity='bucket_3d'`；bucket 求和可解释、可追溯。
+
+---
+
+#### WL‑P1‑013：Reporter 详情页数据契约补齐（KPI/薄弱点/错因口径/矩阵/覆盖率）
+
+**为什么**：Reporter UI 需要“能画、能解释、能审计”的稳定字段；前端不应自行计数或推断口径（会导致 drift）。
+
+**唯一执行计划入口**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑C：C‑8/C‑9）。
+
+**交付物**：
+- `reports.stats` 增加：
+  - `coverage`（tag_coverage_rate / severity_coverage_rate / steps_coverage_rate）
+  - `cause_distribution`（题目级 `attempts.severity` 聚合的 counts/rates）
+  - `meta.cause_definitions`（severity → 中文名/判断标准，供 UI “!” tooltip）
+- 保持现有：
+  - `overall`（KPI）
+  - `knowledge_mastery.rows`（薄弱知识点）
+  - `type_difficulty.rows`（题型×难度）
+  - `process_diagnosis`（steps 口径，允许稀疏但必须可解释）
+
+**验收标准**：
+- 前端仅用 `GET /api/v1/reports/{id}` 返回的 `reports.stats` 即可渲染 KPI/薄弱点/错因/矩阵/提示文案，无需二次计数。
+
 #### WL‑P1‑001：Baseline 阈值治理（从“允许缺失”→“强阻断”）
 
 **交付物**：
@@ -780,6 +877,122 @@ def upload_endpoint(file):
 - 滚动升级不中断/可恢复（worker SIGTERM 优雅退出，避免丢任务）
 - 429/限流/排队/失败可观测（能定位“模型侧 vs 存储侧 vs 本地”）
 
+---
+
+### P2（上线前必须做｜不阻塞当前迭代）：计费与配额（BT/CP/报告券）
+
+#### WL‑P2‑003：用户系统与认证（H5 优先：强制手机号；火山短信；微信/抖音可选）
+
+**为什么**：你已明确“首发 H5（手机浏览器）+ 强制手机号”，并且 WS‑E 的 BT/CP/报告券需要以真实 `user_id` 为真源；否则无法做付费产品、数据留存与权限隔离。
+
+**唯一执行计划入口**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑F）。
+
+**交付物**：
+- 手机号验证码登录：
+  - `POST /api/v1/auth/sms/send`
+  - `POST /api/v1/auth/sms/verify`（返回 `access_token`）
+- 用户与权限：
+  - `GET /api/v1/me`
+  - `Authorization: Bearer <token>` 作为生产唯一身份来源
+  - `APP_ENV=prod` 禁用 `X-User-Id` DEV 兜底（避免误上生产）
+- 与 WS‑E 对齐：
+  - 注册即发放 Trial Pack（5 天）：`200 CP + 1 报告券 + bt_report_reserve`
+  - `GET /api/v1/me/quota` 返回 `cp_left/report_coupons_left/trial_expires_at`
+- 风控底线：
+  - phone/ip/device 三层频控（防撞库/刷短信）
+  - 验证码只存 hash，过期 5–10 分钟
+
+**验收标准**：
+- H5：手机号登录后能正常调用 `/uploads /grade /chat /mistakes /reports`，且数据按 `user_id` 隔离。
+- Trial Pack 不会被 grade/chat 消耗掉“报告 BT 预留”（仍可用掉那张报告券）。
+
+#### WL‑P2‑005：家庭-子女（Profile）账户切换（数据隔离 + 强提示 + 可补救）
+
+**为什么**：同一家庭常见多子女共享设备；如果仍以 `user_id` 单维度存储，历史记录/错题/报告会混在一起，UI 切换只能“视觉切换”而无法做到数据隔离；且当用户忘记切换账号时，必须提供可补救的纠错机制。
+
+**真源与契约**：
+- 方案与分期：`docs/profile_management_plan.md`
+- 前端真源补充：`docs/frontend_design_spec_v2.md`（§1.7）
+- 契约草案：`homework_agent/API_CONTRACT.md`（Profiles Draft）
+
+**唯一执行计划入口**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑F：F‑5）。
+
+**交付物（后端/DB/Worker）**：
+- DB：
+  - 新增 `child_profiles` 表（同一 `user_id` 下 `display_name` 唯一；存在默认 profile）
+  - 事实表新增 `profile_id`：`submissions/qindex_slices/question_attempts/question_steps/mistake_exclusions/report_jobs/reports`
+  - 历史数据 backfill：所有用户至少 1 个默认 profile；旧数据回填到默认 profile
+- API：
+  - `GET/POST/PATCH/DELETE /api/v1/me/profiles`
+  - `POST /api/v1/me/profiles/{profile_id}/set_default`
+  - `POST /api/v1/submissions/{submission_id}/move_profile`（把 submission 及其派生事实迁移到另一 profile）
+  - 全站读取接口按 `(user_id, profile_id)` 过滤；写入接口写入 `profile_id`
+- Worker：
+  - `profile_id` 以 `submissions.profile_id` 为事实源贯穿：upload/grade/qindex/facts/report 全链路写入与过滤
+
+**交付物（前端）**：
+- Home 右上角头像切换：profiles=2 时两个头像按钮并排，当前高亮（醒目、一眼可见）
+- 全局请求头注入 `X-Profile-Id`（有 active_profile_id 时）
+- 关键流程强提示：拍照/上传/开始批改处显示 `提交到：<profile>`；结果/历史详情显示 `归属：<profile>`
+- 可补救入口：历史作业详情或汇总页提供“移动到其他孩子”
+
+**验收标准**：
+- 2 个 profile 下：切换后 History/DATA/Reports 均严格隔离；新上传/批改写入当前 profile
+- 用户忘记切换后：可通过 move submission 纠正，且 UI 有明确提示与入口
+- 兼容旧客户端：无 `X-Profile-Id` 也能跑通（自动使用默认 profile），但 UI 版本应始终携带 header
+
+#### WL‑P2‑004：运营后台（Admin）与客服/审计（最小可用）
+
+**为什么**：你已经进入“付费 + 数据留存 + 配额/报告券”的运营阶段；没有 Admin 与审计，就无法做客服排障、权益纠错、反作弊与成本治理（也无法解释“为什么扣费/为什么封禁/为什么报告不可用”）。
+
+**唯一执行计划入口**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑G）。
+
+**交付物（先最小可用，不追求 UI 漂亮）**：
+- Admin 权限与鉴权：
+  - `admin_users`（白名单）+ `Authorization` 仅 admin 可访问 `/api/v1/admin/*`
+- 权益/客服操作（必须幂等 + 审计）：
+  - `POST /api/v1/admin/users/{user_id}/grant`（发放/回收 CP/BT、报告券、延长试用/订阅）
+  - `GET /api/v1/admin/users/{user_id}` + `GET /api/v1/admin/users/{user_id}/ledger`
+- 作业/报告排障只读：
+  - `GET /api/v1/admin/submissions?user_id=...`
+  - `GET /api/v1/admin/submissions/{submission_id}` / `GET /api/v1/admin/jobs/{job_id}` / `GET /api/v1/admin/reports/{report_id}`
+- 成本/用量最小报表（按天聚合）：
+  - `GET /api/v1/admin/usage/daily?since=...`
+  - `GET /api/v1/admin/usage/top_users?since=...`
+- 审计日志（必做）：
+  - `admin_audit_logs`：记录所有 admin 写操作（actor/action/target/payload/request_id/ip/ua）
+
+**验收标准**：
+- 任意一次 admin 写操作都有审计日志可追溯（可用于纠纷/风控）。
+- 能用 Admin 在 5 分钟内定位并处理：用户“额度异常/报告券不可用/历史作业无法查看/报告失败”等典型客服问题。
+
+#### WL‑P2‑002：BT 精确扣费 + CP 整数展示（含报告券/预留）
+
+**为什么**：该产品为付费产品，成本主要来自 tokens；必须做到“严格按 tokens 扣费、可审计、可控成本”，并对用户只展示简洁的剩余额度。
+
+**真源**：`docs/pricing_and_quota_strategy.md`（BT/CP 口径、Trial Pack、订阅等级、报告券与预留规则）。
+
+**交付物**：
+- 统一 usage 口径：所有 LLM 调用都产出结构化 usage（至少 `prompt_tokens/completion_tokens/total_tokens`）
+  - 覆盖：`grade/chat/report`（包含 `LLMService.generate_report` 路径）
+- 账户权益与账本（建议一个表/一组字段）：
+  - `bt_trial`、`bt_subscription`
+  - `trial_expires_at`
+  - `report_coupons`、`bt_report_reserve`
+  - `plan_tier`、`data_retention_tier`
+- 扣费与幂等：
+  - 以 `X-Idempotency-Key` 保护扣费（重试不重复扣）
+  - `BT = prompt_tokens + 10 * completion_tokens`（严格按真源口径）
+  - 扣费顺序：`grade/chat` 只扣 `trial/subscription`；`report` 先扣券、再扣 `bt_report_reserve`
+- 对外查询（前端只需要剩余量）：
+  - `GET /api/v1/me/quota` → `{ cp_left, report_coupons_left, trial_expires_at? }`
+  - `cp_left = floor(bt_spendable / 12400)`（只展示整数 CP）
+
+**验收标准**：
+- 同一请求重复发送（相同 idempotency-key）不会重复扣费
+- 当 `cp_left == 0` 但仍有 `report_coupons_left > 0` 时，周期报告仍可正常生成（使用 `bt_report_reserve`）
+- 任意一次扣费都有审计记录：`request_id/user_id/endpoint/model/stage/prompt_tokens/completion_tokens/bt_used`
+
 ### P2（1–2 月）：规模化工程（灰度/告警/平台监控/Reviewer 工具）
 
 只在确有上线与规模需求时再推进：
@@ -787,6 +1000,31 @@ def upload_endpoint(file):
 - 平台化监控（OTel/Prometheus/Grafana/Jaeger）与告警
 - 安全响应演练 + postmortem 机制
 - Reviewer UI/工作台（聚合 needs_review、回放轨迹、标注回收进 replay）
+
+---
+
+## P3（上线后第 1 个运营迭代）：支付/订阅自动化（最小版）
+
+#### WL‑P3‑001：订阅生命周期状态机 + 自动结算（不绑支付渠道，Admin 可兜底）
+
+**为什么**：你已确定“付费 + 数据留存 + BT/CP + 报告券”是产品核心；但首发可以先不接具体支付渠道。上线后需要在 1 个迭代内把“订阅内核”做成可审计、可回滚、可运营的状态机，否则运营会完全依赖人工、风险大且难规模化。
+
+**唯一执行计划入口**：`docs/tasks/development_plan_grade_reports_security_20260101.md`（WS‑H）。
+
+**交付物**（最小可用）：
+- 订阅数据模型：`subscriptions`（status/plan_tier/period/cancel_at_period_end/provider_ref…）
+- 订阅事件流水：`subscription_events`（幂等键=period/action；可追溯）
+- 用户侧 API：
+  - `GET /api/v1/me/subscription`
+  - `POST /api/v1/me/subscription/cancel`
+- Admin 侧 API（审计必做）：
+  - `POST /api/v1/admin/subscriptions/activate|extend|revoke`
+- 自动结算（不新增常驻服务）：
+  - K8s CronJob（或等价定时任务）每日跑：到期回退 + 月度权益发放（幂等可重跑）
+
+**验收标准**：
+- 不接支付渠道也能完成：开通→续费（人工）→到期→宽限→过期回退；全程可观测、可审计。
+- 订阅状态变化不会影响 WS‑E 扣费口径（BT/CP/报告券）与 WS‑A/WS‑C 的业务稳定性。
 
 ---
 

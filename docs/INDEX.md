@@ -3,12 +3,18 @@
 > 目的：减少“多份计划/多份报告”带来的混淆，明确每份文档的职责边界与优先级。  
 > 规则：阅读与执行时，以“真源/契约/路线图/Backlog”四类为主；其余文档都视为“阶段性报告/分析材料”，不直接作为交付承诺。
 
+## 0) 公告（行动项）
+
+- Profile 子账号（家庭-子女）方案：文档对齐与行动项（2026-01-17）：`docs/announcements/profile_management_alignment_20260117.md`
+
 ## 1) 真源（必须对齐）
 
 - 需求边界：`product_requirements.md`
+- 定价与配额（BT→CP + 报告券）：`docs/pricing_and_quota_strategy.md`
 - 接口契约：`homework_agent/API_CONTRACT.md`
 - 架构总览：`system_architecture.md`
 - 前端真源（Stitch UI 对齐）：`docs/frontend_design_spec_v2.md`
+- 数学知识点口径（知识图谱/命名规范）：`docs/math_knowledge_graph.md`
 - 工程对齐与约束：`docs/engineering_guidelines.md`
 - 开发规则（门禁/日志/安全/回滚）：`docs/development_rules.md`
 - 数据库 Schema 真源（当前以实际 DB 为准）：`supabase/schema.sql`
@@ -47,6 +53,7 @@
 ## 5.1) 设计文档（Design Docs，支撑落地，不替代路线图/Backlog）
 
 - 错题双存储 + 学情分析报告 Subagent（实施方案）：`docs/archive/design/mistakes_reports_learning_analyst_design.md`
+- 家庭-子女（Profile）账户切换（技术方案与开发计划）：`docs/profile_management_plan.md`
 
 ## 6) “不再当计划读”的约定
 

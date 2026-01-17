@@ -14,7 +14,7 @@ import os
 import time
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.observability import log_event

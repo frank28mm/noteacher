@@ -56,6 +56,7 @@ class MistakeRow:
 def list_mistakes(
     *,
     user_id: str,
+    profile_id: Optional[str] = None,
     limit_submissions: int = 20,
     before_created_at: Optional[str] = None,
     include_excluded: bool = False,
@@ -79,6 +80,8 @@ def list_mistakes(
             .order("created_at", desc=True)
             .limit(limit)
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
         if before_created_at:
             q = q.lt("created_at", str(before_created_at))
         resp = q.execute()
@@ -95,13 +98,15 @@ def list_mistakes(
     excluded: set[tuple[str, str]] = set()
     if submission_ids and not include_excluded:
         try:
-            ex = (
+            q = (
                 _safe_table("mistake_exclusions")
                 .select("submission_id,item_id")
                 .eq("user_id", str(user_id))
                 .in_("submission_id", submission_ids)
-                .execute()
             )
+            if profile_id:
+                q = q.eq("profile_id", str(profile_id))
+            ex = q.execute()
             ex_rows = getattr(ex, "data", None)
             ex_rows = ex_rows if isinstance(ex_rows, list) else []
             for r in ex_rows:
@@ -197,6 +202,7 @@ def compute_knowledge_tag_stats(mistakes: Iterable[MistakeRow]) -> List[Dict[str
 def exclude_mistake(
     *,
     user_id: str,
+    profile_id: Optional[str] = None,
     submission_id: str,
     item_id: str,
     reason: Optional[str] = None,
@@ -210,12 +216,13 @@ def exclude_mistake(
     try:
         payload: Dict[str, Any] = {
             "user_id": str(user_id),
+            "profile_id": (str(profile_id).strip() if profile_id else None),
             "submission_id": sid,
             "item_id": iid,
             "reason": (str(reason).strip() if reason is not None else None),
         }
         _safe_table("mistake_exclusions").upsert(
-            payload, on_conflict="user_id,submission_id,item_id"
+            payload, on_conflict="user_id,profile_id,submission_id,item_id"
         ).execute()
     except Exception as e:
         raise MistakesServiceError(f"failed to upsert exclusion: {e}") from e
@@ -224,6 +231,7 @@ def exclude_mistake(
 def restore_mistake(
     *,
     user_id: str,
+    profile_id: Optional[str] = None,
     submission_id: str,
     item_id: str,
 ) -> None:
@@ -234,13 +242,15 @@ def restore_mistake(
     if not sid or not iid:
         raise MistakesServiceError("submission_id and item_id are required")
     try:
-        (
+        q = (
             _safe_table("mistake_exclusions")
             .delete()
             .eq("user_id", str(user_id))
             .eq("submission_id", sid)
             .eq("item_id", iid)
-            .execute()
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
+        q.execute()
     except Exception as e:
         raise MistakesServiceError(f"failed to delete exclusion: {e}") from e

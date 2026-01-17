@@ -20,6 +20,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from homework_agent.services.report_features import compute_report_features
 from homework_agent.services.llm import LLMClient, ReportResult
 from homework_agent.services.facts_extractor import extract_facts_from_grade_result
+from homework_agent.services.quota_service import (
+    bt_from_usage,
+    can_use_report_coupon,
+    consume_report_coupon_and_reserve,
+)
 from homework_agent.utils.logging_setup import setup_file_logging, silence_noisy_loggers
 from homework_agent.utils.observability import log_event
 from homework_agent.utils.settings import get_settings
@@ -170,13 +175,18 @@ def _mark_job_done(*, job_id: str, report_id: str) -> None:
 
 
 def _load_attempts(
-    *, user_id: str, since: str, until: str, subject: Optional[str]
+    *,
+    user_id: str,
+    profile_id: Optional[str],
+    since: str,
+    until: str,
+    subject: Optional[str],
 ) -> List[Dict[str, Any]]:
     try:
         q = (
             _safe_table("question_attempts")
             .select(
-                "submission_id,item_id,question_number,created_at,subject,verdict,knowledge_tags,knowledge_tags_norm,question_type,difficulty,severity,warnings"
+                "submission_id,item_id,question_number,created_at,subject,verdict,knowledge_tags,knowledge_tags_norm,question_type,difficulty,severity,warnings,question_raw"
             )
             .eq("user_id", str(user_id))
             .gte("created_at", str(since))
@@ -184,6 +194,8 @@ def _load_attempts(
             .order("created_at", desc=True)
             .limit(5000)
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
         if subject:
             q = q.eq("subject", str(subject))
         resp = q.execute()
@@ -194,19 +206,25 @@ def _load_attempts(
 
 
 def _load_attempts_for_submission(
-    *, user_id: str, submission_id: str, subject: Optional[str]
+    *,
+    user_id: str,
+    profile_id: Optional[str],
+    submission_id: str,
+    subject: Optional[str],
 ) -> List[Dict[str, Any]]:
     try:
         q = (
             _safe_table("question_attempts")
             .select(
-                "submission_id,item_id,question_number,created_at,subject,verdict,knowledge_tags,knowledge_tags_norm,question_type,difficulty,severity,warnings"
+                "submission_id,item_id,question_number,created_at,subject,verdict,knowledge_tags,knowledge_tags_norm,question_type,difficulty,severity,warnings,question_raw"
             )
             .eq("user_id", str(user_id))
             .eq("submission_id", str(submission_id))
             .order("created_at", desc=True)
             .limit(5000)
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
         if subject:
             q = q.eq("subject", str(subject))
         resp = q.execute()
@@ -217,7 +235,12 @@ def _load_attempts_for_submission(
 
 
 def _load_steps(
-    *, user_id: str, since: str, until: str, subject: Optional[str]
+    *,
+    user_id: str,
+    profile_id: Optional[str],
+    since: str,
+    until: str,
+    subject: Optional[str],
 ) -> List[Dict[str, Any]]:
     try:
         q = (
@@ -231,6 +254,8 @@ def _load_steps(
             .order("created_at", desc=True)
             .limit(10000)
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
         if subject:
             q = q.eq("subject", str(subject))
         resp = q.execute()
@@ -241,7 +266,11 @@ def _load_steps(
 
 
 def _load_steps_for_submission(
-    *, user_id: str, submission_id: str, subject: Optional[str]
+    *,
+    user_id: str,
+    profile_id: Optional[str],
+    submission_id: str,
+    subject: Optional[str],
 ) -> List[Dict[str, Any]]:
     try:
         q = (
@@ -254,6 +283,8 @@ def _load_steps_for_submission(
             .order("created_at", desc=True)
             .limit(10000)
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
         if subject:
             q = q.eq("subject", str(subject))
         resp = q.execute()
@@ -264,7 +295,12 @@ def _load_steps_for_submission(
 
 
 def _fallback_extract_from_submissions(
-    *, user_id: str, since: str, until: str, subject: Optional[str]
+    *,
+    user_id: str,
+    profile_id: Optional[str],
+    since: str,
+    until: str,
+    subject: Optional[str],
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Fallback path when derived facts tables are missing/empty:
@@ -279,6 +315,8 @@ def _fallback_extract_from_submissions(
         .order("created_at", desc=True)
         .limit(2000)
     )
+    if profile_id:
+        q = q.eq("profile_id", str(profile_id))
     if subject:
         q = q.eq("subject", str(subject))
     resp = q.execute()
@@ -309,20 +347,21 @@ def _fallback_extract_from_submissions(
 
 
 def _load_submission_meta(
-    *, user_id: str, submission_id: str
+    *, user_id: str, profile_id: Optional[str], submission_id: str
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Return (created_at_iso, subject) for a submission, if available.
     """
     try:
-        resp = (
+        q = (
             _safe_table("submissions")
             .select("submission_id,created_at,subject")
             .eq("user_id", str(user_id))
             .eq("submission_id", str(submission_id))
-            .limit(1)
-            .execute()
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
+        resp = q.limit(1).execute()
         rows = getattr(resp, "data", None)
         row = (
             rows[0]
@@ -337,7 +376,7 @@ def _load_submission_meta(
 
 
 def _fallback_extract_from_submission(
-    *, user_id: str, submission_id: str
+    *, user_id: str, profile_id: Optional[str], submission_id: str
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Fallback path: load a single submission and re-extract facts in-process.
@@ -347,8 +386,10 @@ def _fallback_extract_from_submission(
         .select("submission_id,user_id,subject,created_at,grade_result")
         .eq("user_id", str(user_id))
         .eq("submission_id", str(submission_id))
-        .limit(1)
     )
+    if profile_id:
+        q = q.eq("profile_id", str(profile_id))
+    q = q.limit(1)
     resp = q.execute()
     rows = getattr(resp, "data", None)
     row = (
@@ -372,15 +413,17 @@ def _fallback_extract_from_submission(
     return facts.question_attempts, facts.question_steps
 
 
-def _load_exclusions(*, user_id: str) -> Set[Tuple[str, str]]:
+def _load_exclusions(*, user_id: str, profile_id: Optional[str]) -> Set[Tuple[str, str]]:
     try:
-        resp = (
+        q = (
             _safe_table("mistake_exclusions")
             .select("submission_id,item_id")
             .eq("user_id", str(user_id))
             .limit(5000)
-            .execute()
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
+        resp = q.execute()
         rows = getattr(resp, "data", None)
         out: Set[Tuple[str, str]] = set()
         for r in rows if isinstance(rows, list) else []:
@@ -415,6 +458,7 @@ def _filter_excluded_attempts(
 def _insert_report(
     *,
     user_id: str,
+    profile_id: Optional[str],
     report_job_id: str,
     params: Dict[str, Any],
     features: Dict[str, Any],
@@ -431,6 +475,7 @@ def _insert_report(
     # Map to actual DB schema (columns: id, user_id, content, stats, title, created_at, etc.)
     row = {
         "user_id": str(user_id),
+        "profile_id": (str(profile_id).strip() if profile_id else None),
         "report_job_id": str(report_job_id),
         # Store features in stats column
         "stats": features,
@@ -501,6 +546,7 @@ def main() -> int:
                 continue
             job_id = str(job.get("id") or "").strip()
             user_id = str(job.get("user_id") or "").strip()
+            profile_id = str(job.get("profile_id") or "").strip() or None
             params = job.get("params") if isinstance(job.get("params"), dict) else {}
             if not job_id or not user_id:
                 time.sleep(0.5)
@@ -512,12 +558,23 @@ def main() -> int:
 
             started = time.monotonic()
             try:
+                if str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
+                    if not can_use_report_coupon(user_id=user_id):
+                        _mark_job_failed(job_id=job_id, error="quota_insufficient")
+                        log_event(
+                            logger,
+                            "report_job_quota_insufficient",
+                            level="warning",
+                            job_id=job_id,
+                            user_id=user_id,
+                        )
+                        continue
                 effective_params = dict(params)
                 submission_id = str(effective_params.get("submission_id") or "").strip()
                 subject = str(effective_params.get("subject") or "").strip() or None
                 if submission_id:
                     created_at, subj2 = _load_submission_meta(
-                        user_id=user_id, submission_id=submission_id
+                        user_id=user_id, profile_id=profile_id, submission_id=submission_id
                     )
                     if not subject and subj2:
                         subject = subj2
@@ -527,14 +584,20 @@ def main() -> int:
                         effective_params.setdefault("until", created_at)
 
                     attempts = _load_attempts_for_submission(
-                        user_id=user_id, submission_id=submission_id, subject=subject
+                        user_id=user_id,
+                        profile_id=profile_id,
+                        submission_id=submission_id,
+                        subject=subject,
                     )
                     steps = _load_steps_for_submission(
-                        user_id=user_id, submission_id=submission_id, subject=subject
+                        user_id=user_id,
+                        profile_id=profile_id,
+                        submission_id=submission_id,
+                        subject=subject,
                     )
                     if not attempts and not steps:
                         attempts, steps = _fallback_extract_from_submission(
-                            user_id=user_id, submission_id=submission_id
+                            user_id=user_id, profile_id=profile_id, submission_id=submission_id
                         )
                         log_event(
                             logger,
@@ -553,14 +616,26 @@ def main() -> int:
                 else:
                     since, until, subject = _compute_window(effective_params)
                     attempts = _load_attempts(
-                        user_id=user_id, since=since, until=until, subject=subject
+                        user_id=user_id,
+                        profile_id=profile_id,
+                        since=since,
+                        until=until,
+                        subject=subject,
                     )
                     steps = _load_steps(
-                        user_id=user_id, since=since, until=until, subject=subject
+                        user_id=user_id,
+                        profile_id=profile_id,
+                        since=since,
+                        until=until,
+                        subject=subject,
                     )
                     if not attempts and not steps:
                         attempts, steps = _fallback_extract_from_submissions(
-                            user_id=user_id, since=since, until=until, subject=subject
+                            user_id=user_id,
+                            profile_id=profile_id,
+                            since=since,
+                            until=until,
+                            subject=subject,
                         )
                         log_event(
                             logger,
@@ -571,7 +646,7 @@ def main() -> int:
                             steps=len(steps),
                         )
                     window = {"since": since, "until": until, "subject": subject}
-                exclusions = _load_exclusions(user_id=user_id)
+                exclusions = _load_exclusions(user_id=user_id, profile_id=profile_id)
                 attempts = _filter_excluded_attempts(attempts, exclusions)
                 # For steps, exclusions only apply to wrong attempts; we keep steps as-is for now (MVP).
 
@@ -586,6 +661,9 @@ def main() -> int:
 
                 # Narrative Layer
                 report_narrative = None
+                report_usage: Optional[Dict[str, Any]] = None
+                report_model: Optional[str] = None
+                report_response_id: Optional[str] = None
                 if bool(getattr(settings, "report_narrative_enabled", False)):
                     try:
                         pm = get_prompt_manager()
@@ -603,8 +681,16 @@ def main() -> int:
                             report_narrative = llm.generate_report(
                                 system_prompt=system_tmpl, user_prompt=user_prompt
                             )
+                            report_usage = llm.last_usage if isinstance(llm.last_usage, dict) else None
+                            report_response_id = llm.last_response_id
+                            report_model = str(
+                                getattr(settings, "ark_report_model", None) or llm.ark_model
+                            ) or None
                             log_event(
-                                logger, "report_narrative_generated", user_id=user_id
+                                logger,
+                                "report_narrative_generated",
+                                user_id=user_id,
+                                response_id=report_response_id,
                             )
                     except Exception as nl_err:
                         logger.error(f"Narrative generation failed: {nl_err}")
@@ -617,8 +703,57 @@ def main() -> int:
                 else:
                     log_event(logger, "report_narrative_skipped", user_id=user_id)
 
+                # WS-E: consume report coupon + report reserve (BT) once per report job.
+                if str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
+                    try:
+                        bt_cost = 0
+                        usage_payload: Optional[Dict[str, Any]] = None
+                        if isinstance(report_usage, dict):
+                            usage_payload = {
+                                "prompt_tokens": int(report_usage.get("prompt_tokens") or 0),
+                                "completion_tokens": int(report_usage.get("completion_tokens") or 0),
+                                "total_tokens": int(report_usage.get("total_tokens") or 0),
+                            }
+                            bt_cost = bt_from_usage(
+                                prompt_tokens=int(usage_payload.get("prompt_tokens") or 0),
+                                completion_tokens=int(usage_payload.get("completion_tokens") or 0),
+                            )
+                        ok, err = consume_report_coupon_and_reserve(
+                            user_id=user_id,
+                            bt_cost=int(bt_cost),
+                            idempotency_key=job_id,
+                            request_id=job_id,
+                            endpoint="/api/v1/reports",
+                            stage="report",
+                            model=report_model,
+                            usage=usage_payload,
+                        )
+                        if not ok:
+                            raise RuntimeError(str(err or "quota_charge_failed"))
+                        log_event(
+                            logger,
+                            "report_quota_charged",
+                            job_id=job_id,
+                            user_id=user_id,
+                            bt_cost=int(bt_cost),
+                            response_id=report_response_id,
+                        )
+                    except Exception as e:
+                        _mark_job_failed(job_id=job_id, error=str(e))
+                        log_event(
+                            logger,
+                            "report_quota_charge_failed",
+                            level="warning",
+                            job_id=job_id,
+                            user_id=user_id,
+                            error_type=e.__class__.__name__,
+                            error=str(e),
+                        )
+                        continue
+
                 report_id = _insert_report(
                     user_id=user_id,
+                    profile_id=profile_id,
                     report_job_id=job_id,
                     params=effective_params,
                     features=features,

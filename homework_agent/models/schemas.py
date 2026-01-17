@@ -162,7 +162,7 @@ class WrongItem(BaseModel):
     # Categorization
     knowledge_tags: List[str] = Field(
         default_factory=list,
-        description="L2/L3 knowledge points, e.g., ['Math', 'Geometry', 'Triangle']",
+        description="Knowledge points for aggregation; prefer Chinese + optional path format like '代数/整式运算/幂的运算'",
     )
     cross_subject_flag: Optional[bool] = Field(
         None, description="Flag if content seems cross-subject/mismatched"

@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from homework_agent.core.qbank import _normalize_question_number
+# Import from qbank_parser directly to avoid circular import
+from homework_agent.core.qbank_parser import _normalize_question_number
 
 
 AnswerState = str
@@ -53,6 +54,10 @@ def infer_answer_state(
 
 
 def _first_line_snippet(text: Any, *, max_len: int = 20) -> Optional[str]:
+    """
+    Back-compat helper (kept for older imports).
+    Prefer `_normalize_question_text` which does not truncate.
+    """
     if text is None:
         return None
     s = str(text).strip()
@@ -62,6 +67,26 @@ def _first_line_snippet(text: Any, *, max_len: int = 20) -> Optional[str]:
     if len(s) <= max_len:
         return s
     return s[: max_len - 1] + "…"
+
+
+def _normalize_question_text(text: Any) -> Optional[str]:
+    """
+    Normalize question text for UI:
+    - keep it plain text
+    - preserve line breaks (e.g. options list)
+    - trim and collapse excessive whitespace within each line
+    """
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s:
+        return None
+    lines = []
+    for ln in s.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        t = re.sub(r"\s+", " ", str(ln)).strip()
+        if t:
+            lines.append(t)
+    return "\n".join(lines) if lines else None
 
 
 def build_question_cards_from_questions_map(
@@ -88,7 +113,9 @@ def build_question_cards_from_questions_map(
                     student_answer=q.get("student_answer"),
                     answer_status=q.get("answer_status"),
                 ),
-                "question_content": _first_line_snippet(q.get("question_content")),
+                "question_content": _normalize_question_text(
+                    q.get("question_text") or q.get("question_content")
+                ),
                 "card_state": str(card_state),
             }
         )
@@ -131,7 +158,9 @@ def build_question_cards_from_questions_list(
                 "question_number": qn or "N/A",
                 "page_index": int(page_index),
                 "answer_state": ans_state,
-                "question_content": _first_line_snippet(q.get("question_content")),
+                "question_content": _normalize_question_text(
+                    q.get("question_text") or q.get("question_content")
+                ),
                 "card_state": str(card_state),
                 "verdict": verdict,
                 "reason": reason,

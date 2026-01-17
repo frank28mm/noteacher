@@ -19,7 +19,7 @@ import logging
 import signal
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from homework_agent.utils.logging_setup import setup_file_logging, silence_noisy_loggers
 from homework_agent.utils.settings import get_settings
@@ -52,6 +52,7 @@ from homework_agent.core.review_cards_policy import pick_review_candidates
 from homework_agent.services.autonomous_tools import ocr_question_cards
 from homework_agent.services.review_cards_queue import enqueue_review_card_job
 from homework_agent.utils.submission_store import update_submission_after_grade
+from homework_agent.services.quota_service import bt_from_usage, charge_bt_spendable
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,13 @@ def _now_job_payload(
         "page_summaries": list(page_summaries) if total_pages else None,
         "question_cards": question_cards if question_cards is not None else None,
     }
+    # Convenience: surface submission_id/upload_id at top-level for clients (Result/AI Tutor).
+    try:
+        sid = str((req_obj or {}).get("upload_id") or "").strip()
+        if sid:
+            payload["submission_id"] = sid
+    except Exception:
+        pass
     if started is not None:
         try:
             payload["elapsed_ms"] = int((time.monotonic() - started) * 1000)
@@ -208,6 +216,51 @@ def _concat_vision_raw_text_pages(pages: List[Tuple[int, str]]) -> str:
             continue
         parts.append(f"### Page {idx+1}\n{t}")
     return "\n\n".join(parts).strip()
+
+
+def _maybe_bill_grade_job(
+    *,
+    user_id: str,
+    request_id: Optional[str],
+    session_id: str,
+    idempotency_key: Optional[str],
+    prompt_tokens: int,
+    completion_tokens: int,
+    model: Optional[str],
+) -> None:
+    settings = get_settings()
+    if str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() == "dev":
+        return
+    bt_cost = bt_from_usage(
+        prompt_tokens=int(prompt_tokens or 0),
+        completion_tokens=int(completion_tokens or 0),
+    )
+    ok, err = charge_bt_spendable(
+        user_id=str(user_id),
+        bt_cost=int(bt_cost),
+        idempotency_key=str(idempotency_key or "").strip() or None,
+        request_id=str(request_id or "").strip() or None,
+        endpoint="/api/v1/grade",
+        stage="grade",
+        model=str(model or "").strip() or None,
+        usage={
+            "prompt_tokens": int(prompt_tokens or 0),
+            "completion_tokens": int(completion_tokens or 0),
+            "total_tokens": int(prompt_tokens or 0) + int(completion_tokens or 0),
+        },
+    )
+    if not ok:
+        log_event(
+            logger,
+            "quota_charge_failed",
+            level="warning",
+            request_id=request_id,
+            session_id=session_id,
+            user_id=str(user_id),
+            endpoint="/api/v1/grade",
+            stage="grade",
+            error=str(err or ""),
+        )
 
 
 def main() -> int:
@@ -260,6 +313,11 @@ def main() -> int:
                 if isinstance(payload, dict)
                 else None
             )
+            idempotency_key = (
+                str(payload.get("idempotency_key") or "").strip()
+                if isinstance(payload, dict)
+                else ""
+            ) or None
             grade_image_input_variant = (
                 str(grade_image_input_variant).strip().lower()
                 if grade_image_input_variant is not None
@@ -349,6 +407,8 @@ def main() -> int:
                     collisions: List[Dict[str, Any]] = []
                     cards_by_id: Dict[str, Dict[str, Any]] = {}
                     total_blank_count = 0
+                    total_prompt_tokens = 0
+                    total_completion_tokens = 0
 
                     agg_bank: Dict[str, Any] = {
                         "session_id": str(req.session_id or job.session_id or ""),
@@ -622,6 +682,18 @@ def main() -> int:
                                 and isinstance(bank_now.get("meta"), dict)
                             ):
                                 meta_now = dict(bank_now.get("meta") or {})
+                            usage_now = (
+                                meta_now.get("llm_usage")
+                                if isinstance(meta_now, dict)
+                                else None
+                            )
+                            if isinstance(usage_now, dict):
+                                total_prompt_tokens += int(
+                                    usage_now.get("prompt_tokens") or 0
+                                )
+                                total_completion_tokens += int(
+                                    usage_now.get("completion_tokens") or 0
+                                )
                             meta = (
                                 agg_bank.get("meta")
                                 if isinstance(agg_bank.get("meta"), dict)
@@ -721,6 +793,61 @@ def main() -> int:
                             total_pages=int(total_pages),
                             page_elapsed_ms=int(page_elapsed_ms),
                         )
+
+                    # Normalize `questions[*].question_content` to the OCR-grounded "full text"
+                    # (stem + options) so UI can consistently show full stems and clamp in the frontend.
+                    try:
+                        from homework_agent.core.qbank_parser import (
+                            _normalize_question_number as _norm_qn,
+                        )
+
+                        qmap = (
+                            agg_bank.get("questions")
+                            if isinstance(agg_bank.get("questions"), dict)
+                            else {}
+                        )
+
+                        def _looks_like_placeholder(s: str) -> bool:
+                            t = (s or "").strip()
+                            if not t:
+                                return True
+                            return t.startswith("（批改未完成") or t.startswith("（未提取到")
+
+                        for q in agg_questions:
+                            if not isinstance(q, dict):
+                                continue
+                            qn_raw = q.get("question_number") or q.get("question_index")
+                            qn = str(qn_raw or "").strip()
+                            qn_key = _norm_qn(qn) or qn
+                            src = qmap.get(qn_key) or qmap.get(qn)
+                            if not isinstance(src, dict):
+                                continue
+                            full = src.get("question_text") or src.get("question_content")
+                            full_s = str(full or "").strip()
+                            if full_s and not _looks_like_placeholder(full_s):
+                                q["question_content"] = full_s
+                            # Prefer OCR/parsed options if missing (helps UI reconstruct full text).
+                            if q.get("options") is None and src.get("options") is not None:
+                                q["options"] = src.get("options")
+
+                        # Keep job.question_cards aligned with the same full text (ResultSummary may render from /jobs/{job_id}).
+                        for _item_id, c in list((cards_by_id or {}).items()):
+                            if not isinstance(c, dict):
+                                continue
+                            qn = str(c.get("question_number") or "").strip()
+                            if not qn:
+                                continue
+                            qn_key = _norm_qn(qn) or qn
+                            src = qmap.get(qn_key) or qmap.get(qn)
+                            if not isinstance(src, dict):
+                                continue
+                            full = src.get("question_text") or src.get("question_content")
+                            full_s = str(full or "").strip()
+                            if full_s and not _looks_like_placeholder(full_s):
+                                c["question_content"] = full_s
+                                cards_by_id[str(c.get("item_id") or _item_id)] = c
+                    except Exception:
+                        pass
 
                     grade_result_dict: Dict[str, Any] = {
                         "wrong_items": agg_wrong_items,
@@ -861,6 +988,23 @@ def main() -> int:
                         job_id=job.job_id,
                         elapsed_ms=int((time.monotonic() - started) * 1000),
                     )
+                    try:
+                        bank_now = get_question_bank(job.session_id) if job.session_id else None
+                        meta_now = (
+                            (bank_now or {}).get("meta") if isinstance(bank_now, dict) else None
+                        )
+                        meta_now = meta_now if isinstance(meta_now, dict) else {}
+                        _maybe_bill_grade_job(
+                            user_id=str(job.user_id),
+                            request_id=job.request_id,
+                            session_id=str(job.session_id),
+                            idempotency_key=idempotency_key or job.job_id,
+                            prompt_tokens=int(total_prompt_tokens),
+                            completion_tokens=int(total_completion_tokens),
+                            model=str(meta_now.get("llm_model") or "") or None,
+                        )
+                    except Exception:
+                        pass
                     continue
 
                 # Single-page: keep existing behavior.
@@ -1001,6 +1145,25 @@ def main() -> int:
                     result_dict["wrong_items"] = wrong_items_filtered
                     result_dict["wrong_count"] = int(len(wrong_items_filtered))
                     result_dict["blank_count"] = int(blank_n)
+                try:
+                    bank_now = get_question_bank(job.session_id) if job.session_id else None
+                    meta_now = (
+                        (bank_now or {}).get("meta") if isinstance(bank_now, dict) else None
+                    )
+                    meta_now = meta_now if isinstance(meta_now, dict) else {}
+                    usage_now = meta_now.get("llm_usage") if isinstance(meta_now, dict) else None
+                    if isinstance(usage_now, dict):
+                        _maybe_bill_grade_job(
+                            user_id=str(job.user_id),
+                            request_id=job.request_id,
+                            session_id=str(job.session_id),
+                            idempotency_key=idempotency_key or job.job_id,
+                            prompt_tokens=int(usage_now.get("prompt_tokens") or 0),
+                            completion_tokens=int(usage_now.get("completion_tokens") or 0),
+                            model=str(meta_now.get("llm_model") or "") or None,
+                        )
+                except Exception:
+                    pass
                 set_job_status(
                     job.job_id,
                     _now_job_payload(

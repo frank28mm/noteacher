@@ -130,6 +130,7 @@ def enqueue_grade_job(
     user_id: str,
     ttl_seconds: int,
     grade_image_input_variant: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> bool:
     """
     Enqueue a grade job. Returns True if queued, False if Redis is unavailable.
@@ -159,6 +160,7 @@ def enqueue_grade_job(
             "provider": str(provider or "").strip(),
             "grade_image_input_variant": str(grade_image_input_variant or "").strip()
             or None,
+            "idempotency_key": str(idempotency_key or "").strip() or None,
         },
         ttl_seconds=ttl_seconds,
     )

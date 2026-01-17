@@ -8,6 +8,7 @@ from fastapi import APIRouter, File, Header, HTTPException, UploadFile, status, 
 
 from homework_agent.utils.supabase_client import get_storage_client
 from homework_agent.utils.observability import get_request_id_from_headers, log_event
+from homework_agent.utils.profile_context import require_profile_id
 from homework_agent.utils.user_context import require_user_id
 from homework_agent.utils.submission_store import create_submission_on_upload
 
@@ -24,6 +25,7 @@ async def upload_files(
     file: List[UploadFile] = File(...),
     session_id: Optional[str] = None,
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    x_profile_id: Optional[str] = Header(None, alias="X-Profile-Id"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ) -> Dict[str, Any]:
     """
@@ -35,6 +37,7 @@ async def upload_files(
     - Returns public URLs (bucket may be public during development).
     """
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
     request_id = getattr(
         getattr(request, "state", None), "request_id", None
     ) or get_request_id_from_headers(request.headers)
@@ -142,6 +145,7 @@ async def upload_files(
         create_submission_on_upload(
             submission_id=upload_id,
             user_id=user_id,
+            profile_id=profile_id,
             session_id=session_id,
             request_id=request_id,
             page_image_urls=urls,

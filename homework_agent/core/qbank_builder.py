@@ -4,7 +4,11 @@ import re
 from typing import Any, Dict, List, Optional
 
 from homework_agent.core.slice_policy import analyze_visual_risk
-from homework_agent.core.qbank_parser import build_question_bank_from_vision_raw_text
+from homework_agent.core.qbank_parser import (
+    build_question_bank_from_vision_raw_text,
+    _normalize_question_number,
+)
+from homework_agent.core.question_cards import infer_answer_state
 from homework_agent.models.schemas import GeometryInfo, Severity, Subject
 
 
@@ -27,6 +31,64 @@ def _coerce_question_type(v: Any) -> str:
 def _coerce_difficulty(v: Any) -> str:
     s = str(v or "").strip()
     return s or "unknown"
+
+
+def _compose_question_text_full(q: Dict[str, Any]) -> Optional[str]:
+    """
+    Build a plain-text "full question text" for UI display.
+
+    - Prefer OCR-grounded `question_content` as the stem.
+    - If multiple-choice options exist, append them as `A. ...` lines.
+    - Returns None if nothing usable.
+    """
+    if not isinstance(q, dict):
+        return None
+    stem = str(q.get("question_content") or "").strip()
+
+    options = q.get("options")
+    opt_lines: List[str] = []
+    if isinstance(options, dict):
+        # Keep stable ordering where possible.
+        for key in ("A", "B", "C", "D", "E", "F"):
+            val = options.get(key)
+            if val is None:
+                continue
+            s = str(val).strip()
+            if s:
+                opt_lines.append(f"{key}. {s}")
+        # Append any remaining keys (rare).
+        for key, val in options.items():
+            if str(key).strip() in {"A", "B", "C", "D", "E", "F"}:
+                continue
+            k = str(key).strip()
+            s = str(val).strip()
+            if k and s:
+                opt_lines.append(f"{k}. {s}")
+    elif isinstance(options, list):
+        # Best-effort: support formats like [{label:'A', text:'...'}].
+        for item in options:
+            if not isinstance(item, dict):
+                continue
+            k = str(item.get("label") or item.get("key") or "").strip()
+            s = str(item.get("text") or item.get("value") or "").strip()
+            if k and s:
+                opt_lines.append(f"{k}. {s}")
+
+    # Avoid duplicating options if stem already contains A./B. etc.
+    if opt_lines and stem and (
+        re.search(r"(^|\n)\s*A[\.\、:：]\s*", stem)
+        or "(A)" in stem
+        or "（A）" in stem
+    ):
+        opt_lines = []
+
+    full = stem
+    if opt_lines:
+        full = f"{stem}\n" if stem else ""
+        full += "\n".join(opt_lines)
+
+    full = full.strip()
+    return full or None
 
 
 def _normalize_question_identifiers(
@@ -59,7 +121,9 @@ def sanitize_wrong_items(wrong_items: List[Dict[str, Any]]) -> List[Dict[str, An
     for item in wrong_items or []:
         copy_item = dict(item)
         # Normalize question_number to string for schema compatibility
-        qn = _normalize_question_number(
+        # Import locally to avoid circular import
+        from homework_agent.core.qbank_parser import _normalize_question_number as _norm
+        qn = _norm(
             copy_item.get("question_number")
             or copy_item.get("question_index")
             or copy_item.get("id")
@@ -95,7 +159,7 @@ def sanitize_wrong_items(wrong_items: List[Dict[str, Any]]) -> List[Dict[str, An
     return cleaned
 
 
-def _normalize_question_number(value: Any) -> Optional[str]:
+def _normalize_qbank_number(value: Any) -> Optional[str]:
     # Import from parser module to keep it as the single source of truth.
     from homework_agent.core.qbank_parser import _normalize_question_number as _norm
 
@@ -133,22 +197,51 @@ def _generate_question_aliases(qn: str) -> List[str]:
 
 
 def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Normalize question entries for storage (ensure strings and safe defaults)."""
+    """Normalize question entries for storage (ensure strings and safe defaults).
+
+    Also enforces policy: blank answers are marked as incorrect.
+    """
     normalized: List[Dict[str, Any]] = []
     max_steps = _max_math_steps_per_question()
     for q in questions or []:
         if not isinstance(q, dict):
             continue
         copy_q = dict(q)
-        qn = _normalize_question_number(copy_q.get("question_number"))
+        # Use local import to avoid circular import
+        from homework_agent.core.qbank_parser import _normalize_question_number as _norm
+        qn = _norm(copy_q.get("question_number"))
         if qn is not None:
             copy_q["question_number"] = qn
-        # normalize verdict
+
+        # Infer answer_state FIRST (before verdict logic)
+        answer_status = copy_q.get("answer_status")
+        student_answer = copy_q.get("student_answer")
+        inferred = infer_answer_state(student_answer=student_answer, answer_status=answer_status)
+        copy_q["answer_state"] = inferred
+
+        # normalize verdict - mark blank answers as incorrect
         verdict = copy_q.get("verdict")
         if isinstance(verdict, str):
             v = verdict.strip().lower()
             if v in {"correct", "incorrect", "uncertain"}:
-                copy_q["verdict"] = v
+                # If answer is blank, override verdict to incorrect
+                if inferred == "blank":
+                    copy_q["verdict"] = "incorrect"
+                else:
+                    copy_q["verdict"] = v
+            else:
+                # Default fallback - if blank, mark as incorrect
+                if inferred == "blank":
+                    copy_q["verdict"] = "incorrect"
+                else:
+                    copy_q["verdict"] = v if v else "uncertain"
+        else:
+            # No verdict provided - if blank, mark as incorrect
+            if inferred == "blank":
+                copy_q["verdict"] = "incorrect"
+            else:
+                copy_q["verdict"] = "uncertain"
+
         # normalize warnings
         w = copy_q.get("warnings")
         if w is None:
@@ -307,6 +400,8 @@ def build_question_bank(
     for qn, q in list(by_qn.items()):
         if not isinstance(q, dict):
             continue
+        # Derived UI-friendly full text (stem + options). Keep `question_content` as the routing/stem field.
+        q["question_text"] = _compose_question_text_full(q)
         vr, reasons = analyze_visual_risk(
             subject=subject,
             question_content=q.get("question_content"),
@@ -348,6 +443,9 @@ def derive_wrong_items_from_questions(
     Derive WrongItem-shaped dicts from questions[*] entries.
     Provides a robust fallback when the model fails to emit valid `wrong_items`.
     """
+    # Import locally to avoid circular import
+    from homework_agent.core.qbank_parser import _normalize_question_number as _norm
+
     derived: List[Dict[str, Any]] = []
     for q in questions or []:
         if not isinstance(q, dict):
@@ -356,7 +454,7 @@ def derive_wrong_items_from_questions(
         if verdict not in {"incorrect", "uncertain"}:
             continue
 
-        qn = _normalize_question_number(q.get("question_number"))
+        qn = _norm(q.get("question_number"))
         reason = q.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             reason = "判定为错误/不确定（原因未提供）"

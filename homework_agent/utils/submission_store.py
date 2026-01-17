@@ -28,6 +28,7 @@ def create_submission_on_upload(
     *,
     submission_id: str,
     user_id: str,
+    profile_id: Optional[str] = None,
     session_id: Optional[str],
     request_id: Optional[str] = None,
     page_image_urls: List[str],
@@ -46,6 +47,7 @@ def create_submission_on_upload(
         record: Dict[str, Any] = {
             "submission_id": str(submission_id),
             "user_id": str(user_id),
+            "profile_id": (str(profile_id).strip() if profile_id else None),
             "session_id": str(session_id) if session_id else None,
             "page_image_urls": [
                 str(u).strip() for u in (page_image_urls or []) if str(u).strip()
@@ -97,6 +99,7 @@ def create_submission_on_upload(
 def touch_submission(
     *,
     user_id: str,
+    profile_id: Optional[str] = None,
     submission_id: Optional[str] = None,
     session_id: Optional[str] = None,
 ) -> None:
@@ -115,6 +118,8 @@ def touch_submission(
         if sess:
             q = q.eq("session_id", sess)
         q = q.eq("user_id", str(user_id))
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
         q.execute()
     except Exception:
         return
@@ -123,6 +128,7 @@ def touch_submission(
 def resolve_page_image_urls(
     *,
     user_id: str,
+    profile_id: Optional[str] = None,
     submission_id: str,
     prefer_proxy: bool = True,
 ) -> List[str]:
@@ -130,14 +136,15 @@ def resolve_page_image_urls(
     if not user_id or not submission_id:
         return []
     try:
-        resp = (
+        q = (
             _safe_table("submissions")
             .select("page_image_urls,proxy_page_image_urls")
             .eq("submission_id", str(submission_id))
             .eq("user_id", str(user_id))
-            .limit(1)
-            .execute()
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
+        resp = q.limit(1).execute()
         rows = getattr(resp, "data", None)
         if not isinstance(rows, list) or not rows:
             return []
@@ -166,7 +173,7 @@ def resolve_submission_for_session(session_id: str) -> Optional[Dict[str, str]]:
     try:
         resp = (
             _safe_table("submissions")
-            .select("submission_id,user_id")
+            .select("submission_id,user_id,profile_id")
             .eq("session_id", sess)
             .limit(1)
             .execute()
@@ -177,9 +184,13 @@ def resolve_submission_for_session(session_id: str) -> Optional[Dict[str, str]]:
         row = rows[0] if isinstance(rows[0], dict) else {}
         sid = str(row.get("submission_id") or "").strip()
         uid = str(row.get("user_id") or "").strip()
+        pid = str(row.get("profile_id") or "").strip()
         if not sid or not uid:
             return None
-        return {"submission_id": sid, "user_id": uid}
+        out = {"submission_id": sid, "user_id": uid}
+        if pid:
+            out["profile_id"] = pid
+        return out
     except Exception:
         return None
 
@@ -189,6 +200,7 @@ def update_submission_after_grade(
     user_id: str,
     submission_id: str,
     session_id: str,
+    profile_id: Optional[str] = None,
     request_id: Optional[str] = None,
     subject: Optional[str],
     page_image_urls: Optional[List[str]],
@@ -211,6 +223,8 @@ def update_submission_after_grade(
             "warnings": warnings or [],
             "last_active_at": _iso(now),
         }
+        if profile_id:
+            payload["profile_id"] = str(profile_id)
         if page_image_urls is not None:
             payload["page_image_urls"] = [
                 str(u).strip() for u in (page_image_urls or []) if str(u).strip()
@@ -256,6 +270,7 @@ def update_submission_after_grade(
 def persist_qindex_slices(
     *,
     user_id: str,
+    profile_id: Optional[str] = None,
     submission_id: str,
     session_id: str,
     qindex: Dict[str, Any],
@@ -288,6 +303,7 @@ def persist_qindex_slices(
             rows.append(
                 {
                     "user_id": str(user_id),
+                    "profile_id": (str(profile_id).strip() if profile_id else None),
                     "submission_id": str(submission_id),
                     "session_id": str(session_id),
                     "question_number": qn_s,
@@ -328,6 +344,7 @@ def persist_qindex_slices(
 def load_qindex_image_refs(
     *,
     user_id: str,
+    profile_id: Optional[str] = None,
     session_id: str,
     question_number: str,
 ) -> Optional[Dict[str, Any]]:
@@ -335,15 +352,16 @@ def load_qindex_image_refs(
     if not user_id or not session_id or not question_number:
         return None
     try:
-        resp = (
+        q = (
             _safe_table("qindex_slices")
             .select("image_refs,expires_at")
             .eq("user_id", str(user_id))
             .eq("session_id", str(session_id))
             .eq("question_number", str(question_number))
-            .limit(1)
-            .execute()
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
+        resp = q.limit(1).execute()
         rows = getattr(resp, "data", None)
         if not isinstance(rows, list) or not rows:
             return None

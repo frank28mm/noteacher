@@ -6,6 +6,7 @@ import httpx
 from fastapi import HTTPException, status
 
 from homework_agent.utils.settings import get_settings
+from homework_agent.utils.jwt_utils import verify_access_token
 
 
 def get_user_id(x_user_id: Optional[str]) -> str:
@@ -69,11 +70,25 @@ def require_user_id(
     *, authorization: Optional[str], x_user_id: Optional[str] = None
 ) -> str:
     """
-    Phase A (backend-first auth): if Authorization Bearer token exists, verify it via Supabase and
-    return the authenticated user_id; otherwise fall back to dev user id (unless AUTH_REQUIRED=1).
+    User identity:
+    - If Authorization Bearer token exists:
+      - AUTH_MODE=local: verify locally-issued JWT (phone login)
+      - AUTH_MODE=supabase: verify Supabase Auth JWT via /auth/v1/user endpoint
+    - Otherwise fall back to dev user id (unless AUTH_REQUIRED=1).
     """
     token = _extract_bearer_token(authorization)
     if token:
+        settings = get_settings()
+        mode = str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower()
+        if mode == "local":
+            decoded = verify_access_token(token)
+            uid = str(decoded.get("sub") or "").strip()
+            if uid:
+                return uid
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid auth token"
+            )
+        # Default: keep compatibility with existing Supabase Auth flow.
         uid = _verify_supabase_jwt(token)
         if uid:
             return uid
@@ -88,4 +103,5 @@ def require_user_id(
             detail="missing Authorization bearer token",
         )
 
+    # Dev mode fallback is only allowed when AUTH_REQUIRED=0.
     return get_user_id(x_user_id)

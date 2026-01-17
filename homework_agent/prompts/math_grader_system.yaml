@@ -33,6 +33,17 @@ template: |
   - math_steps: array (仅 incorrect/uncertain，最多 1 条首错步骤)
   </question_fields>
 
+  <knowledge_tag_rules>
+  knowledge_tags 用于“薄弱知识点/趋势图/错因统计”的聚合展示。请遵守以下规则（软约束，不是固定词表，不需要强行匹配某个列表）：
+  - 语言：中文为主，禁止输出学科泛标签/英文泛标签（如 "Math", "Geometry", "Algebra"）。
+  - 格式（推荐）：层级路径 `一级域/二级主题/三级知识点[/四级子点]`，分隔符统一用 "/"。
+    - 示例：`代数/整式运算/幂的运算`、`几何/平行线/平行线判定`、`函数/一次函数/图像与性质`
+  - 颗粒度：优先输出能解释“对错原因”的叶子知识点；如果信息不足则收敛到父级（不要编造过细标签）。
+  - 数量：每题 1 个主标签，最多 2 个辅标签（总数建议 1-3）。
+  - 同义词统一：避免同义词并存导致统计稀释；例如“幂运算/指数运算”在表达指数律/幂的性质时统一为 `代数/整式运算/幂的运算`。
+  - 方法类标签（可选）：如 `方法/配方法`、`方法/代入消元` 仅在其对错误解释力强时使用，且不要取代主知识点。
+  </knowledge_tag_rules>
+
   <judgment_basis_rules>
   judgment_basis 必须填写，用于向用户解释"你是如何判断的"：
   - 【必须标注来源】第一条写清依据来源：仅从 OCR 文本推断 / OCR+图形视觉事实 / 图形视觉事实
@@ -71,10 +82,10 @@ template: |
   {
     "summary": "发现1处错误：题9推理依据错误",
     "questions": [
-      {"question_number": "9", "verdict": "incorrect", "question_content": "说明AD∥BC", "student_answer": "同位角相等，两直线平行", "reason": "应使用内错角相等，而非同位角", "judgment_basis": ["依据来源：OCR+图形视觉事实", "DC 为截线，AD、BC 为被截线", "∠2 在 D 点截线左侧，∠BCD 在 C 点截线右侧", "因为两角在截线两侧且都在被截线之间，所以符合内错角定义", "学生用同位角判定，但同位角需在截线同侧，不符合"], "warnings": [], "knowledge_tags": ["Math","Geometry"], "math_steps": [{"index":3,"verdict":"incorrect","expected":"内错角相等","observed":"同位角相等","hint":"区分内错角和同位角的位置关系","severity":"concept"}]},
-      {"question_number": "10", "verdict": "correct", "question_content": "DF与AE平行吗", "student_answer": "内错角相等，两直线平行", "reason": "推理正确", "judgment_basis": ["CD⊥AD 得∠CDA=90°，DA⊥AB 得∠DAB=90°", "∠1=∠2，等式两边各减相等的角", "∠FDA=∠DAE为内错角相等", "DF∥AE判定正确"], "warnings": [], "knowledge_tags": ["Math","Geometry"], "math_steps": []}
+      {"question_number": "9", "verdict": "incorrect", "question_content": "说明 $AD \\parallel BC$", "student_answer": "同位角相等，两直线平行", "reason": "应使用内错角相等判定平行，而非同位角", "judgment_basis": ["依据来源：OCR+图形视觉事实", "DC 为截线，AD、BC 为被截线", "因为两角在截线两侧且都在被截线之间，所以符合内错角定义", "学生把内错角误当同位角，判定条件不成立"], "warnings": [], "knowledge_tags": ["几何/平行线/平行线判定"], "math_steps": [{"index":3,"verdict":"incorrect","expected":"内错角相等","observed":"同位角相等","hint":"区分内错角与同位角的相对位置","severity":"concept"}]},
+      {"question_number": "10", "verdict": "correct", "question_content": "判断 $DF$ 与 $AE$ 是否平行", "student_answer": "内错角相等，两直线平行", "reason": "判定依据正确", "judgment_basis": ["依据来源：OCR+图形视觉事实", "根据垂直关系得 $\\angle CDA=90^\\circ, \\angle DAB=90^\\circ$", "由等量角变形得到内错角相等", "因此 $DF \\parallel AE$"], "warnings": [], "knowledge_tags": ["几何/平行线/平行线判定"], "math_steps": []}
     ],
-    "wrong_items": [{"question_number": "9", "reason": "推理依据错误", "judgment_basis": ["依据来源：OCR+图形视觉事实", "DC 为截线，AD、BC 为被截线", "∠2 和 ∠BCD 符合内错角定义", "学生用同位角判定，但同位角需在截线同侧"], "knowledge_tags": ["Math","Geometry"], "math_steps": []}],
+    "wrong_items": [{"question_number": "9", "reason": "推理依据错误", "judgment_basis": ["依据来源：OCR+图形视觉事实", "DC 为截线，AD、BC 为被截线", "两角符合内错角位置关系", "学生误用同位角判定"], "knowledge_tags": ["几何/平行线/平行线判定"], "math_steps": []}],
     "total_items": 4, "wrong_count": 1, "cross_subject_flag": false, "warnings": []
   }
   </output_example>

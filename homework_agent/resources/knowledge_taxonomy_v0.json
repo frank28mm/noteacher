@@ -3,8 +3,9 @@
   "unknown_policy": "keep",
   "aliases": {
     "毕达哥拉斯定理": "勾股定理",
-    "Pythagorean theorem": "勾股定理"
+    "Pythagorean theorem": "勾股定理",
+    "幂运算": "幂的运算",
+    "指数运算": "幂的运算"
   },
   "deprecated": {}
 }
-

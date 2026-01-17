@@ -168,6 +168,28 @@ def delete_session(session_id: str) -> None:
     cache_store.delete(f"sess:{session_id}")
 
 
+def get_question_history(session_data: Dict[str, Any], question_number: str) -> List[Dict[str, Any]]:
+    """Get chat history for a specific question."""
+    if not isinstance(session_data, dict):
+        return []
+    q_hist = session_data.get("question_histories")
+    if not isinstance(q_hist, dict):
+        return []
+    hist = q_hist.get(str(question_number))
+    if isinstance(hist, list):
+        return hist
+    return []
+
+
+def save_question_history(session_data: Dict[str, Any], question_number: str, history: List[Dict[str, Any]]) -> None:
+    """Save chat history for a specific question."""
+    if not isinstance(session_data, dict):
+        session_data = {}
+    if "question_histories" not in session_data or not isinstance(session_data["question_histories"], dict):
+        session_data["question_histories"] = {}
+    session_data["question_histories"][str(question_number)] = history
+
+
 def save_mistakes(session_id: str, wrong_items: List[Dict[str, Any]]) -> None:
     """缓存错题列表供辅导上下文使用，仅限当前批次，会话 TTL 同步。"""
     # 为每个 wrong_item 补充本地索引与稳定 item_id，便于后续检索

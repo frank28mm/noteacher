@@ -4,6 +4,7 @@
 
 - `docs/reports/a4_w2_burst20_p3_empty.md`（空队列起步，burst=20，3页/次）
 - `docs/reports/a4_w2_preload4_burst10_p3_backlog.md`（模拟小积压，preload=4 + burst=10，3页/次）
+- `docs/reports/a4_worker_sensitivity_w1_w4_summary_20260105.md`（补齐 A‑4.2：worker=1 vs worker=4 并发敏感性）
 
 ## 1) 我们真正想验证的是什么
 
@@ -73,6 +74,6 @@
 
 ### 仍需补（你已允许“回头再做”的部分）
 
-- worker 并发敏感性：按你的要求 **对比 worker=1 vs worker=4**（建议 burst=10、3页/次即可看趋势），用于指导“最低并发/扩容阈值”。
+- worker 并发敏感性：已完成 **worker=1 vs worker=4**（burst=10、3页/次），用于指导“最低并发/扩容阈值”。证据见：
+  - `docs/reports/a4_worker_sensitivity_w1_w4_summary_20260105.md`
 - 生产存储复测：切到 Ark/国内对象存储后，再跑一次同口径（更贴近生产）。
-

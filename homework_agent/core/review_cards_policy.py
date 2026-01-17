@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 
 from homework_agent.core.qbank import _normalize_question_number
 from homework_agent.core.slice_policy import analyze_visual_risk
@@ -130,4 +130,3 @@ def pick_review_candidates(
 
     scored.sort(key=lambda x: (x.priority, len(x.question_number), x.question_number))
     return scored[:max_per_page]
-

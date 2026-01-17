@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 
 from homework_agent.utils.supabase_client import get_storage_client
 from homework_agent.utils.user_context import require_user_id
+from homework_agent.utils.profile_context import require_profile_id
+from homework_agent.utils.settings import get_settings
+from homework_agent.services.quota_service import can_use_report_coupon
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +128,17 @@ def create_report_job(
     *,
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
 ):
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
+    settings = get_settings()
+    if str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
+        if not can_use_report_coupon(user_id=user_id):
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail="quota_insufficient",
+            )
     now = _utc_now()
     params: Dict[str, Any] = {}
     submission_id = str(req.submission_id or "").strip()
@@ -148,7 +160,7 @@ def create_report_job(
     try:
         resp = (
             _safe_table("report_jobs")
-            .insert({"user_id": user_id, "params": params})
+            .insert({"user_id": user_id, "profile_id": profile_id, "params": params})
             .execute()
         )
         rows = getattr(resp, "data", None)
@@ -170,17 +182,20 @@ def get_report_job(
     *,
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
 ):
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
     try:
-        resp = (
+        q = (
             _safe_table("report_jobs")
             .select("*")
             .eq("id", str(job_id))
             .eq("user_id", str(user_id))
-            .limit(1)
-            .execute()
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
+        resp = q.limit(1).execute()
         rows = getattr(resp, "data", None)
         if not isinstance(rows, list) or not rows:
             raise HTTPException(
@@ -202,6 +217,7 @@ def get_report_eligibility(
     *,
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
     subject: Optional[str] = Query(default=None, min_length=1),
     mode: str = Query(default="demo"),
     min_submissions: Optional[int] = Query(default=None, ge=1, le=50),
@@ -217,6 +233,7 @@ def get_report_eligibility(
     - `mode=periodic` defaults to: required_count=3, required_days=3 (same-subject)
     """
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
     mode_norm = str(mode or "").strip().lower() or "demo"
     if mode_norm not in {"demo", "periodic"}:
         raise HTTPException(
@@ -241,9 +258,10 @@ def get_report_eligibility(
             .select("submission_id,created_at,subject")
             .eq("user_id", str(user_id))
             .gte("created_at", since.isoformat())
-            .order("created_at", desc=True)
-            .limit(500)
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
+        q = q.order("created_at", desc=True).limit(500)
         if subject:
             q = q.eq("subject", str(subject).strip())
         resp = q.execute()
@@ -272,18 +290,21 @@ def get_report(
     *,
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
 ):
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
     try:
-        resp = (
+        q = (
             _safe_table("reports")
             .select("*")
             # DB schema uses `reports.id` (uuid). Keep route param name `report_id` for compatibility.
             .eq("id", str(report_id))
             .eq("user_id", str(user_id))
-            .limit(1)
-            .execute()
         )
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
+        resp = q.limit(1).execute()
         rows = getattr(resp, "data", None)
         if not isinstance(rows, list) or not rows:
             raise HTTPException(
@@ -305,18 +326,16 @@ def list_reports(
     *,
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
     limit: int = Query(default=20, ge=1, le=50),
 ):
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
     try:
-        resp = (
-            _safe_table("reports")
-            .select("*")
-            .eq("user_id", str(user_id))
-            .order("created_at", desc=True)
-            .limit(int(limit))
-            .execute()
-        )
+        q = _safe_table("reports").select("*").eq("user_id", str(user_id))
+        if profile_id:
+            q = q.eq("profile_id", str(profile_id))
+        resp = q.order("created_at", desc=True).limit(int(limit)).execute()
         rows = getattr(resp, "data", None)
         return {"items": rows if isinstance(rows, list) else []}
     except Exception as e:

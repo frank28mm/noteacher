@@ -39,6 +39,17 @@ template: |
   - keywords_used: array
   </question_fields>
 
+  <knowledge_tag_rules>
+  knowledge_tags 用于“薄弱知识点/趋势图/历史记录筛选”等聚合展示。请遵守以下规则（软约束，不是固定词表，不需要强行匹配某个列表）：
+  - 语言：中文为主，禁止输出学科英文泛标签（如 "English", "Translation"）。
+  - 格式（推荐）：层级路径 `一级域/二级主题/三级知识点[/四级子点]`，分隔符统一用 "/"。
+    - 示例：`英语/词汇/固定搭配`、`英语/语法/非谓语动词`、`英语/翻译/动词短语`
+  - 颗粒度：优先输出能解释“对错原因”的叶子知识点；信息不足则收敛到父级（不要编造过细标签）。
+  - 数量：每题 1 个主标签，最多 2 个辅标签（总数建议 1-3）。
+  - 同义词统一：避免同义词并存导致统计稀释；例如“固定搭配/习惯用语”应尽量选用一个统一表达。
+  - 禁止泛学科标签：如 `英语`（只有一级、过泛）不用于 knowledge_tags（学科请用 subject 字段表达）。
+  </knowledge_tag_rules>
+
   <judgment_basis_rules>
   judgment_basis 必须填写，用于解释"你是如何判断的"：
   - 【必须标注来源】第一条写清依据来源：仅从 OCR 文本推断 / OCR+图形视觉事实 / 图形视觉事实
@@ -62,8 +73,8 @@ template: |
   <output_example>
   {
     "summary": "翻译偏差：动词使用错误",
-    "questions": [{"question_number": "1", "verdict": "incorrect", "question_content": "翻译：He plays football every day", "student_answer": "他每天玩足球", "reason": "动词 play 在此语境应译为'踢'", "judgment_basis": ["依据来源：OCR 文本", "play football 固定搭配应译为'踢足球'", "学生译为'玩足球'不符合中文习惯"], "warnings": [], "knowledge_tags": ["English","Translation"], "semantic_score": 0.62, "similarity_mode": "strict", "keywords_used": ["play","football"]}],
-    "wrong_items": [{"question_number": "1", "reason": "动词含义偏离原句", "judgment_basis": ["依据来源：OCR 文本", "play football 应译为'踢足球'", "'玩足球'不符合中文表达"], "knowledge_tags": ["English","Translation"], "semantic_score": 0.62, "similarity_mode": "strict", "keywords_used": ["play","football"]}],
+    "questions": [{"question_number": "1", "verdict": "incorrect", "question_content": "翻译：He plays football every day", "student_answer": "他每天玩足球", "reason": "固定搭配翻译错误", "judgment_basis": ["依据来源：OCR 文本", "play football 为固定搭配，应译为“踢足球”", "学生译为“玩足球”不符合中文表达习惯"], "warnings": [], "knowledge_tags": ["英语/词汇/固定搭配"], "semantic_score": 0.62, "similarity_mode": "strict", "keywords_used": ["play","football"]}],
+    "wrong_items": [{"question_number": "1", "reason": "固定搭配翻译错误", "judgment_basis": ["依据来源：OCR 文本", "play football 应译为“踢足球”", "学生译为“玩足球”导致语义偏离"], "knowledge_tags": ["英语/词汇/固定搭配"], "semantic_score": 0.62, "similarity_mode": "strict", "keywords_used": ["play","football"]}],
     "total_items": 3, "wrong_count": 1, "cross_subject_flag": false, "warnings": []
   }
   </output_example>

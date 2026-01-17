@@ -22,6 +22,29 @@ tmp/
 docs/reports/_local/
 docs/archive/_local/
 
+# Local-only frontend workspace (synced to a separate GitHub repo)
+homework_frontend/
+
+# Local agent/tool configs (never commit)
+opencode.json
+
+# Large local design sources (keep elsewhere unless explicitly needed)
+noteacher-UIUX.excalidraw
+
+# Local ad-hoc scripts / experiments (root only)
+/test_*.py
+
+# Local report raw data exports (keep markdown summaries if needed)
+docs/reports/*.json
+
+# Local agent scratch dirs (never commit)
+.agent/
+.shared/
+.claude/
+.tmp/
+.pytest_cache/
+.ruff_cache/
+
 # Private live replay inventory (local absolute paths; never commit)
 homework_agent/tests/replay_data/samples_inventory.csv
 homework_agent/tests/replay_data/samples_inventory.md

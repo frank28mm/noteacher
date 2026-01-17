@@ -48,7 +48,7 @@
 🔄 仍需推进（环境型验收）
 
 - WS‑A：生产等价复测已在本地以 worker=2 跑完并留证据（见 `docs/reports/a4_prod_equiv_worker2_summary_20260104.md`）。后续仍需补：
-  - worker=1 vs worker=4 的敏感性对比（用于扩缩容阈值）
+  - ✅ worker=1 vs worker=4 的敏感性对比已完成（用于扩缩容阈值）：`docs/reports/a4_worker_sensitivity_w1_w4_summary_20260105.md`
   - 迁移到生产对象存储（Ark/国内）后的复测（避免 Supabase Storage 并发波动影响结论）
 
 ### 1.3 执行状态快照（滚动更新，避免“我总会忘”）
@@ -62,22 +62,76 @@
     - 证据汇总：`docs/reports/a4_prod_equiv_worker2_summary_20260104.md`
     - 明细（空队列起步）：`docs/reports/a4_w2_burst20_p3_empty.md`
     - 明细（模拟小积压）：`docs/reports/a4_w2_preload4_burst10_p3_backlog.md`
+  - A‑4.2 worker 并发敏感性：对比 worker=1 vs worker=4（burst=10、3页/次），用于指导扩缩容阈值
+    - 证据汇总：`docs/reports/a4_worker_sensitivity_w1_w4_summary_20260105.md`
   - A‑7.1 Layer 3 复核卡（后端）：`review_pending → review_ready/review_failed` 异步更新 `job.question_cards`
   - A‑7.2 Layer 1/2（后端能力已具备）：`question_cards` 的占位/判定字段与 `answer_state=blank` 口径已落地（Demo 可选择隐藏）
-- 🔄 WS‑A 待补：
-  - A‑4.2 worker 并发敏感性：按你的决策“先跑 2，回头再对比 1/4”，补一轮对比用于指导扩缩容阈值（建议 burst=10、3页/次即可看趋势）
 - ✅ WS‑C 已完成：
   - C‑4 `GET /api/v1/reports/eligibility` 已实现（权威统计口径：基于 `submissions`，不依赖 `/mistakes`）
   - C‑5 `GET /api/v1/submissions` 已实现（Home Recent Activity / History List 数据源）
   - C‑6 `GET /api/v1/submissions/{submission_id}` 已实现（History Detail 方案B：快照详情秒开）
   - C‑2 facts_worker 已实现并已在 `/grade` 流程入队（`question_attempts/question_steps` 回填；report_worker 含缺省回退路径）
+  - C‑7 报告趋势已实现：`reports.stats.trends`（Top5 知识点 + Top3 错因；自适应 `submission|bucket_3d`）
+  - C‑8 Reporter 详情页数据契约补齐：KPI/薄弱点/矩阵之外新增 `coverage`（用于 UI 防误导提示）
+  - C‑9 错因体系与 Tooltip 字典补齐：新增 `cause_distribution`（题目级 severity）与 `meta.cause_definitions`
 - ✅ WS‑B 已完成（可丢数据也要口径一致）：
   - B‑1 Schema 现场对齐：`report_jobs` 锁字段 + `question_attempts/question_steps` 已在当前 Supabase 项目可用（已用 `scripts/verify_supabase_tables_rest.py` 验证）。
   - B‑2 RLS/权限治理：worker 运行环境启用 `SUPABASE_SERVICE_ROLE_KEY` 且 `WORKER_REQUIRE_SERVICE_ROLE=1`，可稳定 UPDATE `report_jobs`（锁/状态流转/落库 report_id）。
 - ✅ WS‑C 已完成（运行态确认）：
   - C‑1 report_worker 稳定化：`queued→running→done/failed` 可观测，锁字段写入与 report_id 落库生效。
-- 🧭 新增 P0（本次新增）：A‑8 历史错题复习（Chat Rehydrate，见下）
+- ✅ A‑8 历史错题复习（Chat Rehydrate）已具备并已联调验收：
+  - 后端：`POST /api/v1/chat` 支持 `submission_id + context_item_ids`，session 过期可从 submission 快照重建；
+  - 前端：已按 `submission_id` 发起辅导，避免“过期就要求重传”。
 - ⏳ WS‑D（P2：上线前必须做）：VKE/K8s 部署与按需扩缩容（方案已定，尚未落地 IaC/YAML）
+- 🟡 WS‑E（P2：上线前必须做）：定价/配额（BT→CP + 报告券；真源见 `docs/pricing_and_quota_strategy.md`）
+  - ✅ 已落地（代码）：`user_wallets/usage_ledger` + BT 扣费（grade/chat/report）+ `GET /api/v1/me/quota`
+  - ⏳ 待完成：生产口径验收（扣费/幂等/失败回滚）
+  - 🟡 已落地（前端）：余额展示（Home/Mine）+ 402 配额不足 UX（跳转订阅页并提示原因）
+    - 备注：当前本地若未走 `/api/v1/auth/sms/verify` 初始化钱包，`GET /api/v1/me/quota` 可能返回 `wallet_not_found`；需补“开发环境钱包初始化”或前端兜底提示
+- 🟡 WS‑F（P2：上线前必须做）：用户系统与认证（H5 优先：强制手机号；火山短信；微信/抖音可选）
+  - ✅ 已落地（代码）：`/api/v1/auth/sms/send|verify` + JWT（AUTH_MODE=local）+ 注册即 Trial Pack
+  - ⏳ 待完成：短信供应商接入（非 mock）+ 生产禁用 `X-User-Id` 兜底验收
+  - ⏳ 待完成（前端）：登录态串联（保存/使用 `access_token` → `Authorization: Bearer ...`）；当前仅有 401→/login 的最小跳转
+  - ⏳ 待完成（前端）：SSE 断线续接（接入 `Last-Event-Id`；避免断线后重复输出/丢输出）
+  - 🟡 F‑5 家庭-子女（Profile）账户切换（真源见 `docs/profile_management_plan.md`）
+    - ✅ 已落地（后端）：`child_profiles` + 各业务表 `profile_id` + `/api/v1/me/profiles` + 全链路 `(user_id,profile_id)` 隔离
+    - ✅ 已落地（后端）：`POST /api/v1/submissions/{submission_id}/move_profile`（传错账户可补救）
+    - 🟡 已落地（前端）：Home 头像快捷切换（2 个头像并排，高亮当前；切换时提示）
+    - ⏳ 待完成（前端）：关键流程“提交到/归属”强提示（拍照/上传/开始批改/结果/历史详情统一口径）+ “移动到其他孩子”入口全路径对齐
+    - ⏳ 待完成（前端）：Mine「管理子女」CRUD UI（添加/重命名/删除/头像）
+- 🟡 WS‑G（P2：上线前必须做）：运营后台（Admin）与客服/审计（最小可用）
+  - ✅ 已落地（代码）：`/api/v1/admin/users|wallet_adjust|audit_logs`
+  - ✅ 已落地（代码）：`/api/v1/admin/usage_ledger|submissions|reports`（只读查询）
+  - 🟡 待联调：配置 `ADMIN_TOKEN`（未配置时会 403，属预期保护）
+  - ⏳ 待完成：管理端 UI
+- ⏳ WS‑H（P3：上线后第 1 个运营迭代）：支付/订阅自动化（最小版：状态机 + Admin 手工兜底，不绑支付渠道）
+  - ⏳ 待完成（前端）：订阅状态展示/取消续费最小入口（Subscribe 页已存在，但未对接 WS‑H 用户侧接口）
+
+### 1.3.1 统一优先级看板（前后端一起看，执行可分开）
+
+> 目的：用一张“跨前后端”的优先级清单对齐推进顺序；**不复制**两边的任务细节，只引用各自真源/清单里的条目 ID。
+>
+> 前端真源：`docs/frontend_design_spec_v2.md`；前端可执行 Backlog：`docs/agent/next_development_worklist_and_pseudocode.md`（见 `Frontend‑H5 … 执行 Backlog` 小节）。  
+> 后端真源：本文件；后端 Backlog：`docs/agent/next_development_worklist_and_pseudocode.md`。
+
+#### Global P0（上线前硬门槛：可运营 + 可控成本）
+
+- 后端：WS‑F / WL‑P2‑003（手机号验证码登录 + JWT；生产禁用 `X-User-Id` 兜底）【代码已落地，待生产验收】
+- 后端：WS‑E / WL‑P2‑002（BT 精确扣费 + CP 整数展示；报告券 + reserve；`GET /api/v1/me/quota`）【代码已落地，待联调/验收】
+- 后端：WS‑G / WL‑P2‑004（Admin API + 审计日志；先不追求后台 UI）【最小 API 已落地；需配置 ADMIN_TOKEN 并补 UI】
+- 前端：补齐“登录态串联（Authorization）+ 钱包初始化/`wallet_not_found` 兜底 + SSE 续接（Last‑Event‑Id）”；余额展示与 402 配额不足 UX 已具备（落地任务写入 `docs/agent/next_development_worklist_and_pseudocode.md` 的 `FE‑P0/FE‑P1/FE‑P2` 条目；页面/文案规则以 `docs/frontend_design_spec_v2.md` 为准）
+
+#### Global P1（付费运营稳定化：减少人工 + 自动结算）
+
+- 后端：WS‑H / WL‑P3‑001（订阅生命周期状态机 + 定时结算；不绑支付渠道；Admin 手工兜底）
+- 后端：WS‑A A‑4.2（worker 并发敏感性：按你决策补 worker=1/4 对比，用于扩缩容阈值）
+- 后端：WS‑F / WL‑P2‑005（家庭-子女 Profile：数据隔离 + 强提示 + move submission 可补救）
+- 前端：FE‑P2‑08（Home 头像快捷切换 + 关键流程强提示 + 可补救入口；对齐 `docs/frontend_design_spec_v2.md` §1.7）
+- 前端：订阅状态展示/取消续费最小入口（对齐 WS‑H 的用户侧接口）
+
+#### Global P2（体验升级：Stitch UI 对齐 + 高级感）
+
+- ✅ 前端：Stitch UI 对齐（视觉/动效/卡片 IA；以 `homework_frontend/stitch/` 为参考，不改变后端口径；任务落到 `docs/agent/next_development_worklist_and_pseudocode.md` 的 `FE‑P3`）【按你确认已完成】
 
 ### 1.4 外部“体检报告”口径校对（以代码为准）
 
@@ -87,6 +141,7 @@
 - 需要特别注意的出入点（避免后续误读）：
   - **API 端点数量**不是稳定指标：当前 `/api/v1/*` 为 20 条 unique paths（以 `homework_agent/API_CONTRACT.md` 为准，不写固定数字）。
   - **SSE 客户端实现**：后端支持 `Last-Event-Id`（恢复 session + 最多重放 3 条 assistant），但当前 demo 前端用 `fetch + ReadableStream` 解析 SSE，尚未接入 `Last-Event-Id` 断线续接。
+  - **SSE 续接状态**：🔄 前端接入中（按你确认），后续以“能自动恢复 + 不重复输出”为验收。
   - **类型口径**：核心字段已对齐，但前端仍存在少量 `any` 作为过渡（不应宣称“完全无 any”）。
 
 ## 2) 工作流拆分（Workstreams）
@@ -370,6 +425,85 @@
   - 复核完成后：在 ≤ 1 次轮询内变为 `review_ready/review_failed`，并提供 `review_summary/review_reasons`
   - 非复核题不受影响：仍为 `verdict_ready`；整体耗时不被全量拖慢
 
+#### D‑6 最小起步配置与成本模板（华东2/上海；方案 B：ECS 常驻 + VCI 承接 burst）
+
+> 目的：回答“最小要买什么、每月固定投入多少、弹性如何计费”，并让团队在 WS‑D 内有可追溯的口径。  
+> 说明：价格以火山控制台下单与账单为准；以下为“官网定价/价格计算器”核对到的参考值（便于你先做预算）。
+
+**D‑6.1 资源清单（你问的那些项：作用 + 是否需要）**
+
+- 公网 IP（EIP）：给 NAT/CLB/少量 ECS 提供固定公网 IP；若节点全私网，通常给 NAT 配 EIP。
+- NAT 网关：让私网节点出网（拉镜像/访问 Ark/TOS），同时避免节点裸露公网；K8s 生产推荐配。
+- 负载均衡（CLB/ALB）：
+  - CLB：更偏 L4/基础接入；Demo/早期上线首选（简单、便宜）。
+  - ALB：更偏 L7/Ingress（域名/路径路由、灰度/WAF 等）；后期产品化再升级。
+- 对象存储 TOS：存放作业原图/压缩图/切片/报告附件；你已决定后续迁移到 Ark/TOS，这块属于必选依赖。
+- 文件存储 / 大数据文件存储：共享文件系统或大数据场景；本产品一般不刚需（优先用 TOS + DB）。
+- 弹性容器实例 VCI：用于 burst 承接 `grade_worker` 的峰值扩容（按秒计费）；你已选择方案 B。
+- 托管 Prometheus：监控与告警（延迟/队列/错误/资源）；早期可先轻量化，正式上线建议启用。
+- 镜像仓库：把镜像放火山，避免外网拉取慢/不稳定，并做权限与审计；生产建议必选。
+- 日志服务：采集容器日志用于排障/审计；早期可先简化，正式上线建议启用。
+- 数据库（RDS 是否要配）：**要配**（或等价托管 DB）。原因：你是付费产品，核心资产是用户/订阅/配额、submissions/mistakes/reports 等长期数据；不建议把这些压在单机盘上赌可靠性。
+
+**D‑6.2 参考价格（已核对的“起步级”口径）**
+
+- VKE 托管集群（专业版）：约 `0.6 元/小时/集群`（≈ `432 元/月`）  
+  - 参考：`https://www.volcengine.com/pricing?product=VKE&tab=2`
+- ECS 常驻节点（1 台起步）：
+  - `ecs.g3i.large (2c8g)`：约 `286.38 元/月/台`
+  - `ecs.g3i.xlarge (4c16g)`：约 `539.76 元/月/台`
+  - 参考：`https://www.volcengine.com/pricing?product=ECS&tab=2`
+- 公网 CLB（BGP、1Mbps、小型I）：约 `77 元/月/个`  
+  - 参考：`https://www.volcengine.com/pricing?product=CLB&tab=2`
+- EIP（BGP、1Mbps）：约 `23 元/月/个`  
+  - 参考：`https://www.volcengine.com/pricing?product=EIP&tab=2`
+- NAT 网关（小型、1 个、1 个月）：约 `306 元/月/个`  
+  - 参考：`https://www.volcengine.com/pricing?product=NAT_Gateway&tab=2`
+- RDS for PostgreSQL（高可用型主备、示例 `rds.pg.d1.1c2g` + 本地SSD 200GiB、1 个月）：约 `360 元/月/套`  
+  - 参考：`https://www.volcengine.com/pricing?product=RDS+for+PostgreSQL&tab=2`
+- VCI（u1 通用算力型，按秒计费）：
+  - vCPU：`0.0000446071 元/秒/核`
+  - 内存：`0.0000058748 元/秒/GiB`
+  - 参考：`https://www.volcengine.com/docs/6460/111933?lang=zh`
+- TOS（华东2示例，按量计费）：
+  - 标准存储：`0.099 元/GiB/月`
+  - 公网流出：`0.50 元/GB`
+  - 参考：`https://www.volcengine.com/pricing?product=TOS&tab=1`
+
+> 备注：火山“托管 Redis”价格计算器入口在当前定价模块中未检索到；请以控制台下单页为准。预算模板见 D‑6.4。
+
+**D‑6.3 最小可部署清单（你已确认：先 1 台常驻，不追求 HA）**
+
+- 必选（固定投入）
+  - 1× VKE 托管集群（专业版）
+  - 1× ECS 常驻节点（建议先 `4c16g`，最低可用 `2c8g`；你已明确“2 台常驻暂不需要”）
+  - 1× 公网 CLB（对外暴露 API）
+  - 1× NAT 网关（节点私网出网；通常搭配 1×EIP）
+  - 1× RDS for PostgreSQL（建议高可用型，先兜住数据资产）
+  - 1× TOS bucket（存放图片/切片/附件）
+- 弹性（按需）
+  - VCI：承接 `grade_worker` burst 扩容（KEDA 触发扩缩容）
+
+**D‑6.4 成本计算模板（固定 + 弹性）**
+
+- 固定（月费）：
+  - `cost_fixed_month ≈ VKE_month + ECS_month + CLB_month + NAT_month + EIP_month + RDS_month`
+  - 示例（仅作量级感知，不含 TOS/日志/监控/镜像仓库）：
+    - 2c8g 常驻：`432 + 286 + 77 + 306 + 23 + 360 ≈ 1484 元/月`
+    - 4c16g 常驻：`432 + 540 + 77 + 306 + 23 + 360 ≈ 1738 元/月`
+- 弹性（burst，按秒/按量）：
+  - VCI：`cost_vci = Σ(pod_seconds × (vCPU×0.0000446071 + GiB×0.0000058748))`
+  - TOS 存储：`storage_gib × 0.099 元/GiB/月`（标准存储示例）
+  - TOS 公网出流：`egress_gb × 0.50 元/GB`
+  - Redis（托管）：`cost_redis ≈ instance_spec(月费) + backup/persistence + bandwidth/traffic`（以控制台为准）
+
+**D‑6.5 风险说明（1 台常驻的代价）**
+
+- 单节点 = 单点：节点挂掉时 API/常驻 worker 可能全部不可用；但 DB（RDS 高可用）可最大化保护数据资产。
+- 后续升级路径（不返工）：
+  - 把常驻节点池从 1 台扩到 2 台（HA 起步），并把 `api` HPA `minReplicas` 固定 ≥2。
+  - `grade_worker` 逐步更多地由 VCI 承接 burst（更贴合“平峰≈0、晚高峰集中”的业务形态）。
+
 ##### A‑7.1‑FE 前端验收修复清单（P0，必须做）
 
 > 目的：消除“done 收尾竞态（race condition）”，保证复核卡在 UI 上可验收、可稳定看到最终态。
@@ -440,6 +574,234 @@
   - 构造一个 ≥48h 前的 submission（或手动将 session TTL 设为 60s 复现过期），仍能成功进入辅导并得到与该题证据一致的回答；
   - 不出现“请重新上传/题库快照不存在”这类阻断性提示；
   - 产出可审计字段：`submission_id/item_id/session_id` 三者可串联排查。
+
+### WS‑E（P2：上线前必须做，但不阻塞当前迭代）：定价/配额（BT→CP + 报告券）
+
+> 背景：该产品是付费产品，成本核心来自 LLM tokens；必须在上线前把“配额/扣费/报告券”做成严格、可审计、可控成本的机制。  
+> 真源：`docs/pricing_and_quota_strategy.md`
+
+#### E‑0 已确认的口径（必须冻结）
+
+- **BT（后端真实账本）**：`BT = prompt_tokens + 10 * completion_tokens`
+- **CP（前端展示单位）**：`1 CP = 12400 BT`
+  - 前端只显示：`CP_left = floor(bt_spendable / 12400)`（只显示剩余整数，不显示扣点/小数/百分比）
+- **计费覆盖范围**：`grade/chat/report` 全部扣 BT
+- **Trial Pack（注册即送，所有注册用户包含付费用户）**：
+  - `200 CP` 试用算力 + `1` 张周期报告券 + 对应 `bt_report_reserve`
+  - 有效期：**5 天**
+- **订阅等级**：S1–S5（月度 CP + 月度报告券 + 数据保留），详见真源文档
+
+#### E‑1 最小落地任务（Backlog 将拆分为可执行条目）
+
+- usage 口径统一：所有 LLM 调用必须落 `prompt_tokens/completion_tokens/total_tokens`（包含 `generate_report` 路径）
+- 账户/权益存储：`bt_trial/bt_subscription/report_coupons/bt_report_reserve/trial_expires_at/data_retention_tier`
+- 扣费与幂等：
+  - 以 `X-Idempotency-Key` 保护（避免重试重复扣费）
+  - 失败不扣（或按“可回滚”口径扣），需写清楚状态机
+- 对外查询：
+  - `GET /api/v1/me/quota` → `{ cp_left, report_coupons_left, trial_expires_at? }`
+
+### WS‑F（P2：上线前必须做，但可分步落地）：用户系统与认证（H5 优先：强制手机号；火山短信；微信/抖音可选）
+
+> 背景：我们从“单次 agent demo”演进为“可持续运营的后端 + workers”。用户/订阅/配额/数据留存必须以 `user_id` 为真源，否则无法做付费产品与运营闭环。  
+> 结论：**用户系统不需要单独部署一套服务器**；作为 FastAPI 的 `auth/users/billing` 模块与现有 `/uploads /grade /chat /reports` 同库同鉴权即可（部署仍是 `api + workers` 的 5 组件拆分）。
+>
+> ✅ 已确认的产品决策（冻结）：
+> - 首发形态：**H5（手机浏览器）优先**（渠道偏小红书，链接打开为主；微信内打开会存在但非首要依赖）。
+> - 登录方式：**强制手机号验证码登录**（注册=手机号；不提供游客模式）。
+> - 短信供应商：优先 **火山短信**（同一云生态，便于账单与权限治理）。
+> - 可选后续：微信登录（H5 OAuth）/抖音登录（H5 OAuth），按获客渠道再决定是否上线。
+
+#### F‑0 范围与非范围
+
+- 本阶段包含：
+  - 手机号验证码登录（发送/校验/签发 token）
+  - `user_id` 真源化：所有业务读写按 `user_id` 隔离
+  - 与 WS‑E 对齐：注册即发放 Trial Pack（BT/CP + 报告券 + 预留）
+- 本阶段不包含（后续迭代再做）：
+  - 完整支付体系与自动续费（可先人工开通/测试）
+  - 微信/抖音 OAuth（除非你明确“首发渠道必须微信/抖音内闭环”）
+
+#### F‑1 后端接口草案（契约先行，避免前后端漂移）
+
+- 认证：
+  - `POST /api/v1/auth/sms/send`：输入 `phone`；发送验证码（强频控/风控）
+  - `POST /api/v1/auth/sms/verify`：输入 `phone + code`；校验后返回 `access_token`（JWT）+ `user` 概要
+  - `POST /api/v1/auth/logout`：注销当前 token（可选：加入黑名单/旋转 refresh token）
+- 用户：
+  - `GET /api/v1/me`：返回 user profile（最小字段：`user_id/phone/created_at/plan_tier`）
+  - `GET /api/v1/me/quota`：沿用 WS‑E（CP/报告券剩余量）
+- 鉴权约定：
+  - 生产：`Authorization: Bearer <token>` 为唯一来源，不再依赖 `X-User-Id`。
+  - 开发：允许 `X-User-Id` 作为 DEV 兜底，但必须受 `APP_ENV=dev` 或显式开关控制，避免误上生产。
+
+#### F‑2 数据模型草案（最小可用，便于后续扩展）
+
+- `users`
+  - `id`（uuid/ulid），`phone_e164`（唯一），`phone_verified_at`，`created_at`
+  - 可选：`last_login_at`，`status`（active/banned）
+- `auth_sessions`（或 `refresh_tokens`，若采用长会话）
+  - `id`，`user_id`，`created_at`，`expires_at`，`revoked_at`，`device_info`（可选）
+- `sms_codes`（推荐放 Redis，DB 仅作审计或失败追踪）
+  - `phone`，`code_hash`，`expires_at`，`attempt_count`
+- 与 WS‑E 联动字段（可放单表或独立表）：
+  - `trial_expires_at`，`bt_trial`，`bt_subscription`，`report_coupons`，`bt_report_reserve`
+  - 订阅字段：`plan_tier`，`data_retention_tier`
+
+#### F‑3 安全与风控（短信登录的硬约束）
+
+- 频控（至少三层）：
+  1) `phone` 级：60s 冷却；日上限（例如 10 次）
+  2) `ip` 级：滑动窗口限流（防撞库/恶意刷短信）
+  3) `device_id`（前端生成/持久化）：减少“换号刷”
+- 校验：
+  - 验证码只存 hash（或仅存 Redis），5–10 分钟过期
+  - 错误次数上限后锁定一段时间
+- 审计：
+  - 记录 `request_id/user_id/phone/ip/user_agent`（脱敏存储），便于追溯
+
+#### F‑4 验收标准（上线前必须满足）
+
+- H5 首发：手机号验证码可完成登录，拿到 `access_token` 后能正常调用 `/uploads /grade /chat /mistakes /reports`（按 `user_id` 隔离）。
+- 注册即发放 Trial Pack（与 WS‑E 对齐）：`200 CP + 1 报告券 + bt_report_reserve`，有效期 5 天，且报告券不会被 grade/chat 消耗掉。
+- 生产环境禁用 DEV 兜底：`APP_ENV=prod` 时拒绝 `X-User-Id`，强制 `Authorization`。
+
+#### F‑5 家庭-子女（Profile）账户切换（数据隔离 + 强提示 + 可补救）
+
+> 真源：`docs/profile_management_plan.md`（含分期、DB 变更、worker 链路、前端强提示与可补救口径）。  
+> 契约：`homework_agent/API_CONTRACT.md`（Profiles Draft），前端真源：`docs/frontend_design_spec_v2.md`（§1.7）。
+
+**目标（v1）**
+- 一个家长 `user_id` 下支持多个子女档案 `profile_id`（至少 2 个）。
+- **家庭共用配额**：钱包/配额归属 `user_id`，不按孩子独立计费。
+- 数据隔离：History/DATA/Reports 等读取/写入均按 `(user_id, profile_id)` 隔离。
+- 体验策略：不做上传前阻断式选择；只做“强提示 + 可补救”。
+
+**最小后端落地清单**
+- DB：
+  - 新增 `child_profiles`
+  - 事实表加 `profile_id` 并回填历史数据到默认 profile
+- 兼容层：
+  - `require_profile_id`：无 `X-Profile-Id` 时自动使用默认 profile（避免阻断旧客户端）
+- API（最小）：
+  - `GET /api/v1/me/profiles`（供前端拉取与渲染头像切换）
+  - `POST /api/v1/submissions/{submission_id}/move_profile`（传错账户可补救）
+- Worker：
+  - `profile_id` 从 `submissions.profile_id` 贯穿 upload/grade/qindex/facts/report 的写入与查询过滤
+
+**最小前端落地清单**
+- Home 右上角头像切换：profiles=2 时两个头像按钮并排，当前高亮（醒目、一眼可见）。
+- 请求头注入 `X-Profile-Id`（有 active_profile_id 时）。
+- 关键流程强提示：`提交到：<孩子名>`（拍照/上传/开始批改附近），以及结果/历史详情的 `归属：<孩子名>`。
+- 可补救入口：在作业详情/汇总页提供“移动到其他孩子”入口（调用 move submission）。
+
+### WS‑G（P2：上线前必须做，但可后置到“首批运营前”）：运营后台（Admin）与客服/审计
+
+> 背景：你提到“用户注册/用户管理/后台管理页面”。这些不需要单独部署一套“用户系统服务器”，但需要在后端提供 **admin 级能力**（只给运营/客服/你自己用），并保证安全可控。  
+> 说明：后台页面本质是另一个前端（Admin Web），但它调用的仍是同一套 FastAPI，只是走 `admin` 权限与专用接口。
+
+#### G‑0 目标（运营角度）
+
+- 能查人：按手机号/用户ID定位用户，查看当前订阅、CP/BT 余额、报告券、试用到期等。
+- 能查单：按 `submission_id/job_id/report_id` 回放一次作业批改/报告生成的状态与关键日志索引（排障必备）。
+- 能控成本：能看到每天/每用户的 BT 消耗、模型调用次数、失败率；并能对异常用户限流/封禁。
+- 能做客服：对“误判/复核失败/报告异常”有最小介入能力（标记、重跑、说明）。
+
+#### G‑1 权限模型（强约束，避免后台变成安全洞）
+
+- `admin` 访问必须与普通用户隔离：
+  - JWT claim 中包含 `role=admin`（或单独的 admin token），禁止用普通用户 token 访问 admin API。
+  - 强制 IP allowlist（至少首发阶段），并记录审计日志（谁在什么时候做了什么）。
+- `worker` 与 `admin` 分离：
+  - `worker` 用 service role key 写库；`admin` 走 API + admin JWT（避免“把 service role 暴露给后台”）。
+
+#### G‑2 后端接口草案（最小可用，先用 Swagger/脚本也能跑）
+
+- 用户管理：
+  - `GET /api/v1/admin/users?phone=...&limit=...`
+  - `GET /api/v1/admin/users/{user_id}`
+  - `PATCH /api/v1/admin/users/{user_id}`（封禁/解封、备注）
+- 权益/订阅（人工客服兜底，后续再接支付自动化）：
+  - `POST /api/v1/admin/users/{user_id}/grant`（发放 CP/BT、报告券、延长试用/订阅；必须幂等 + 审计）
+  - `GET /api/v1/admin/users/{user_id}/ledger`（BT/券变动流水，只读）
+- 作业/报告排障：
+  - `GET /api/v1/admin/submissions?user_id=...&limit=...`
+  - `GET /api/v1/admin/submissions/{submission_id}`
+  - `GET /api/v1/admin/jobs/{job_id}`
+  - `GET /api/v1/admin/reports/{report_id}`
+- 成本/用量总览（最小报表）：
+  - `GET /api/v1/admin/usage/daily?since=...`（按天聚合：BT、请求数、失败率）
+  - `GET /api/v1/admin/usage/top_users?since=...`（TopN 成本/失败）
+
+#### G‑3 审计（必须有，否则运营不可控）
+
+- `admin_audit_logs`（或等价表）：
+  - `id, actor_admin_id, action, target_type, target_id, payload_json, created_at, request_id, ip, user_agent`
+- 验收：每一次 `admin` 写操作都能在审计日志中追溯（可用于纠纷与风控）。
+
+#### G‑4 Admin Web（前端范围说明）
+
+- 首发不要求把“后台页面”做得很漂亮；优先把链路跑通：
+  - 一个登录页（仅 admin）
+  - 用户搜索/详情页（手机号→用户→权益/历史/用量）
+  - 作业/报告回放页（submission/job/report）
+- 位置建议：独立一个 admin 前端仓库或同仓库单独目录；与 H5 用户端完全隔离。
+
+### WS‑H（P3：上线后第 1 个运营迭代）：支付与订阅自动化（最小版，不绑支付渠道）
+
+> 背景：你已确定“付费 + 数据留存 + BT/CP + 报告券”是产品核心，但首发不一定要立刻接入完整支付渠道。  
+> 目标：先把**订阅生命周期状态机**做成可审计、可回滚、可运营的“内核”，并保证即使支付渠道未接入/异常，也能用 Admin 手工兜底（不影响服务稳定）。
+
+#### H‑0 设计原则（冻结）
+
+- **不绑定支付渠道**：先抽象 `payment_provider`/`provider_ref` 字段占位（微信/支付宝/抖音支付等后续再选），业务逻辑不依赖具体 SDK。
+- **幂等 + 可审计**：所有“开通/续费/到期/退款/补发”都必须写入事件流水，且支持 `X-Idempotency-Key`。
+- **订阅只改变“权益与期限”**：不直接改历史事实（submissions/mistakes/reports），只改变用户“可用额度/数据保留/优先级”。
+
+#### H‑1 最小订阅状态机（可先满足上线后运营）
+
+- 状态（建议最小 5 个）：
+  - `trial_active`（Trial Pack 有效期内）
+  - `active`（订阅有效）
+  - `grace`（到期宽限期，可配置 0–3 天；避免支付抖动导致立刻降级）
+  - `expired`（订阅到期，回退到“仅剩 Trial/余额”）
+  - `canceled`（用户主动取消续费；本期仍有效到 `current_period_end`）
+- 关键字段（最小）：
+  - `plan_tier`（S1–S5）、`data_retention_tier`
+  - `current_period_start/current_period_end`
+  - `cancel_at_period_end`（bool）
+  - `payment_provider/provider_subscription_id`（可空，占位）
+
+#### H‑2 权益发放与扣费边界（与 WS‑E 对齐）
+
+- 每月权益发放（在 period start 触发）：
+  - `bt_subscription += plan_monthly_bt`
+  - `report_coupons += plan_monthly_report_coupons`
+  - `data_retention_tier = plan_data_retention_tier`
+- Trial Pack 与订阅叠加：订阅开通不回收 Trial；扣费顺序仍按 WS‑E（先 trial，再 subscription；报告优先用券 + reserve）。
+
+#### H‑3 自动化最小落地方式（不新增常驻服务）
+
+- 采用 **K8s CronJob**（或同类定时任务）运行“日常结算脚本”，避免再加一个常驻 worker：
+  - `expire_subscriptions`：每日扫描 `current_period_end`，更新 `active→grace→expired`
+  - `grant_monthly_entitlements`：到期续费成功时（或在新 period 开始时）发放月度权益
+- 关键：所有结算动作必须可重跑且幂等（事件流水 + 以 period 为幂等键）。
+
+#### H‑4 对外接口（最小可用）
+
+- 用户侧（H5）：
+  - `GET /api/v1/me/subscription`：返回 `status/plan_tier/current_period_end/cancel_at_period_end`
+  - `POST /api/v1/me/subscription/cancel`：设置 `cancel_at_period_end=1`（不立即降级）
+- Admin 侧（复用 WS‑G 权限/审计）：
+  - `POST /api/v1/admin/subscriptions/activate`：人工开通（指定 plan_tier + period_end）
+  - `POST /api/v1/admin/subscriptions/extend`：延期（售后）
+  - `POST /api/v1/admin/subscriptions/revoke`：强制撤销（风控/退款）
+
+#### H‑5 验收标准（上线后 1 个迭代内完成）
+
+- 能在不接支付渠道的前提下完成：开通→续费（人工/脚本）→到期→宽限→过期回退，全链路可观测、可审计、可回滚。
+- 任何一次订阅变更都能追溯到：`request_id/user_id/action/before/after/actor`（WS‑G 审计覆盖）。
+- 不会因为订阅状态机/结算脚本异常，导致扣费口径漂移或阻断 grade/chat/report。
 
 ### WS‑B：Supabase Schema/RLS/权限（支撑 Worker 稳定运行）
 
@@ -548,6 +910,113 @@
 - 价值：
   - 访问历史作业“秒开”（不走 LLM/队列）
   - 作为“错题本/历史记录”的权威详情页（并与 A‑8 Rehydrate 组合，保证旧作业可聊）
+
+#### C‑7 报告趋势（Report Trends）：知识点 Top5 + 错因 Top3（UI 需求回写，后端负责产出可视化序列）
+
+> 背景：Reporter 详情页需要“趋势图”来展示本周期内的变化，而不是只展示整体统计。  
+> 要求：**趋势只覆盖本周期内**（3/7/30 天等预设周期），且必须避免 30 天时点数爆炸。  
+> 决策：采用“**自适应粒度**”——点数少时按 submission 真值，点数多时按 **3 天分桶求和**。
+
+**目标 UI（后端输出必须能直接支撑）**：
+- 左图：知识点趋势（Top5 薄弱知识点），**5 条曲线**，表示每次作业（或每个 3 天桶）中该知识点的“错题绝对数量”变化。
+- 右图：错因趋势（Top3 错因），**3 条曲线**，表示每次作业（或每个 3 天桶）中该错因的“题目绝对数量”变化。
+- 图例交互：前端点击知识点/错因名称可弹出说明；后端提供稳定的 `tag/cause` key，说明文案可由前端维护（后端可选在 report stats 中附带 meta 字典）。
+
+**口径（必须写清，避免后续 UI/数据对不上）**：
+- 周期：由 `POST /api/v1/reports` 的 `window_days` 决定（周期报告），或 `submission_id`（单次报告）。
+- 数据源：以 `question_attempts` 为权威（若 facts 表为空，report_worker 已有从 `submissions.grade_result` 回退提取的兜底路径）。
+- 排除语义：趋势与总体统计一致，必须先应用 `mistake_exclusions` 过滤（report_worker 已过滤 attempts）。
+- “错题绝对数量”的定义：`verdict in {'incorrect','uncertain'}` 的题目计入（避免把“uncertain”漏掉导致趋势误判）。
+- “错因”的口径：优先用 **题目级** `attempts.severity`（`calculation/concept/format/unknown`），避免 steps 稀疏导致曲线不稳定；步骤级 diagnosis 作为后续增强（不阻塞本阶段 UI）。
+
+**自适应粒度（防爆规则，已确定为 3 天）**：
+- 计算 `distinct_submission_count`（本周期内、同 subject、过滤后的 attempts 覆盖到的 submission 去重数）。
+- 若 `distinct_submission_count <= 15`：输出粒度 `submission`（每次作业一个点）。
+- 若 `distinct_submission_count > 15`：输出粒度 `bucket_3d`（按 UTC 日期对 submission 分桶，每 3 天一个 bucket；bucket 内**求和**输出一个点）。
+
+**后端产物（写入 reports.stats/features 层，供前端直接渲染）**：
+- 在 `reports.stats`（features json）中新增 `trends` 字段（schema 稳定，允许增量扩展）：
+  - `trends.granularity`: `"submission" | "bucket_3d"`
+  - `trends.points[]`：按时间升序
+    - 通用字段：
+      - `point_key`：`submission_id` 或 `YYYY-MM-DD~YYYY-MM-DD`（bucket）
+      - `since` / `until`（ISO 或 date string）
+      - `total_attempts` / `wrong_attempts` / `uncertain_attempts`（可选但建议，便于解释）
+    - `knowledge_top5`：`{ tag -> wrong_count }`（只输出 Top5 tag）
+    - `cause_top3`：`{ cause -> wrong_count }`（只输出 Top3 cause/severity）
+  - `trends.selected_knowledge_tags[]`：Top5 tag 列表（用于图例）
+  - `trends.selected_causes[]`：Top3 cause 列表（用于图例）
+  - （可选）`trends.meta`：`{ tag_definitions, cause_definitions }`（若前端不想维护字典，可由后端附带）
+
+**验收标准（前端可直接验收）**：
+- 周期=3/7 天且 submissions ≤ 15：趋势点数=作业次数；图例=Top5/Top3；每条曲线能对齐到对应点（不缺点、不乱序）。
+- 周期=30 天且 submissions > 15：趋势点数≈ `ceil(days/3)`，且 `granularity='bucket_3d'`；曲线平滑且可解释（bucket 求和）。
+- 与总体统计一致：`sum(points[*].knowledge_top5[tag])` 与 features 总体（同 tag 的 wrong+uncertain）在口径上可追溯（允许 Top5 之外的 tag 不计入该 sum）。
+- 单次报告（`submission_id` 模式）：允许趋势为空或仅 1 点（`granularity='submission'`），不影响报告生成。
+
+#### C‑8 Reporter 详情页数据契约（KPI/薄弱点/错因/矩阵/评语：保证“可画、可解释、可审计”）
+
+> 背景：Reporter 详情页不仅要趋势图，还要把“薄弱知识点、错因比例、题型×难度、总体表现、AI 建议”完整呈现。  
+> 目标：后端保证 `reports.stats`（Features Layer）能直接驱动 UI，避免前端自行“数数/推断口径”。
+
+**必须覆盖的 UI 模块（字段来自 reports.stats / reports.content）**：
+- 顶部 KPI（圆形大数字/总览）：
+  - 数据源：`stats.overall`
+  - 字段：`sample_size/correct/incorrect/uncertain/accuracy/error_rate`
+  - UI 约束：必须同时展示 `sample_size`（样本量），避免仅展示百分比导致误解。
+- 薄弱知识点 TopN（建议 Top3/Top5 可配置）：
+  - 数据源：`stats.knowledge_mastery.rows[]`
+  - 字段：`tag/sample_size/correct/incorrect/uncertain/accuracy/error_rate`
+  - 口径：按 `error_rate` 降序（或按 `incorrect+uncertain` 降序）排序；必须附带 `sample_size`。
+- 错因比例（柱状/饼图）：
+  - 数据源（阶段 1）：题目级错因 `attempts.severity` 的聚合（只统计错/待定题；建议新增到 stats；见 C‑9）
+  - 现状可用兜底（阶段 0）：`stats.process_diagnosis.severity_counts`（注意：这是 step 级口径，覆盖面可能稀疏）
+  - UI 文案提示：必须可点开 “!” 查看口径说明（见 C‑9 meta 字典）
+- 题型 × 难度矩阵（薄弱点）：
+  - 数据源：`stats.type_difficulty.rows[]`
+  - 字段：`question_type/difficulty/sample_size/correct/incorrect/uncertain/accuracy`
+- AI 评语（温暖、简洁、基于事实）：
+  - 数据源：`reports.content`（Markdown，来自 Narrative Layer）
+  - 约束：LLM 只能引用 `reports.stats` 中已计算的数（不可自行“编造趋势/统计”）。
+
+**建议新增的“可解释性指标”（写入 stats，帮助 UI 做防误导提示）**：
+- `stats.coverage`：
+  - `tag_coverage_rate`：attempts 中有 `knowledge_tags_norm|knowledge_tags` 的占比
+  - `severity_coverage_rate`：attempts 中有 `severity` 的占比
+  - `steps_coverage_rate`：本周期 steps_sample_size / attempts_sample_size（用于解释“错因图为什么为空/稀疏”）
+- UI 用法：当 coverage 过低时展示提示（例如“本期部分题目未能稳定识别知识点标签，薄弱点仅供参考”）。
+
+**验收标准**：
+- 同一份报告，前端不做任何“二次计数/推断”，仅依赖 `reports.stats` 就能渲染：KPI、薄弱点 TopN、错因比例、题型×难度矩阵、AI 评语。
+- 数据口径自洽：`overall.sample_size == Σ(type_difficulty.rows[].sample_size)`（允许 unknown 合并，但总分母可追溯）。
+
+#### C‑9 错因体系与 Tooltip 说明（Severity/Diagnosis Taxonomy + 可版本化）
+
+> 背景：UI 需要“错因比例 + 右上角 ! 的判断标准说明”。目前 diagnosis_codes v0 过于保守，且缺少中文解释字典。  
+> 决策：先做 **题目级 severity** 的稳定口径与说明字典；diagnosis_codes 作为阶段 2 增强。
+
+**阶段 1（P1，优先落地：稳定、覆盖面高）**：
+- 在 Features Layer 中新增 `cause_distribution`（题目级）：
+  - 数据源：`question_attempts.severity`（由 facts_extractor 提取/派生）
+  - 输出建议：
+    - `stats.cause_distribution.sample_size`（分母：`incorrect + uncertain`）
+    - `stats.cause_distribution.severity_counts`（计数）
+    - `stats.cause_distribution.severity_rates`（占比，可选）
+- 在报告 stats 中附带 tooltip meta（或提供独立 metadata 接口，二选一）：
+  - `stats.meta.cause_definitions`：
+    - key：`calculation/concept/format/unknown`
+    - value：`{ display_name_cn, standard, examples? }`
+  - 版本字段：`stats.meta.classifier_version`（便于后续升级不破坏历史口径）
+
+**阶段 2（P2，增强：更细的“过程诊断/计算习惯差”等）**：
+- 扩展 `question_steps.diagnosis_codes`（从 v0 → v1）：
+  - 目标：从“只有 calculation_error”扩展到可用于运营解释的 codes（仍需保守/可审计）。
+  - 说明字典：`stats.meta.diagnosis_definitions`（code → 中文名/标准/例子）。
+  - 注意：steps 覆盖面天然小（仅有步骤结构的题）；UI 必须显示 steps_coverage_rate，避免误导。
+
+**验收标准**：
+- 错因图在数学作业上默认可用（severity 覆盖率高于阈值）；点击 “!” 能看到清晰的判断标准说明。
+- 诊断升级不破坏历史：旧 report 的 meta 保留旧版本号；新版本 report 明确标注 version。
 
 ## 3) 验证与测试方案（必须写进交付）
 

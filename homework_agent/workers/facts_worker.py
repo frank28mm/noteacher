@@ -78,7 +78,7 @@ def _load_submission(*, user_id: str, submission_id: str) -> Optional[Dict[str, 
     try:
         resp = (
             _safe_table("submissions")
-            .select("submission_id,user_id,subject,created_at,grade_result")
+            .select("submission_id,user_id,profile_id,subject,created_at,grade_result")
             .eq("submission_id", str(submission_id))
             .eq("user_id", str(user_id))
             .limit(1)
@@ -174,6 +174,14 @@ def main() -> int:
                     grade_result=row.get("grade_result") or {},
                     taxonomy_version=taxonomy_version() or None,
                 )
+                profile_id = str(row.get("profile_id") or "").strip() or None
+                if profile_id:
+                    for a in facts.question_attempts:
+                        if isinstance(a, dict):
+                            a["profile_id"] = profile_id
+                    for st in facts.question_steps:
+                        if isinstance(st, dict):
+                            st["profile_id"] = profile_id
                 _upsert_rows(
                     table="question_attempts",
                     rows=facts.question_attempts,

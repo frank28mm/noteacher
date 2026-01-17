@@ -481,9 +481,13 @@ data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"
 ```json
 {
   "window_days": 7,
-  "subject": "math"
+  "subject": "math",
+  "submission_id": null
 }
 ```
+
+说明：
+- `submission_id` 可选：用于 Demo/联调的“单次作业报告”模式；当传入时，worker 会忽略 `window_days`，仅针对该 submission 生成报告。
 
 **响应（202）**：
 ```json
@@ -501,7 +505,45 @@ data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"
 ### 6.4 GET /reports/{report_id}
 **描述**：获取报告内容（Features Layer 为主）。
 
-**响应**：直接返回 `reports` 行（重点字段：`features_json/evidence_refs/report_version`）。
+**响应**：直接返回 `reports` 行（重点字段：`stats`/`content`/`title`/`params`）。
+
+其中 `stats`（Features Layer）字段约定（只增不删，前端不二次计数）：
+- `overall`：总体分母与正确/错误/不确定统计（含 `sample_size`）
+- `knowledge_mastery.rows[]`：知识点掌握度（每个 tag 的 sample_size/accuracy/error_rate）
+- `type_difficulty.rows[]`：题型×难度矩阵（用于薄弱点热力/列表）
+- `cause_distribution`：题目级错因分布（基于 `question_attempts.severity`）
+- `coverage`：标签/错因/steps 覆盖率提示（用于 UI 防误导）
+- `trends`：趋势序列（Top5 知识点曲线 + Top3 错因曲线；按 submission 或 3 天游标分桶）
+- `meta.cause_definitions`：错因解释字典（用于 UI “!” tooltip）
+
+`trends` 口径（WS‑C C‑7）：
+- `granularity = submission | bucket_3d`
+- `points[]`：时间升序；每个点包含 `knowledge_top5`（tag→wrong_count）与 `cause_top3`（severity→wrong_count）
+- wrong_count 定义：`verdict in {'incorrect','uncertain'}` 的题目数
+
+示例（截断）：
+```json
+{
+  "stats": {
+    "features_version": "features_v2",
+    "overall": {"sample_size": 30, "accuracy": 0.73, "error_rate": 0.27},
+    "cause_distribution": {
+      "severity_counts": {"calculation": 10, "concept": 3, "unknown": 17},
+      "severity_rates": {"calculation": 0.33, "concept": 0.10, "unknown": 0.57}
+    },
+    "coverage": {"tag_coverage_rate": 0.9, "severity_coverage_rate": 0.95, "steps_coverage_rate": 0.2},
+    "trends": {
+      "granularity": "bucket_3d",
+      "selected_knowledge_tags": ["勾股定理", "一次函数", "相似三角形"],
+      "selected_causes": ["calculation", "concept", "format"],
+      "points": [
+        {"point_key": "2026-01-01~2026-01-03", "knowledge_top5": {"勾股定理": 3}, "cause_top3": {"calculation": 2}}
+      ]
+    },
+    "meta": {"cause_definitions_version": "cause_v0", "cause_definitions": {"calculation": {"display_name_cn": "计算错误"}}}
+  }
+}
+```
 
 ### 6.5 GET /reports
 **描述**：列出历史报告（按 `created_at desc`）。
@@ -572,7 +614,43 @@ data: {"session_id": "sess-abc123", "interaction_count": 2, "status": "continue"
       "reason": "…",
       "needs_review": true
     }
+  ],
+  "questions": [
+    {
+      "item_id": "p1:q:1",
+      "question_number": "1",
+      "question_content": "（完整题干文本）",
+      "student_answer": "（可选）",
+      "answer_status": "（可选）",
+      "answer_state": "has_answer",
+      "verdict": "incorrect",
+      "reason": "…"
+    }
   ]
+}
+```
+
+### 6.8 POST /submissions/{submission_id}/questions/{question_id}
+**描述**：用户手工纠正单题判定（verdict），用于“待定题/错题/对题”人工确认；后端会重算 submission 的聚合统计并同步 `grade_result.wrong_items`。
+
+**请求体**：
+```json
+{"verdict": "correct"}
+```
+
+**响应（200）**：
+```json
+{
+  "success": true,
+  "submission_id": "upl_xxx",
+  "question_id": "p1:q:1",
+  "verdict": "correct",
+  "summary": {
+    "total_items": 18,
+    "wrong_count": 2,
+    "uncertain_count": 1,
+    "blank_count": 0
+  }
 }
 ```
 
@@ -788,6 +866,165 @@ const corsOptions = {
   methods: ['GET', 'POST', 'OPTIONS']
 }
 ```
+
+---
+
+## 认证与配额 (Auth & Quota)
+
+### 认证模式
+- **AUTH_MODE=dev**：默认使用 `X-User-Id`/`DEV_USER_ID` 作为用户标识（仅开发/测试）。
+- **AUTH_MODE=local**：手机号验证码登录 + 本地 JWT（Bearer）。
+- **AUTH_MODE=supabase**：Bearer 走 Supabase Auth 令牌（/auth/v1/user 校验）。
+- 当 `AUTH_REQUIRED=1` 时，所有业务接口必须携带 Bearer token，否则 401。
+
+### POST /api/v1/auth/sms/send
+发送短信验证码（当前默认 `SMS_PROVIDER=mock`）。
+
+**请求体**
+```json
+{ "phone": "13800138000" }
+```
+
+**响应体**
+```json
+{ "ok": true, "expires_in_seconds": 300, "code": "123456" }
+```
+> `code` 仅在非生产环境且 `SMS_RETURN_CODE_IN_RESPONSE=1` 时返回。
+
+### POST /api/v1/auth/sms/verify
+验证验证码并签发 JWT。
+
+**请求体**
+```json
+{ "phone": "13800138000", "code": "123456" }
+```
+
+**响应体**
+```json
+{
+  "access_token": "jwt...",
+  "token_type": "bearer",
+  "expires_at": "2025-01-06T10:30:00Z",
+  "user": { "user_id": "usr_xxx", "phone": "+8613800138000" }
+}
+```
+
+### GET /api/v1/me/quota
+查询当前用户剩余 CP/报告券（CP 由 BT 折算，BT 按用量精确扣除）。
+
+**响应体**
+```json
+{
+  "cp_left": 120,
+  "report_coupons_left": 1,
+  "trial_expires_at": "2025-01-10T00:00:00Z",
+  "plan_tier": "S1",
+  "data_retention_tier": "3m"
+}
+```
+
+---
+
+## 家庭-子女（Profile）账户切换（Planned / Draft）
+
+> 说明：本节为已确认的“家庭共用配额 + 子女档案数据隔离”规划口径；落地执行与阶段划分以 `docs/profile_management_plan.md` 为准。
+
+### 约束与计费
+- **配额/计费归属**：归属家长主账号 `user_id`（家庭共用），不按 `profile_id` 计费。
+- **数据隔离维度**：除认证外，所有业务数据读写都应按 `(user_id, profile_id)` 隔离。
+
+### Header：X-Profile-Id
+
+客户端（支持 Profile 的版本）应在所有业务请求头携带：
+```http
+X-Profile-Id: <profile_id>
+```
+
+后端解析规则（兼容旧客户端，避免阻断）：
+- 若提供 `X-Profile-Id`：必须属于当前 `user_id`，否则 403。
+- 若未提供：自动使用该 `user_id` 的默认 profile（若不存在则自动创建一个默认 profile）。
+
+### Profiles API（建议）
+
+#### GET /api/v1/me/profiles
+返回当前用户所有子女档案与默认 profile。
+
+**响应体**
+```json
+{
+  "default_profile_id": "prf_123",
+  "profiles": [
+    {
+      "profile_id": "prf_123",
+      "display_name": "大儿子",
+      "avatar_url": null,
+      "is_default": true,
+      "created_at": "2026-01-17T01:23:45Z"
+    }
+  ]
+}
+```
+
+#### POST /api/v1/me/profiles
+创建子女档案（同一 `user_id` 下 `display_name` 必须唯一）。
+
+**请求体**
+```json
+{ "display_name": "小女儿", "avatar_url": null }
+```
+
+#### PATCH /api/v1/me/profiles/{profile_id}
+更新子女档案（重命名/头像等）。
+
+#### POST /api/v1/me/profiles/{profile_id}/set_default
+设置默认 profile（前端切换时可调用，便于“无 header 兼容时”也能落到正确 profile）。
+
+#### DELETE /api/v1/me/profiles/{profile_id}
+删除 profile（限制：不能删除最后一个；删除默认时需自动迁移默认到另一个 profile）。
+
+### 传错账户补救（建议）
+
+#### POST /api/v1/submissions/{submission_id}/move_profile
+把一次作业（submission）及其派生事实迁移到另一个 profile（仅限同一 user）。
+
+**请求体**
+```json
+{ "to_profile_id": "prf_456" }
+```
+
+**响应体**
+```json
+{ "ok": true }
+```
+
+### 管理员接口（WS-G，最小可用）
+所有管理员接口需 `X-Admin-Token`。
+
+#### GET /api/v1/admin/users?phone=...&limit=...&include_wallet=...
+#### GET /api/v1/admin/users/{user_id}
+#### POST /api/v1/admin/users/{user_id}/wallet_adjust
+```json
+{
+  "bt_trial_delta": 0,
+  "bt_subscription_delta": 124000,
+  "bt_report_reserve_delta": 0,
+  "report_coupons_delta": 1,
+  "plan_tier": "S2",
+  "data_retention_tier": "12m",
+  "trial_expires_at": null,
+  "reason": "manual grant"
+}
+```
+#### GET /api/v1/admin/audit_logs?limit=...
+
+#### GET /api/v1/admin/usage_ledger?user_id=...&limit=...&before=...
+返回该用户的扣费流水（按 `created_at desc`）。
+
+#### GET /api/v1/admin/submissions?user_id=...&profile_id=...&limit=...&before=...
+返回该用户的作业列表（可选按 `profile_id` 过滤）。
+
+#### GET /api/v1/admin/reports?user_id=...&profile_id=...&limit=...&before=...
+返回该用户的报告列表（可选按 `profile_id` 过滤）。
 
 ---
 

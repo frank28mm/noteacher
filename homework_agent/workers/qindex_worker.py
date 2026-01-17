@@ -131,9 +131,11 @@ def main() -> int:
                 sub = resolve_submission_for_session(job.session_id) or {}
                 sid = str(sub.get("submission_id") or "").strip()
                 uid = str(sub.get("user_id") or "").strip()
+                pid = str(sub.get("profile_id") or "").strip()
                 if sid and uid:
                     persist_qindex_slices(
                         user_id=uid,
+                        profile_id=(pid if pid else None),
                         submission_id=sid,
                         session_id=job.session_id,
                         qindex=index,

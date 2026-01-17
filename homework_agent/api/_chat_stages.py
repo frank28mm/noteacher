@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -25,7 +26,7 @@ from homework_agent.api.session import (
     save_session,
     _now_ts,
 )
-from homework_agent.utils.observability import log_event, trace_span
+from homework_agent.utils.observability import log_event, log_llm_usage, trace_span
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.submission_store import (
     load_qindex_image_refs,
@@ -44,8 +45,31 @@ from homework_agent.api.chat import (  # noqa: E402
 )
 
 import homework_agent.api.chat as chat_api  # noqa: E402
+from homework_agent.services.quota_service import bt_from_usage, charge_bt_spendable  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+_CARD_ITEM_ID_RE = re.compile(r"^p\d+\s*:\s*q\s*:\s*(.+)$", re.IGNORECASE)
+
+
+def _try_extract_qn_from_context_id(cid: str) -> Optional[str]:
+    """
+    Best-effort map client identifiers to question_number for focus binding.
+    Supported:
+    - question_cards.item_id: "p1:q:15(2)" -> "15(2)"
+    - plain question number: "15(2)" / "15"
+    - prefixed question: "Q15(2)"
+    """
+    raw = str(cid or "").strip()
+    if not raw:
+        return None
+    raw = raw.replace("（", "(").replace("）", ")")
+    if raw.lower().startswith("q") and len(raw) > 1:
+        raw = raw[1:].strip()
+    m = _CARD_ITEM_ID_RE.match(raw)
+    if m:
+        raw = str(m.group(1) or "").strip()
+    return _normalize_question_number(raw) or None
 
 
 def _normalize_context_ids(raw_ids: Any) -> List[str | int]:
@@ -83,6 +107,13 @@ def _resolve_context_items(
     missing: List[str] = []
     by_item_id = {str(m.get("item_id")): m for m in mistakes if m.get("item_id")}
     by_local_id = {str(m.get("id")): m for m in mistakes if m.get("id") is not None}
+    by_qn = {}
+    for m in mistakes:
+        if not isinstance(m, dict):
+            continue
+        qn = _normalize_question_number(m.get("question_number") or m.get("question_index"))
+        if qn:
+            by_qn[str(qn)] = m
 
     for cid in context_ids:
         if isinstance(cid, int):
@@ -91,7 +122,12 @@ def _resolve_context_items(
             else:
                 missing.append(str(cid))
         else:
-            item = by_item_id.get(str(cid)) or by_local_id.get(str(cid))
+            key = str(cid)
+            item = by_item_id.get(key) or by_local_id.get(key)
+            if not isinstance(item, dict):
+                qn = _try_extract_qn_from_context_id(key)
+                if qn:
+                    item = by_qn.get(str(qn))
             if isinstance(item, dict):
                 selected.append(item)
             else:
@@ -397,6 +433,26 @@ def _prepare_chat_context_or_abort(
     try:
         context_ids = _normalize_context_ids(req.context_item_ids or [])
         if context_ids:
+            # Fast-path: if client sends question_cards.item_id ("p1:q:15(2)") or a bare qn,
+            # bind focus directly from qbank even when this question is not in wrong_items.
+            for cid in context_ids:
+                if isinstance(cid, str):
+                    qn = _try_extract_qn_from_context_id(cid)
+                    if not qn:
+                        continue
+                    if qn in bank_questions_str:
+                        requested_qn_from_context = qn
+                        break
+                    # Allow prefix matching (e.g. "28" -> "28(1)②")
+                    candidates = [
+                        k
+                        for k in available_qnums
+                        if str(k).startswith(f"{qn}(") or str(k).startswith(str(qn))
+                    ]
+                    if candidates:
+                        requested_qn_from_context = sorted(candidates, key=len)[0]
+                        break
+
             mistakes = get_mistakes(session_id) if session_id else None
             selected, missing = _resolve_context_items(context_ids, mistakes)
             if selected:
@@ -442,6 +498,13 @@ def _prepare_chat_context_or_abort(
         req.question
     )
     requested_qn = _normalize_question_number(requested_qn) if requested_qn else None
+
+    # Always set focus_question_number if we have a requested question (even if not in bank)
+    # This ensures question-specific chat history is preserved
+    if requested_qn:
+        session_data["focus_question_number"] = str(requested_qn)
+        logger.debug(f"[DEBUG _prepare_tutoring_context] Set focus_question_number={requested_qn} from context_item_ids={req.context_item_ids}")
+
     if requested_qn:
         # If user explicitly asked for a question that does not exist, do NOT keep old focus.
         if requested_qn not in bank_questions_str:
@@ -727,6 +790,7 @@ async def _stream_socratic_llm_to_sse(
     llm_client: LLMClient,
     req: ChatRequest,
     session_id: str,
+    user_id: str,
     session_data: Dict[str, Any],
     wrong_item_context: Dict[str, Any],
     current_turn: int,
@@ -734,6 +798,7 @@ async def _stream_socratic_llm_to_sse(
     model_override: Optional[str],
     prompt_variant: Optional[str],
     request_id: str,
+    idempotency_key: Optional[str],
     started_m: float,
 ) -> AsyncIterator[bytes]:
     """True streaming: LLM token stream -> SSE chat events (preserves existing behavior)."""
@@ -741,22 +806,48 @@ async def _stream_socratic_llm_to_sse(
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
     DONE = object()
+    llm_usage: Optional[Dict[str, Any]] = None
+
+    # Get current focus question number
+    focus_q = session_data.get("focus_question_number")
+
+    # Get question-specific history for the current question
+    from homework_agent.api.session import get_question_history, save_question_history
+    q_history = get_question_history(session_data, focus_q) if focus_q else []
+
+    # Also maintain global history for compatibility
+    global_history = session_data.get("history") or []
 
     # Update session immediately with user's message so LLM can see the conversation history.
     # Avoid duplicating the same user message when we already appended it earlier
     # (e.g. during mandatory "读图/切片" prelude).
     already_has_user = False
     try:
-        for m in reversed(session_data.get("history") or []):
+        for m in reversed(q_history):
             if isinstance(m, dict) and m.get("role") == "user":
                 already_has_user = str(m.get("content") or "") == str(req.question)
                 break
+        if not already_has_user:
+            for m in reversed(global_history):
+                if isinstance(m, dict) and m.get("role") == "user":
+                    already_has_user = str(m.get("content") or "") == str(req.question)
+                    break
     except Exception as e:
         logger.debug(f"Checking for duplicate user message failed: {e}")
         already_has_user = False
+
     if not already_has_user:
-        session_data["history"].append({"role": "user", "content": req.question})
-    llm_history = list(session_data["history"][-12:])
+        user_msg = {"role": "user", "content": req.question}
+        # Add to question-specific history
+        if focus_q:
+            q_history.append(user_msg)
+            save_question_history(session_data, focus_q, q_history)
+        # Also add to global history for compatibility
+        global_history.append(user_msg)
+        session_data["history"] = global_history
+
+    # Use question-specific history for LLM context (prefer over global)
+    llm_history = list((q_history if q_history else global_history)[-12:])
     summary = session_data.get("summary")
     if isinstance(summary, str) and summary.strip():
         llm_history = [
@@ -786,7 +877,11 @@ async def _stream_socratic_llm_to_sse(
 
     # Add placeholder assistant message for streaming updates
     assistant_msg = {"role": "assistant", "content": ""}
-    session_data["history"].append(assistant_msg)
+    if focus_q:
+        q_history.append(assistant_msg)
+        save_question_history(session_data, focus_q, q_history)
+    global_history.append(assistant_msg)
+    session_data["history"] = global_history
 
     # Emit initial state so clients can render immediately
     focus_image_urls, focus_image_source = _extract_focus_image_urls(
@@ -862,6 +957,11 @@ async def _stream_socratic_llm_to_sse(
         last_llm_item_m = time.monotonic()
         if isinstance(item, dict) and item.get("event"):
             evt = item.get("event")
+            if evt == "llm_usage":
+                data_obj = item.get("data")
+                if isinstance(data_obj, dict):
+                    llm_usage = dict(data_obj)
+                continue
             data = json.dumps(item.get("data") or {}, ensure_ascii=False)
             yield f"event: {evt}\ndata: {data}\n\n".encode("utf-8")
             continue
@@ -871,6 +971,11 @@ async def _stream_socratic_llm_to_sse(
         chunk = str(item)
         buffer += chunk
         assistant_msg["content"] = _format_math_for_display(buffer)
+
+        # Sync question-specific history
+        if focus_q:
+            from homework_agent.api.session import save_question_history
+            save_question_history(session_data, focus_q, q_history)
 
         # throttle event frequency
         now_m = time.monotonic()
@@ -887,6 +992,11 @@ async def _stream_socratic_llm_to_sse(
             last_emit = now_m
 
     # Ensure final content is emitted
+    # Sync question-specific history one last time
+    if focus_q:
+        from homework_agent.api.session import save_question_history
+        save_question_history(session_data, focus_q, q_history)
+
     payload = ChatResponse(
         messages=session_data["history"],
         session_id=session_id,
@@ -907,6 +1017,78 @@ async def _stream_socratic_llm_to_sse(
     except Exception as e:
         logger.debug(f"Sanitizing session for persistence failed (best-effort): {e}")
     save_session(session_id, session_data)
+
+    # WS-E: bill chat by LLM usage (BT = prompt + 10 * completion).
+    if str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
+        if isinstance(llm_usage, dict):
+            try:
+                bt_cost = bt_from_usage(
+                    prompt_tokens=int(llm_usage.get("prompt_tokens") or 0),
+                    completion_tokens=int(llm_usage.get("completion_tokens") or 0),
+                )
+                log_llm_usage(
+                    logger,
+                    request_id=str(request_id or ""),
+                    session_id=str(session_id or ""),
+                    provider=str(provider_str or ""),
+                    model=str(model_override or ""),
+                    usage={
+                        "prompt_tokens": int(llm_usage.get("prompt_tokens") or 0),
+                        "completion_tokens": int(llm_usage.get("completion_tokens") or 0),
+                        "total_tokens": int(llm_usage.get("total_tokens") or 0),
+                    },
+                    stage="chat.socratic",
+                )
+                ok, err = charge_bt_spendable(
+                    user_id=str(user_id),
+                    bt_cost=int(bt_cost),
+                    idempotency_key=str(idempotency_key or request_id or "").strip() or None,
+                    request_id=str(request_id or "").strip() or None,
+                    endpoint="/api/v1/chat",
+                    stage="chat",
+                    model=str(model_override or "") or None,
+                    usage={
+                        "prompt_tokens": int(llm_usage.get("prompt_tokens") or 0),
+                        "completion_tokens": int(llm_usage.get("completion_tokens") or 0),
+                        "total_tokens": int(llm_usage.get("total_tokens") or 0),
+                    },
+                )
+                if not ok:
+                    log_event(
+                        logger,
+                        "quota_charge_failed",
+                        level="warning",
+                        request_id=request_id,
+                        session_id=session_id,
+                        user_id=str(user_id),
+                        endpoint="/api/v1/chat",
+                        stage="chat",
+                        error=str(err or ""),
+                    )
+            except Exception as e:
+                log_event(
+                    logger,
+                    "quota_charge_exception",
+                    level="warning",
+                    request_id=request_id,
+                    session_id=session_id,
+                    user_id=str(user_id),
+                    endpoint="/api/v1/chat",
+                    stage="chat",
+                    error_type=e.__class__.__name__,
+                    error=str(e),
+                )
+        else:
+            log_event(
+                logger,
+                "quota_usage_missing",
+                level="warning",
+                request_id=request_id,
+                session_id=session_id,
+                user_id=str(user_id),
+                endpoint="/api/v1/chat",
+                stage="chat",
+            )
 
     # Status: keep it simple for now
     log_event(

@@ -18,6 +18,17 @@ def test_require_user_id_prefers_bearer_token(monkeypatch: pytest.MonkeyPatch):
     assert uc.require_user_id(authorization="Bearer t", x_user_id="dev_x") == "user_123"
 
 
+def test_require_user_id_local_jwt(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(uc, "verify_access_token", lambda _token: {"sub": "user_local"})
+    monkeypatch.setattr(
+        uc, "get_settings", lambda: types.SimpleNamespace(auth_required=False, auth_mode="local")
+    )
+    assert (
+        uc.require_user_id(authorization="Bearer local_token", x_user_id="dev_x")
+        == "user_local"
+    )
+
+
 def test_require_user_id_invalid_token_raises_401(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(uc, "_verify_supabase_jwt", lambda _token: None)
     monkeypatch.setattr(

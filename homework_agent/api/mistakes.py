@@ -13,6 +13,7 @@ from homework_agent.services.mistakes_service import (
     list_mistakes,
     restore_mistake,
 )
+from homework_agent.utils.profile_context import require_profile_id
 from homework_agent.utils.user_context import require_user_id
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ def get_mistakes_history(
     *,
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
     limit_submissions: int = Query(default=20, ge=1, le=50),
     before_created_at: Optional[str] = Query(default=None),
     include_excluded: bool = Query(default=False),
@@ -58,9 +60,11 @@ def get_mistakes_history(
     说明：当前以 `submissions.grade_result.wrong_items` 作为 durable snapshot。
     """
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
     try:
         mistakes, next_before = list_mistakes(
             user_id=user_id,
+            profile_id=profile_id,
             limit_submissions=limit_submissions,
             before_created_at=before_created_at,
             include_excluded=include_excluded,
@@ -94,14 +98,17 @@ def get_mistakes_stats(
     *,
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
     limit_submissions: int = Query(default=50, ge=1, le=50),
     before_created_at: Optional[str] = Query(default=None),
 ):
     """按 knowledge_tags 聚合的基础统计（MVP）。"""
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
     try:
         mistakes, next_before = list_mistakes(
             user_id=user_id,
+            profile_id=profile_id,
             limit_submissions=limit_submissions,
             before_created_at=before_created_at,
             include_excluded=False,
@@ -124,12 +131,15 @@ def post_mistake_exclusion(
     *,
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
 ):
     """错题排除（只影响统计/报告，不改历史事实）。"""
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
     try:
         exclude_mistake(
             user_id=user_id,
+            profile_id=profile_id,
             submission_id=req.submission_id,
             item_id=req.item_id,
             reason=req.reason,
@@ -149,11 +159,18 @@ def delete_mistake_exclusion(
     *,
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
 ):
     """错题恢复（撤销排除）。"""
     user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
+    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
     try:
-        restore_mistake(user_id=user_id, submission_id=submission_id, item_id=item_id)
+        restore_mistake(
+            user_id=user_id,
+            profile_id=profile_id,
+            submission_id=submission_id,
+            item_id=item_id,
+        )
     except MistakesServiceError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
