@@ -407,6 +407,9 @@ class SiliconFlowQIndexLocator:
                 fetch_timeout = (
                     "Timeout while fetching image_url" in msg
                     or "timeout while fetching image_url" in msg
+                    # Ark sometimes returns 400 with this message when it can't download the public URL.
+                    or "Timeout while downloading url=" in msg
+                    or "timeout while downloading url=" in msg
                 )
                 if provider == "ark" and fetch_timeout and data_url is None:
                     data_url = _image_url_to_data_url(image_url)

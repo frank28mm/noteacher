@@ -1338,7 +1338,14 @@ async def grade_homework(
                         logger.debug(f"dict conversion for wrong_item failed: {e}")
                         continue
             save_mistakes(session_for_ctx, wrong_items_payload)
-            # QIndex: optional background optimization (bbox/slice). Default: skip for speed.
+            # QIndex: optional background optimization (bbox/slice).
+            # Product decision: keep grading fast/stable by default; only run qindex when user explicitly requests it
+            # (e.g. from Question Detail "生成图示切片") or when AUTO_QINDEX_ON_GRADE=1 is set.
+            auto_qindex = str(os.getenv("AUTO_QINDEX_ON_GRADE", "0") or "0").strip() in {
+                "1",
+                "true",
+                "yes",
+            }
             bank = get_question_bank(session_for_ctx) if session_for_ctx else None
             page_urls = None
             if isinstance(bank, dict):
@@ -1356,7 +1363,8 @@ async def grade_homework(
                 logger.debug(f"Checking visual risk warning failed: {e}")
                 must_slice = False
             if (
-                page_urls
+                auto_qindex
+                and page_urls
                 and isinstance(bank, dict)
                 and (should_create_slices_for_bank(bank) or must_slice)
             ):

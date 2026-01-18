@@ -441,6 +441,26 @@ def get_submission_detail(
                 copy_q["options"] = vq.get("options")
         copy_q["question_text"] = _compose_question_text_full(copy_q)
 
+        # Visual-risk signal for UI:
+        # - used to decide whether to show the manual "生成图示切片" trigger
+        # - avoids duplicating heuristics in frontend
+        try:
+            from homework_agent.core.slice_policy import analyze_visual_risk
+            from homework_agent.models.schemas import Subject
+
+            subj_raw = str(row.get("subject") or "").strip().lower()
+            subj = Subject.ENGLISH if subj_raw == "english" else Subject.MATH
+            vr, vr_reasons = analyze_visual_risk(
+                subject=subj,
+                question_content=str(copy_q.get("question_text") or copy_q.get("question_content") or "").strip(),
+                warnings=copy_q.get("warnings") if isinstance(copy_q.get("warnings"), list) else [],
+            )
+            copy_q["visual_risk"] = bool(vr)
+            copy_q["visual_risk_reasons"] = list(vr_reasons or [])[:8]
+        except Exception:
+            # Best-effort: never block the API on heuristics.
+            pass
+
         # Canonicalize question item_id to align with UI card ids (p{page}:q:{question_number}).
         # This prevents inconsistent deep-linking between "questions" and "question_cards".
         try:

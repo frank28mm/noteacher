@@ -165,6 +165,13 @@ def build_question_cards_from_questions_list(
                 "verdict": verdict,
                 "reason": reason,
                 "needs_review": needs_review,
+                # Optional qindex slice refs (if available).
+                "question_slice_image_url": q.get("question_slice_image_url"),
+                "figure_slice_image_url": q.get("figure_slice_image_url"),
+                "image_refs": q.get("image_refs"),
+                # Optional visual-risk signal (for manual qindex trigger UI).
+                "visual_risk": q.get("visual_risk"),
+                "visual_risk_reasons": q.get("visual_risk_reasons"),
             }
         )
     return cards, blank_count
