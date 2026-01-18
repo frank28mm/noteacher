@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -132,6 +133,62 @@ def _compose_question_text_full(q: Dict[str, Any]) -> Optional[str]:
         return None
     stem = str(q.get("question_content") or "").strip()
     options = q.get("options")
+
+    # Normalize a common malformed options shape:
+    # {"A": "3  B. 4  C. 2  D. 1"} -> {"A":"3","B":"4","C":"2","D":"1"}
+    if isinstance(options, dict) and len(options) == 1 and "A" in options:
+        try:
+            raw = str(options.get("A") or "").strip()
+            if raw and (
+                any(m in raw for m in ("B.", "C.", "D.", "B、", "C、", "D、", "(B)", "(C)", "(D)", "（B）", "（C）", "（D）"))
+            ):
+                parsed: Dict[str, str] = {}
+                # Some graders/regexes collapse options into "A": "3  B. 4  C. 2  D. 1" (missing "A." marker).
+                # In that case, treat the prefix before the first B-marker as option A.
+                m_b = re.search(r"(?:\s+|^)(?:B[\.\、:：]|[\(（]B[\)）])\s*", raw)
+                if m_b and m_b.start() > 0:
+                    a_part = raw[: m_b.start()].strip()
+                    if a_part:
+                        parsed["A"] = re.sub(r"\s+", " ", a_part)
+                    raw_rest = raw[m_b.start() :].strip()
+                else:
+                    raw_rest = raw
+                # Prefer plain markers "A. ... B. ...", fallback to "(A) ..." style.
+                for k, v in re.findall(
+                    r"([A-D])[\.\、:：]\s*([^A-D]+?)(?=(?:\s+[A-D][\.\、:：]\s*)|$)",
+                    raw_rest,
+                ):
+                    kk = str(k).strip()
+                    vv = re.sub(r"\s+", " ", str(v).strip())
+                    if kk and vv:
+                        parsed[kk] = vv
+                if not parsed:
+                    for k, v in re.findall(
+                        r"[\(（]([A-D])[\)）]\s*([^A-D]+?)(?=(?:\s*[\(（][A-D][\)）]\s*)|$)",
+                        raw_rest,
+                    ):
+                        kk = str(k).strip()
+                        vv = re.sub(r"\s+", " ", str(v).strip())
+                        if kk and vv:
+                            parsed[kk] = vv
+                if parsed:
+                    options = parsed
+        except Exception:
+            pass
+
+    # If the question is blank and looks like a choice placeholder was misread as "(A)/(B)...",
+    # sanitize the trailing placeholder so UI doesn't look like an answer key.
+    try:
+        qt = str(q.get("question_type") or "").strip().lower()
+        ans_state = str(q.get("answer_state") or "").strip().lower()
+        if qt == "choice" and ans_state == "blank":
+            stem = re.sub(
+                r"[\(（][A-D][\)）](?=\s*[。．.！!？?…]*\s*$)",
+                "（ ）",
+                stem,
+            )
+    except Exception:
+        pass
     opt_lines: List[str] = []
     if isinstance(options, dict):
         for key in ("A", "B", "C", "D", "E", "F"):
@@ -151,7 +208,9 @@ def _compose_question_text_full(q: Dict[str, Any]) -> Optional[str]:
 
     # Avoid duplicating options if stem already includes A./B. ...
     if opt_lines and stem:
-        if any(mark in stem for mark in ("A.", "A、", "A:", "A：", "(A)", "（A）")):
+        # Only treat as "already has options" when there are real option lines,
+        # not when the stem contains a trailing placeholder like "（A）".
+        if any(mark in stem for mark in ("A.", "A、", "A:", "A：")):
             opt_lines = []
 
     full = stem
