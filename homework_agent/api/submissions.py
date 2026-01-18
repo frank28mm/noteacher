@@ -226,6 +226,16 @@ def _compute_summary_from_grade_result(grade_result: Any) -> Optional[Submission
             continue
         verdict = str(q.get("verdict") or "").strip().lower()
         answer_state = str(q.get("answer_state") or "").strip().lower()
+        if not answer_state or answer_state == "unknown":
+            try:
+                from homework_agent.core.question_cards import infer_answer_state
+
+                answer_state = infer_answer_state(
+                    student_answer=q.get("student_answer"),
+                    answer_status=q.get("answer_status"),
+                )
+            except Exception:
+                answer_state = answer_state or "unknown"
         if answer_state == "blank":
             blank += 1
             continue
@@ -425,6 +435,108 @@ def get_submission_detail(
         questions = [
             v for v in vision_questions_map.values() if isinstance(v, dict) and v.get("question_number")
         ]
+
+    # Best-effort: enforce blank policy + repair common OCR/LLM misreads for existing records.
+    # This keeps UI consistent for older submissions without requiring a full re-grade.
+    try:
+        from datetime import datetime, timezone
+
+        from homework_agent.core.qbank_builder import normalize_questions as _normalize_questions_for_storage
+
+        original = [q for q in questions if isinstance(q, dict)]
+        # Enrich with OCR-grounded stems/options so the blank/choice heuristics can catch
+        # common OCR misreads like "（A）" for the stem placeholder "（ ）".
+        enriched: List[Dict[str, Any]] = []
+        for q in original:
+            copy_q = dict(q)
+            qn_raw = _normalize_question_key(copy_q.get("question_number"))
+            vq = vision_questions_map.get(qn_raw) if qn_raw else None
+            if isinstance(vq, dict):
+                if vq.get("question_content"):
+                    copy_q["question_content"] = vq.get("question_content")
+                if vq.get("options") is not None:
+                    copy_q["options"] = vq.get("options")
+            copy_q["question_text"] = _compose_question_text_full(copy_q)
+            enriched.append(copy_q)
+
+        repaired_enriched = _normalize_questions_for_storage(enriched)
+        # Apply verdict/answer_state fixes back onto the original stored questions,
+        # without overwriting stored question_content/options.
+        repaired_map: Dict[str, Dict[str, Any]] = {}
+        for it in repaired_enriched:
+            if not isinstance(it, dict):
+                continue
+            qn = _normalize_question_key(it.get("question_number"))
+            if not qn:
+                continue
+            repaired_map[qn] = it
+
+        repaired: List[Dict[str, Any]] = []
+        for q in original:
+            copy_q = dict(q)
+            qn = _normalize_question_key(copy_q.get("question_number"))
+            fixed = repaired_map.get(qn) if qn else None
+            if isinstance(fixed, dict):
+                for k in ("verdict", "answer_state", "student_answer", "answer_status", "warnings"):
+                    if k in fixed:
+                        copy_q[k] = fixed.get(k)
+            repaired.append(copy_q)
+
+        def _fp(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+            out: Dict[str, Any] = {}
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                qn = _normalize_question_key(it.get("question_number"))
+                if not qn:
+                    continue
+                out[qn] = (
+                    str(it.get("verdict") or "").strip().lower(),
+                    str(it.get("answer_state") or "").strip().lower(),
+                    str(it.get("student_answer") or "").strip(),
+                    str(it.get("answer_status") or "").strip(),
+                )
+            return out
+
+        if _fp(original) != _fp(repaired):
+            # Recompute aggregate counters to avoid stale summary in list endpoint.
+            wrong = 0
+            uncertain = 0
+            blank = 0
+            for it in repaired:
+                if not isinstance(it, dict):
+                    continue
+                ans_state = str(it.get("answer_state") or "").strip().lower()
+                if ans_state == "blank":
+                    blank += 1
+                    continue
+                v = str(it.get("verdict") or "").strip().lower()
+                if v == "incorrect":
+                    wrong += 1
+                elif v == "uncertain":
+                    uncertain += 1
+            grade_result["questions"] = repaired
+            grade_result["total_items"] = int(len(repaired))
+            grade_result["wrong_count"] = int(wrong)
+            grade_result["uncertain_count"] = int(uncertain)
+            grade_result["blank_count"] = int(blank)
+            try:
+                q = _safe_table("submissions").update(
+                    {
+                        "grade_result": grade_result,
+                        "last_active_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                q = q.eq("user_id", str(user_id)).eq("submission_id", sid)
+                if profile_id:
+                    q = q.eq("profile_id", str(profile_id))
+                q.execute()
+            except Exception:
+                # best-effort only
+                pass
+            questions = repaired
+    except Exception:
+        pass
 
     safe_questions: List[Dict[str, Any]] = []
     for q in questions:

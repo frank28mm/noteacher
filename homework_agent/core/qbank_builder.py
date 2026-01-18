@@ -213,10 +213,46 @@ def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         if qn is not None:
             copy_q["question_number"] = qn
 
+        # normalize question_type/difficulty (used by reports)
+        copy_q["question_type"] = _coerce_question_type(copy_q.get("question_type"))
+        copy_q["difficulty"] = _coerce_difficulty(copy_q.get("difficulty"))
+
         # Infer answer_state FIRST (before verdict logic)
         answer_status = copy_q.get("answer_status")
         student_answer = copy_q.get("student_answer")
-        inferred = infer_answer_state(student_answer=student_answer, answer_status=answer_status)
+        inferred = infer_answer_state(
+            student_answer=student_answer, answer_status=answer_status
+        )
+
+        # Heuristic (P0): for multiple-choice questions, OCR/LLM may hallucinate a single option letter
+        # from the stem placeholder "（ ）" (misread as "（A）") and treat it as the student's answer.
+        # In this case, we conservatively mark as blank (policy: blank => incorrect).
+        suspected_blank_choice = False
+        try:
+            qt = str(copy_q.get("question_type") or "").strip().lower()
+            ans = str(student_answer or "").strip().upper()
+            status = str(answer_status or "").strip()
+            content = str(
+                copy_q.get("question_content")
+                or copy_q.get("question_text")
+                or ""
+            )
+            if (
+                qt == "choice"
+                and inferred == "has_answer"
+                and (not status)
+                and ans in {"A", "B", "C", "D"}
+                and (f"（{ans}）" in content or f"({ans})" in content)
+                and not re.search(r"(选[择项]?[:：]|答案[:：]|作答[:：])", content)
+            ):
+                inferred = "blank"
+                copy_q["student_answer"] = ""
+                if not status:
+                    copy_q["answer_status"] = "未作答"
+                suspected_blank_choice = True
+        except Exception:
+            suspected_blank_choice = False
+
         copy_q["answer_state"] = inferred
 
         # normalize verdict - mark blank answers as incorrect
@@ -250,6 +286,13 @@ def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             copy_q["warnings"] = [w]
         elif not isinstance(w, list):
             copy_q["warnings"] = [str(w)]
+        if suspected_blank_choice:
+            try:
+                warn = "可能未作答：选择题括号答案疑似 OCR/模型误读，按未作答处理"
+                if warn not in copy_q["warnings"]:
+                    copy_q["warnings"].append(warn)
+            except Exception:
+                pass
         # normalize knowledge_tags
         tags = copy_q.get("knowledge_tags")
         if tags is None:
@@ -258,10 +301,6 @@ def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             copy_q["knowledge_tags"] = [tags]
         elif not isinstance(tags, list):
             copy_q["knowledge_tags"] = [str(tags)]
-
-        # normalize question_type/difficulty (used by reports)
-        copy_q["question_type"] = _coerce_question_type(copy_q.get("question_type"))
-        copy_q["difficulty"] = _coerce_difficulty(copy_q.get("difficulty"))
 
         # Contract: do not store standard answers in the question bank (avoid leakage + reduce payload).
         if "standard_answer" in copy_q:

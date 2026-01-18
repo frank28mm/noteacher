@@ -214,6 +214,115 @@ def update_submission_after_grade(
     if not user_id or not submission_id:
         return
     try:
+        # Best-effort repair (P0):
+        # Enforce "blank => incorrect" consistently and mitigate a common OCR/LLM issue where
+        # choice placeholders "（ ）" are misread as "（A）" and then treated as a student's answer.
+        # This runs before persistence so list/detail UIs stay consistent without requiring a re-grade.
+        try:
+            questions = grade_result.get("questions") if isinstance(grade_result, dict) else None
+            if (
+                isinstance(questions, list)
+                and vision_raw_text
+                and str(vision_raw_text).strip()
+                and subject
+            ):
+                from homework_agent.core.qbank_parser import build_question_bank_from_vision_raw_text
+                from homework_agent.core.qbank_builder import normalize_questions as _normalize_questions_for_storage
+                from homework_agent.models.schemas import Subject as SubjectEnum
+
+                subj_raw = str(subject or "").strip().lower()
+                subj = SubjectEnum.ENGLISH if subj_raw == "english" else SubjectEnum.MATH
+                page_urls = page_image_urls if isinstance(page_image_urls, list) else []
+                vision_qbank = build_question_bank_from_vision_raw_text(
+                    session_id=str(session_id or ""),
+                    subject=subj,
+                    vision_raw_text=str(vision_raw_text),
+                    page_image_urls=[str(u).strip() for u in page_urls if str(u).strip()],
+                )
+                vision_questions_map = (
+                    vision_qbank.get("questions")
+                    if isinstance(vision_qbank.get("questions"), dict)
+                    else {}
+                )
+
+                # Enrich with OCR stems/options for heuristics, then normalize and apply back
+                # only verdict/answer_state fields (avoid overwriting stored question_content).
+                enriched: List[Dict[str, Any]] = []
+                for q in questions:
+                    if not isinstance(q, dict):
+                        continue
+                    cq = dict(q)
+                    qn = str(cq.get("question_number") or "").strip()
+                    vq = vision_questions_map.get(qn) if qn else None
+                    if isinstance(vq, dict):
+                        if vq.get("question_content"):
+                            cq["question_content"] = vq.get("question_content")
+                        if vq.get("options") is not None:
+                            cq["options"] = vq.get("options")
+                    # Some heuristics depend on a full stem+options text.
+                    try:
+                        from homework_agent.core.qbank_builder import _compose_question_text_full
+
+                        cq["question_text"] = _compose_question_text_full(cq)
+                    except Exception:
+                        pass
+                    enriched.append(cq)
+
+                repaired_enriched = _normalize_questions_for_storage(enriched)
+                repaired_map: Dict[str, Dict[str, Any]] = {}
+                for it in repaired_enriched:
+                    if not isinstance(it, dict):
+                        continue
+                    qn = str(it.get("question_number") or "").strip()
+                    if qn:
+                        repaired_map[qn] = it
+
+                repaired_questions: List[Dict[str, Any]] = []
+                for q in questions:
+                    if not isinstance(q, dict):
+                        continue
+                    cq = dict(q)
+                    qn = str(cq.get("question_number") or "").strip()
+                    fixed = repaired_map.get(qn) if qn else None
+                    if isinstance(fixed, dict):
+                        for k in (
+                            "verdict",
+                            "answer_state",
+                            "student_answer",
+                            "answer_status",
+                            "warnings",
+                        ):
+                            if k in fixed:
+                                cq[k] = fixed.get(k)
+                    repaired_questions.append(cq)
+
+                # Recompute counters from repaired questions (avoid stale aggregates).
+                wrong = 0
+                uncertain = 0
+                blank = 0
+                for q in repaired_questions:
+                    if not isinstance(q, dict):
+                        continue
+                    ans_state = str(q.get("answer_state") or "").strip().lower()
+                    if ans_state == "blank":
+                        blank += 1
+                        continue
+                    v = str(q.get("verdict") or "").strip().lower()
+                    if v == "incorrect":
+                        wrong += 1
+                    elif v == "uncertain":
+                        uncertain += 1
+
+                grade_result = dict(grade_result or {})
+                grade_result["questions"] = repaired_questions
+                grade_result["total_items"] = int(len(repaired_questions))
+                grade_result["wrong_count"] = int(wrong)
+                grade_result["uncertain_count"] = int(uncertain)
+                grade_result["blank_count"] = int(blank)
+        except Exception:
+            # best-effort only; never block persistence
+            pass
+
         now = _utc_now()
         payload: Dict[str, Any] = {
             "session_id": str(session_id) if session_id else None,

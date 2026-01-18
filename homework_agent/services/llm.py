@@ -1371,7 +1371,9 @@ class LLMClient:
                 messages=messages,
                 temperature=0.4,
                 # Allow longer tutoring responses; UI streaming handles incremental rendering.
-                max_tokens=1600,
+                # Note: the Socratic prompt should keep replies concise; this is mainly to avoid
+                # accidental truncation on rare long explanations.
+                max_tokens=2200,
                 # Best-effort: include usage in the final stream event (if provider supports it).
                 stream_options={"include_usage": True},
                 stream=True,
@@ -1382,7 +1384,7 @@ class LLMClient:
                 model=model,
                 messages=messages,
                 temperature=0.4,
-                max_tokens=1600,
+                max_tokens=2200,
                 stream=True,
             )
         usage_out: Optional[Dict[str, Any]] = None

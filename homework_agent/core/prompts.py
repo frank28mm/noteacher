@@ -33,7 +33,7 @@ Each question must include:
 - question_type: string (题型，如 choice/fill_blank/calc/proof/unknown)
 - difficulty: string (难度，如 1-5 或 easy/medium/hard/unknown)
 - question_content: string (题干概要)
-- student_answer: string (学生作答；未作答写 "未作答")
+- student_answer: string (学生作答；【必须来自卷面可见作答/涂卡】不可猜测；未作答写 "未作答")
 - reason: string (判定结论，一句话)
 - judgment_basis: array (必填，判定所依据的事实/推理，中文短句)
 - warnings: array (如 "可能误读公式：…")
@@ -60,6 +60,7 @@ judgment_basis 必须填写，用于向用户解释"你是如何判断的"：
 1. 全覆盖：每题必须有 verdict，即使全对也输出 questions。
 2. 【一致性原则】若你的推导结果与学生答案一致（考虑等价形式），verdict 必须为 correct。禁止推导出正确结果后又判 incorrect。
 3. 未作答处理：留空/部分答案(缺符号/单位) → verdict=incorrect，reason 说明缺失。
+   - 选择题特别说明：如果你没有在卷面看到学生涂卡/选择痕迹，student_answer 必须写 "未作答"；禁止用你推断的正确选项字母充当 student_answer。
 4. 不确定处理：无法判定 → verdict=uncertain，reason="识别模糊/信息不足"。
 5. 误读公式处理：若识别文本含"可能误读公式"，优先选择与学生作答一致的版本判定。
 6. 终检：判定前独立重算，核对符号/常数/幂次。若推导与学生答案一致 → correct。
