@@ -86,7 +86,7 @@
 - 🟡 WS‑E（P2：上线前必须做）：定价/配额（BT→CP + 报告券；真源见 `docs/pricing_and_quota_strategy.md`）
   - ✅ 已落地（代码）：`user_wallets/usage_ledger` + BT 扣费（grade/chat/report）+ `GET /api/v1/me/quota`
   - ⏳ 待完成：生产口径验收（扣费/幂等/失败回滚）
-  - 🟡 已落地（前端）：余额展示（Home/Mine）+ 402 配额不足 UX（跳转订阅页并提示原因）
+  - ✅ 已落地（前端）：余额展示（Home/Mine）+ 402 配额不足 UX（跳转订阅页并提示原因）
     - 备注：当前本地若未走 `/api/v1/auth/sms/verify` 初始化钱包，`GET /api/v1/me/quota` 可能返回 `wallet_not_found`；需补“开发环境钱包初始化”或前端兜底提示
 - 🟡 WS‑F（P2：上线前必须做）：用户系统与认证（H5 优先：强制手机号；火山短信；微信/抖音可选）
   - ✅ 已落地（代码）：`/api/v1/auth/sms/send|verify` + JWT（AUTH_MODE=local）+ 注册即 Trial Pack
@@ -96,9 +96,9 @@
   - 🟡 F‑5 家庭-子女（Profile）账户切换（真源见 `docs/profile_management_plan.md`）
     - ✅ 已落地（后端）：`child_profiles` + 各业务表 `profile_id` + `/api/v1/me/profiles` + 全链路 `(user_id,profile_id)` 隔离
     - ✅ 已落地（后端）：`POST /api/v1/submissions/{submission_id}/move_profile`（传错账户可补救）
-    - 🟡 已落地（前端）：Home 头像快捷切换（2 个头像并排，高亮当前；切换时提示）
-    - ⏳ 待完成（前端）：关键流程“提交到/归属”强提示（拍照/上传/开始批改/结果/历史详情统一口径）+ “移动到其他孩子”入口全路径对齐
-    - ⏳ 待完成（前端）：Mine「管理子女」CRUD UI（添加/重命名/删除/头像）
+    - ✅ 已落地（前端）：Home 头像快捷切换（2 个头像并排，高亮当前并亮灯；切换时提示）
+    - ✅ 已落地（前端）：关键流程强提示 `数据库：{profile}`（Camera/Upload）+ 结果页可补救入口（ResultSummary：move_profile）
+    - ✅ 已落地（前端）：Mine「管理子女」CRUD UI（ProfileManagement：添加/重命名/删除；头像为可选项可后置）
 - 🟡 WS‑G（P2：上线前必须做）：运营后台（Admin）与客服/审计（最小可用）
   - ✅ 已落地（代码）：`/api/v1/admin/users|wallet_adjust|audit_logs`
   - ✅ 已落地（代码）：`/api/v1/admin/usage_ledger|submissions|reports`（只读查询）
@@ -141,7 +141,7 @@
 - 需要特别注意的出入点（避免后续误读）：
   - **API 端点数量**不是稳定指标：当前 `/api/v1/*` 为 20 条 unique paths（以 `homework_agent/API_CONTRACT.md` 为准，不写固定数字）。
   - **SSE 客户端实现**：后端支持 `Last-Event-Id`（恢复 session + 最多重放 3 条 assistant），但当前 demo 前端用 `fetch + ReadableStream` 解析 SSE，尚未接入 `Last-Event-Id` 断线续接。
-  - **SSE 续接状态**：🔄 前端接入中（按你确认），后续以“能自动恢复 + 不重复输出”为验收。
+  - **SSE 续接状态**：🟡 未完成（当前仅解析 SSE；尚未实现断线自动重连 + `Last-Event-Id` 续接），后续以“能自动恢复 + 不重复输出”为验收。
   - **类型口径**：核心字段已对齐，但前端仍存在少量 `any` 作为过渡（不应宣称“完全无 any”）。
 
 ## 2) 工作流拆分（Workstreams）

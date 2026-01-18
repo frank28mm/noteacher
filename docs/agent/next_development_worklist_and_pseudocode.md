@@ -70,6 +70,18 @@
 - FE‑P0‑05 Job 轮询状态机（不误判失败，使用 `elapsed_ms`，降频轮询）（1–1.5d）
   - 验收：超时不进入错误页；仍持续追更直到后端 `job.status=done/failed`；策略满足真源 §4.1（2s/5s/10s + max_wait）。
 
+- FE‑P0‑06 配额 UX（余额展示 + 402 配额不足引导订阅）（✅ 已完成）
+  - 证据（前端仓库 `noteacher-frontend`）：
+    - `src/services/api.ts`（402 interceptor：保存 `last_quota_error` 并跳转 `/subscribe?reason=quota`）
+    - `src/hooks/useQuota.ts`（拉取 `GET /api/v1/me/quota`）
+    - `src/pages/Home.tsx` / `src/pages/Mine.tsx`（显示 `CP/COUPON`）
+    - `src/pages/Subscribe.tsx`（展示配额不足原因提示）
+  - 验收：当后端返回 402（配额不足）时，前端自动跳转订阅页并明确提示原因；Home/Mine 余额可见。
+
+- FE‑P0‑07 SSE 续接（Last‑Event‑Id 断线重连 + 不重复输出）（🟡 未完成）
+  - 现状：已支持 fetch+ReadableStream SSE 流式（`src/pages/AITutor.tsx`），但未实现自动重连与 `Last-Event-Id` 续接。
+  - 验收：网络断开/刷新后能自动恢复 SSE；请求带 `Last-Event-Id`；UI 不重复 append 历史段落。
+
 #### FE‑P1（主链路：先“能跑通且符合流程”）
 
 - FE‑P1‑01 拍照页（H5 先用 `<input capture>`；不追求原生相机取景框能力）（1d）
@@ -108,8 +120,13 @@
 - FE‑P2‑06 ANALYSIS：科目 + 周期（3/7/30）内嵌筛选（无筛选弹窗）（1d）
 - FE‑P2‑07 Start → 报告详情页；报告记录列表条目显示 `#编号`（2d）
 - FE‑P2‑08 家庭-子女（Profile）账户切换（Home 头像快捷切换 + 关键流程强提示 + “传错账户”可补救）（1–2d）
-  - 状态：🟡 部分已完成（Home 2 头像并排切换 + `X-Profile-Id` 注入已具备；后端 `/api/v1/me/profiles` 与 move_profile 已可用）
-  - 待补：拍照/上传/开始批改/结果/历史详情的“提交到/归属”强提示统一口径；“移动到其他孩子”入口全路径对齐；Mine 子女管理 CRUD（见 WS‑F：F‑5）
+  - 状态：✅ 已完成（功能闭环已具备：切换 + 强提示 + 可补救 + 管理）
+  - 证据（前端仓库 `noteacher-frontend`）：
+    - `src/services/api.ts`：自动注入 `X-Profile-Id`（`active_profile_id`）
+    - `src/pages/Home.tsx`：双头像快捷切换（最多显示 2 个 profile），高亮当前并亮绿灯
+    - `src/pages/Camera.tsx` / `src/pages/Upload.tsx`：关键流程强提示 `数据库：{profile_name}`
+    - `src/pages/ProfileManagement.tsx`：子账号 CRUD（`/me/profiles`）
+    - `src/pages/ResultSummary.tsx`：`POST /submissions/{sid}/move_profile`（“移动到其他孩子”可补救）
 
 #### FE‑P3（体验增强：不阻塞主链路；✅ 已完成）
 
