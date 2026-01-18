@@ -13,6 +13,7 @@
 - 定价与配额（BT→CP + 报告券）：`docs/pricing_and_quota_strategy.md`
 - 接口契约：`homework_agent/API_CONTRACT.md`
 - 架构总览：`system_architecture.md`
+- Agent Skills（业务 Agent）真源：`docs/agent_skills_ssot.md`
 - 前端真源（Stitch UI 对齐）：`docs/frontend_design_spec_v2.md`
 - 数学知识点口径（知识图谱/命名规范）：`docs/math_knowledge_graph.md`
 - 工程对齐与约束：`docs/engineering_guidelines.md`
