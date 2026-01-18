@@ -330,3 +330,156 @@ skill 化目标：
 - Claude Skills 概览：`https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview`
 - Claude Code Skills：`https://code.claude.com/docs/en/skills`
 - Anthropic skills 示例库：`https://github.com/anthropics/skills`
+
+---
+
+## 11. 附录：参考实现（最小可行，伪代码级）
+
+> 下面内容来自两份草稿方案中可复用部分，已按本项目口径改写（skills 真源目录：`homework_agent/agent_skills/`，由业务代码路由选择；并保留“找不到 skill 时 fallback 到现有 hardcode/YAML prompt”的策略）。
+
+### 11.1 `SKILL.md` frontmatter 约定（建议）
+
+建议使用 YAML frontmatter（`---`…`---`）存放元信息，正文放可加载指令：
+
+```yaml
+---
+name: math_grader_system
+description: Math grading system prompt (system+schema+guardrails)
+metadata:
+  stage: grading
+  subject: math
+  version: 1.0.0
+  owner: engineering
+compatibility:
+  providers: [ark, siliconflow]
+---
+```
+
+### 11.2 Skill Registry（发现 + 元信息）
+
+目标：启动时扫描 `homework_agent/agent_skills/**/SKILL.md`，只解析 frontmatter，构建 registry。
+
+```python
+@dataclass
+class SkillMetadata:
+    name: str
+    description: str
+    path: Path
+    version: str
+    stage: str | None = None
+    subject: str | None = None
+    owner: str | None = None
+
+class SkillRegistry:
+    def __init__(self, skills_root: Path):
+        self.skills_root = skills_root
+        self.skills: dict[str, SkillMetadata] = {}
+        self._discover()
+
+    def _discover(self) -> None:
+        for skill_md in self.skills_root.glob("**/SKILL.md"):
+            meta = self._parse_frontmatter(skill_md)
+            if meta:
+                self.skills[meta.name] = meta
+
+    def _parse_frontmatter(self, skill_md_file: Path) -> SkillMetadata | None:
+        content = skill_md_file.read_text(encoding="utf-8")
+        if not content.startswith("---"):
+            return None
+        end = content.find("---", 3)
+        if end == -1:
+            return None
+        frontmatter = yaml.safe_load(content[3:end].strip()) or {}
+        if not frontmatter.get("name") or not frontmatter.get("description"):
+            return None
+        metadata = frontmatter.get("metadata", {}) or {}
+        return SkillMetadata(
+            name=frontmatter["name"],
+            description=frontmatter["description"],
+            path=skill_md_file.parent,
+            version=metadata.get("version", "0.0.0"),
+            stage=metadata.get("stage"),
+            subject=metadata.get("subject"),
+            owner=metadata.get("owner"),
+        )
+```
+
+### 11.3 读取正文（按需加载）
+
+目标：只在需要注入上下文时读取 `SKILL.md` 正文，避免常驻上下文膨胀。
+
+```python
+def read_skill_body(skill_md_file: Path) -> str:
+    content = skill_md_file.read_text(encoding="utf-8")
+    if not content.startswith("---"):
+        return content
+    end = content.find("---", 3)
+    if end == -1:
+        return content
+    body_start = end + 3
+    while body_start < len(content) and content[body_start] in "\n\r":
+        body_start += 1
+    return content[body_start:]
+```
+
+### 11.4 业务路由选择（强约束，非 LLM 自选）
+
+目标：由业务代码根据 stage/subject/flags 明确选 skill（或 variant），找不到时 fallback。
+
+```python
+class SkillRouter:
+    def __init__(self, registry: SkillRegistry):
+        self.registry = registry
+
+    def select(self, *, stage: str, subject: str | None, variant: str | None) -> str | None:
+        # 兼容层：先用显式映射（可从配置加载），避免“语义匹配漂移”
+        mapping = {
+            ("grading", "math"): "math_grader_system",
+            ("grading", "english"): "english_grader_system",
+            ("tutoring", None): "socratic_tutor",
+            ("reporting", None): "report_analyst",
+        }
+        name = mapping.get((stage, subject))
+        if not name:
+            return None
+        if variant:
+            # 例：name__B / name__strict（保持与 PromptManager 的 variant 习惯一致）
+            candidate = f"{name}__{variant}"
+            if candidate in self.registry.skills:
+                return candidate
+        return name if name in self.registry.skills else None
+```
+
+fallback（必须保留）：
+- autonomous：找不到 skill → 用 `homework_agent/core/prompts_autonomous.py`
+- grading/tutor/report：找不到 skill → 用 `homework_agent/prompts/*.yaml`（或现有 `PromptManager`）
+
+### 11.5 可选：调试端点（仅内网/开发态）
+
+如果需要排障“线上到底加载了哪个 skill/版本”，可以提供只读端点（不必暴露正文）：
+- `GET /api/v1/skills`：列出 `name/description/version/stage/subject/hash`
+- `GET /api/v1/skills/{name}`：列出 metadata + assets 清单（不直接返回 references）
+
+---
+
+## 12. 附录：实施检查清单（参考）
+
+> 下面是实施顺序建议，不作为排期承诺；用于团队对齐“先做什么、后做什么”。
+
+### Phase 1：建立真源与可观测（最优先）
+- [ ] 创建 `homework_agent/agent_skills/` 目录树（先镜像现有 prompts）
+- [ ] 为每个 skill 补齐 frontmatter：`name/description/metadata.stage/metadata.version`
+- [ ] 实现最小 `SkillRegistry` + hash 计算，并在关键链路 `log_event` 打点记录（skill/version/hash）
+
+### Phase 2：接入路由选择（只改加载点，不改业务逻辑）
+- [ ] grading：从固定 `prompts/*.yaml` 改为“router 选 skill → 读 assets/prompt.yaml”
+- [ ] tutoring：同上（保持 `PromptManager` variant 兼容）
+- [ ] reporting：同上（report_analyst 的 system/user template + schema 固化）
+
+### Phase 3：Autonomous hardcode prompt 解耦
+- [ ] 将 `prompts_autonomous.py` 迁移为 `autonomous/*` skills 的 assets（保留 fallback）
+- [ ] 引入 feature flag 灰度切换（skill 版 vs hardcode 版）
+
+### Phase 4：把 references/scripts 纳入门禁
+- [ ] 引入 “知识点/错因/latex 规范” references 的按需注入策略
+- [ ] 引入 scripts（只做确定性校验与规范化）并补齐单测与可观测
