@@ -1,6 +1,9 @@
 .DS_Store
 __pycache__/
+**/__pycache__/
 *.py[cod]
+**/*.pyc
+**/*.pyo
 .venv/
 .env
 .env.local
@@ -49,3 +52,13 @@ docs/reports/*.json
 homework_agent/tests/replay_data/samples_inventory.csv
 homework_agent/tests/replay_data/samples_inventory.md
 private_live_replay/
+
+# Large files that may cause agent indexing issues
+*.excalidraw
+.genkit/
+tmp/
+.tmp/
+.ruff_cache/
+.pytest_cache/
+.agent/
+.shared/
