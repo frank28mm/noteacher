@@ -22,6 +22,8 @@ from homework_agent.api import submissions as submissions_api
 from homework_agent.api import auth as auth_api
 from homework_agent.api import me as me_api
 from homework_agent.api import admin as admin_api
+from homework_agent.api import subscriptions as subscriptions_api
+from homework_agent.api import feedback as feedback_api
 
 router = APIRouter()
 router.include_router(grade_api.router)
@@ -36,6 +38,8 @@ router.include_router(submissions_api.router)
 router.include_router(auth_api.router)
 router.include_router(me_api.router)
 router.include_router(admin_api.router)
+router.include_router(subscriptions_api.router)
+router.include_router(feedback_api.router)
 
 # Backward-compatible re-exports (tests/scripts/worker rely on these names)
 cache_store = session_api.cache_store

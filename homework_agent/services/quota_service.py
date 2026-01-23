@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Tuple
 
 from homework_agent.utils.observability import log_event
@@ -10,6 +10,8 @@ from homework_agent.utils.settings import get_settings
 from homework_agent.utils.supabase_client import get_worker_storage_client
 
 logger = logging.getLogger(__name__)
+
+BT_GRANT_EXPIRY_DAYS = 30
 
 
 def _utc_now() -> datetime:
@@ -30,6 +32,8 @@ class Wallet:
     user_id: str
     bt_trial: int
     bt_subscription: int
+    bt_subscription_active: int
+    bt_subscription_expired: int
     bt_report_reserve: int
     report_coupons: int
     trial_expires_at: Optional[str]
@@ -38,7 +42,12 @@ class Wallet:
 
     @property
     def bt_spendable(self) -> int:
-        return max(0, int(self.bt_trial) + int(self.bt_subscription))
+        active = (
+            max(0, int(self.bt_subscription_active))
+            if self.bt_subscription_active
+            else int(self.bt_subscription)
+        )
+        return max(0, int(self.bt_trial) + active)
 
     @property
     def cp_left(self) -> int:
@@ -63,7 +72,7 @@ def load_wallet(*, user_id: str) -> Optional[Wallet]:
         resp = (
             _safe_table("user_wallets")
             .select(
-                "user_id,bt_trial,bt_subscription,bt_report_reserve,report_coupons,trial_expires_at,plan_tier,data_retention_tier"
+                "user_id,bt_trial,bt_subscription,bt_subscription_active,bt_subscription_expired,bt_report_reserve,report_coupons,trial_expires_at,plan_tier,data_retention_tier"
             )
             .eq("user_id", uid)
             .limit(1)
@@ -73,12 +82,13 @@ def load_wallet(*, user_id: str) -> Optional[Wallet]:
         if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
             return None
         row = rows[0]
-        # Apply trial expiry lazily (best-effort).
         trial_expires_at = row.get("trial_expires_at")
         bt_trial = int(row.get("bt_trial") or 0)
         if trial_expires_at:
             try:
-                expires = datetime.fromisoformat(str(trial_expires_at).replace("Z", "+00:00"))
+                expires = datetime.fromisoformat(
+                    str(trial_expires_at).replace("Z", "+00:00")
+                )
                 if _utc_now() > expires:
                     bt_trial = 0
             except Exception:
@@ -87,6 +97,8 @@ def load_wallet(*, user_id: str) -> Optional[Wallet]:
             user_id=uid,
             bt_trial=bt_trial,
             bt_subscription=int(row.get("bt_subscription") or 0),
+            bt_subscription_active=int(row.get("bt_subscription_active") or 0),
+            bt_subscription_expired=int(row.get("bt_subscription_expired") or 0),
             bt_report_reserve=int(row.get("bt_report_reserve") or 0),
             report_coupons=int(row.get("report_coupons") or 0),
             trial_expires_at=str(trial_expires_at) if trial_expires_at else None,
@@ -198,7 +210,9 @@ def _apply_spend(
                 0, int(wallet.bt_report_reserve) + int(bt_report_reserve_delta)
             )
         if rc_delta_i:
-            update["report_coupons"] = max(0, int(wallet.report_coupons) + int(rc_delta_i))
+            update["report_coupons"] = max(
+                0, int(wallet.report_coupons) + int(rc_delta_i)
+            )
         _safe_table("user_wallets").update(update).eq("user_id", uid).execute()
     except Exception as e:
         return False, f"wallet update failed: {e}"
@@ -212,9 +226,15 @@ def _apply_spend(
             "endpoint": str(endpoint or ""),
             "stage": str(stage or ""),
             "model": str(model or "") or None,
-            "prompt_tokens": int((usage or {}).get("prompt_tokens") or 0) if usage else None,
-            "completion_tokens": int((usage or {}).get("completion_tokens") or 0) if usage else None,
-            "total_tokens": int((usage or {}).get("total_tokens") or 0) if usage else None,
+            "prompt_tokens": int((usage or {}).get("prompt_tokens") or 0)
+            if usage
+            else None,
+            "completion_tokens": int((usage or {}).get("completion_tokens") or 0)
+            if usage
+            else None,
+            "total_tokens": int((usage or {}).get("total_tokens") or 0)
+            if usage
+            else None,
             "bt_delta": int(bt_delta_i),
             "bt_trial_delta": int(bt_trial_delta),
             "bt_subscription_delta": int(bt_subscription_delta),
@@ -287,38 +307,95 @@ def charge_bt_spendable(
     )
 
 
-def consume_report_coupon_and_reserve(
+def grant_subscription_quota(
     *,
     user_id: str,
-    bt_cost: int,
-    idempotency_key: Optional[str],
-    request_id: Optional[str],
-    endpoint: str,
-    stage: str,
-    model: Optional[str],
-    usage: Optional[Dict[str, Any]],
+    bt_amount: int,
+    coupon_amount: int,
+    plan_tier: str,
+    data_retention_tier: str,
+    idempotency_key: str,
+    grant_type: str = "subscription",
+    created_from: str = "redeem_card",
+    reference_id: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
-    """
-    Report spending rule (WS-E):
-    - consumes 1 coupon
-    - burns bt_report_reserve (separate pool), so grade/chat cannot "steal" it.
-    """
-    wallet = load_wallet(user_id=user_id)
-    if not wallet:
-        return False, "wallet not found"
-    if wallet.report_coupons <= 0:
-        return False, "no report coupons left"
-    if wallet.bt_report_reserve < max(0, int(bt_cost)):
-        return False, "insufficient report reserve"
-    return _apply_spend(
-        user_id=user_id,
-        bt_delta=-abs(int(bt_cost)),
-        from_pool="report_reserve",
-        report_coupons_delta=-1,
-        idempotency_key=idempotency_key,
-        request_id=request_id,
-        endpoint=endpoint,
-        stage=stage,
-        model=model,
-        usage=usage,
-    )
+    uid = str(user_id or "").strip()
+    if not uid:
+        return False, "user_id required"
+
+    wallet = load_wallet(user_id=uid)
+    now = _utc_now()
+    now_iso = now.isoformat()
+    expires_at = (now + timedelta(days=BT_GRANT_EXPIRY_DAYS)).isoformat()
+    bt_amount_i = int(bt_amount)
+    coupon_amount_i = int(coupon_amount)
+
+    try:
+        if wallet:
+            _safe_table("user_wallets").update(
+                {
+                    "bt_subscription": int(wallet.bt_subscription) + bt_amount_i,
+                    "bt_subscription_active": int(
+                        getattr(wallet, "bt_subscription_active", 0) or 0
+                    )
+                    + bt_amount_i,
+                    "report_coupons": int(wallet.report_coupons) + coupon_amount_i,
+                    "plan_tier": plan_tier,
+                    "data_retention_tier": data_retention_tier,
+                    "updated_at": now_iso,
+                }
+            ).eq("user_id", uid).execute()
+        else:
+            _safe_table("user_wallets").insert(
+                {
+                    "user_id": uid,
+                    "bt_trial": 0,
+                    "bt_subscription": bt_amount_i,
+                    "bt_subscription_active": bt_amount_i,
+                    "bt_subscription_expired": 0,
+                    "report_coupons": coupon_amount_i,
+                    "plan_tier": plan_tier,
+                    "data_retention_tier": data_retention_tier,
+                    "updated_at": now_iso,
+                }
+            ).execute()
+
+        if bt_amount_i > 0:
+            _safe_table("bt_grants").insert(
+                {
+                    "user_id": uid,
+                    "bt_amount": bt_amount_i,
+                    "grant_type": grant_type,
+                    "expires_at": expires_at,
+                    "created_from": created_from,
+                    "reference_id": reference_id,
+                    "meta": {
+                        "idempotency_key": idempotency_key,
+                        "plan_tier": plan_tier,
+                    },
+                }
+            ).execute()
+
+        ledger_payload: Dict[str, Any] = {
+            "user_id": uid,
+            "idempotency_key": idempotency_key,
+            "endpoint": "subscription",
+            "stage": "grant",
+            "bt_delta": bt_amount_i,
+            "bt_subscription_delta": bt_amount_i,
+            "report_coupons_delta": coupon_amount_i,
+            "meta": {
+                "plan_tier": plan_tier,
+                "grant_type": grant_type,
+                "expires_at": expires_at,
+            },
+        }
+        try:
+            _safe_table("usage_ledger").insert(ledger_payload).execute()
+        except Exception:
+            pass
+
+        return True, None
+    except Exception as e:
+        logger.exception("grant_subscription_quota failed")
+        return False, str(e)

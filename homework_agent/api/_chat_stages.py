@@ -111,7 +111,9 @@ def _resolve_context_items(
     for m in mistakes:
         if not isinstance(m, dict):
             continue
-        qn = _normalize_question_number(m.get("question_number") or m.get("question_index"))
+        qn = _normalize_question_number(
+            m.get("question_number") or m.get("question_index")
+        )
         if qn:
             by_qn[str(qn)] = m
 
@@ -503,7 +505,9 @@ def _prepare_chat_context_or_abort(
     # This ensures question-specific chat history is preserved
     if requested_qn:
         session_data["focus_question_number"] = str(requested_qn)
-        logger.debug(f"[DEBUG _prepare_tutoring_context] Set focus_question_number={requested_qn} from context_item_ids={req.context_item_ids}")
+        logger.debug(
+            f"[DEBUG _prepare_tutoring_context] Set focus_question_number={requested_qn} from context_item_ids={req.context_item_ids}"
+        )
 
     if requested_qn:
         # If user explicitly asked for a question that does not exist, do NOT keep old focus.
@@ -520,7 +524,9 @@ def _prepare_chat_context_or_abort(
                 # prefer the disambiguated key (e.g. "1@p2") over the base "1".
                 if requested_qn_page_no is not None:
                     preferred_prefix = f"{requested_qn}@p{int(requested_qn_page_no)}"
-                    preferred = [k for k in candidates if str(k).startswith(preferred_prefix)]
+                    preferred = [
+                        k for k in candidates if str(k).startswith(preferred_prefix)
+                    ]
                     if preferred:
                         requested_qn = sorted(preferred, key=len)[0]
                     else:
@@ -813,6 +819,7 @@ async def _stream_socratic_llm_to_sse(
 
     # Get question-specific history for the current question
     from homework_agent.api.session import get_question_history, save_question_history
+
     q_history = get_question_history(session_data, focus_q) if focus_q else []
 
     # Also maintain global history for compatibility
@@ -895,7 +902,7 @@ async def _stream_socratic_llm_to_sse(
         focus_image_urls=focus_image_urls,
         focus_image_source=focus_image_source,
     )
-    yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+    yield chat_api._sse_event("chat", payload.model_dump_json(), event_id=session_id)
 
     buffer = ""
     last_emit = time.monotonic()
@@ -931,8 +938,10 @@ async def _stream_socratic_llm_to_sse(
                     idle_disconnect_seconds=idle_disconnect_seconds,
                 )
                 break
-            yield f'event: heartbeat\ndata: {{"timestamp":"{_now_iso_utc()}"}}\n\n'.encode(
-                "utf-8"
+            yield chat_api._sse_event(
+                "heartbeat",
+                json.dumps({"timestamp": _now_iso_utc()}),
+                event_id=session_id,
             )
             continue
 
@@ -963,7 +972,7 @@ async def _stream_socratic_llm_to_sse(
                     llm_usage = dict(data_obj)
                 continue
             data = json.dumps(item.get("data") or {}, ensure_ascii=False)
-            yield f"event: {evt}\ndata: {data}\n\n".encode("utf-8")
+            yield chat_api._sse_event(evt, data, event_id=session_id)
             continue
         if isinstance(item, dict) and item.get("error"):
             raise RuntimeError(item.get("error"))
@@ -975,6 +984,7 @@ async def _stream_socratic_llm_to_sse(
         # Sync question-specific history
         if focus_q:
             from homework_agent.api.session import save_question_history
+
             save_question_history(session_data, focus_q, q_history)
 
         # throttle event frequency
@@ -988,13 +998,16 @@ async def _stream_socratic_llm_to_sse(
                 focus_image_urls=focus_image_urls,
                 focus_image_source=focus_image_source,
             )
-            yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+            yield chat_api._sse_event(
+                "chat", payload.model_dump_json(), event_id=session_id
+            )
             last_emit = now_m
 
     # Ensure final content is emitted
     # Sync question-specific history one last time
     if focus_q:
         from homework_agent.api.session import save_question_history
+
         save_question_history(session_data, focus_q, q_history)
 
     payload = ChatResponse(
@@ -1005,7 +1018,7 @@ async def _stream_socratic_llm_to_sse(
         focus_image_urls=focus_image_urls,
         focus_image_source=focus_image_source,
     )
-    yield f"event: chat\ndata: {payload.model_dump_json()}\n\n".encode("utf-8")
+    yield chat_api._sse_event("chat", payload.model_dump_json(), event_id=session_id)
 
     # Persist session
     session_data["interaction_count"] = current_turn + 1
@@ -1034,7 +1047,9 @@ async def _stream_socratic_llm_to_sse(
                     model=str(model_override or ""),
                     usage={
                         "prompt_tokens": int(llm_usage.get("prompt_tokens") or 0),
-                        "completion_tokens": int(llm_usage.get("completion_tokens") or 0),
+                        "completion_tokens": int(
+                            llm_usage.get("completion_tokens") or 0
+                        ),
                         "total_tokens": int(llm_usage.get("total_tokens") or 0),
                     },
                     stage="chat.socratic",
@@ -1042,14 +1057,17 @@ async def _stream_socratic_llm_to_sse(
                 ok, err = charge_bt_spendable(
                     user_id=str(user_id),
                     bt_cost=int(bt_cost),
-                    idempotency_key=str(idempotency_key or request_id or "").strip() or None,
+                    idempotency_key=str(idempotency_key or request_id or "").strip()
+                    or None,
                     request_id=str(request_id or "").strip() or None,
                     endpoint="/api/v1/chat",
                     stage="chat",
                     model=str(model_override or "") or None,
                     usage={
                         "prompt_tokens": int(llm_usage.get("prompt_tokens") or 0),
-                        "completion_tokens": int(llm_usage.get("completion_tokens") or 0),
+                        "completion_tokens": int(
+                            llm_usage.get("completion_tokens") or 0
+                        ),
                         "total_tokens": int(llm_usage.get("total_tokens") or 0),
                     },
                 )
@@ -1100,8 +1118,10 @@ async def _stream_socratic_llm_to_sse(
         idle_disconnected=bool(idle_disconnected),
         elapsed_ms=int((time.monotonic() - started_m) * 1000),
     )
-    yield f'event: done\ndata: {{"status":"continue","session_id":"{session_id}"}}\n\n'.encode(
-        "utf-8"
+    yield chat_api._sse_event(
+        "done",
+        json.dumps({"status": "continue", "session_id": session_id}),
+        event_id=session_id,
     )
     try:
         await asyncio.wait_for(producer_task, timeout=producer_join_timeout_seconds)

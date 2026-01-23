@@ -925,9 +925,9 @@ const corsOptions = {
 
 ---
 
-## 家庭-子女（Profile）账户切换（Planned / Draft）
+## 家庭-子女（Profile）账户切换（Implemented）
 
-> 说明：本节为已确认的“家庭共用配额 + 子女档案数据隔离”规划口径；落地执行与阶段划分以 `docs/profile_management_plan.md` 为准。
+> 说明：本节已落地。所有业务数据读写已按 `(user_id, profile_id)` 隔离。
 
 ### 约束与计费
 - **配额/计费归属**：归属家长主账号 `user_id`（家庭共用），不按 `profile_id` 计费。
@@ -1026,6 +1026,349 @@ X-Profile-Id: <profile_id>
 #### GET /api/v1/admin/reports?user_id=...&profile_id=...&limit=...&before=...
 返回该用户的报告列表（可选按 `profile_id` 过滤）。
 
+### 订阅与支付（Subscriptions API）
+
+#### POST /api/v1/subscriptions/orders
+创建订阅订单。
+
+**请求体**
+```json
+{
+  "plan_tier": "S1",
+  "billing_cycle": "monthly",
+  "multiplier": 1
+}
+```
+
+**响应体**
+```json
+{
+  "order_id": "uuid...",
+  "order_no": "ord_...",
+  "amount": 19.9,
+  "pay_url": "https://..."
+}
+```
+
+#### POST /api/v1/subscriptions/orders/{order_id}/mock_pay
+(Dev Only) 模拟支付成功并自动发货。
+
+### 兑换与核销 (Redemption API)
+
+#### POST /api/v1/subscriptions/redeem
+使用兑换码（卡密）激活权益。
+
+**请求体**
+```json
+{ "code": "ABCD-1234-EFGH" }
+```
+
+**响应体**
+```json
+{
+  "ok": true,
+  "granted_bt": 12400,
+  "granted_coupons": 1
+}
+```
+
+#### GET /api/v1/subscriptions/redemptions
+查询当前用户的兑换历史。
+
+**响应体**
+```json
+{
+  "items": [
+    {
+      "id": "rdm_...",
+      "code": "ABCD-...",
+      "card_type": "trial_pack",
+      "redeemed_at": "2026-01-20T10:00:00Z"
+    }
+  ]
+}
+```
+
+### 用户反馈 (Feedback / Hidden Chat API)
+
+#### POST /api/v1/feedback
+发送反馈消息（或聊天消息）。
+
+**请求体**
+```json
+{ "content": "为什么我的余额不对？", "images": [] }
+```
+
+#### GET /api/v1/feedback
+获取反馈对话记录。
+
+**响应体**
+```json
+{
+  "messages": [
+    {
+      "id": "msg_1",
+      "sender": "user",
+      "content": "求助...",
+      "created_at": "..."
+    },
+    {
+      "id": "msg_2",
+      "sender": "admin",
+      "content": "您好...",
+      "created_at": "..."
+    }
+  ]
+}
+```
+
+#### GET /api/v1/feedback/check_unread
+检查是否有管理员回复（用于红点）。
+
+**响应体**
+```json
+{ "has_unread": true }
+```
+
+---
+
+## 11. 补充接口（Additional Endpoints）
+
+本章节记录已实现但在上述章节中未详细说明的 API 端点。
+
+### 11.1 管理员统计看板（Admin Dashboard）
+
+#### GET /api/v1/admin/stats/dashboard
+**描述**：获取业务核心 KPI 统计数据
+
+**请求头**：
+```http
+GET /api/v1/admin/stats/dashboard HTTP/1.1
+X-Admin-Token: <admin_token>
+```
+
+**响应体**：
+```json
+{
+  "kpi": {
+    "total_users": 1250,
+    "paid_ratio": "15.2%",
+    "dau": 342,
+    "mrr": "¥12,450"
+  },
+  "cost": {
+    "tokens_today": 2450000,
+    "subs_today": 128,
+    "avg_cost": "0.08"
+  },
+  "conversion": {
+    "trial_conversion": "8.5%",
+    "card_redemption_rate": "92.3%"
+  },
+  "health": {
+    "error_rate": "1.2%",
+    "latency_p50": "1.8s"
+  }
+}
+```
+
+### 11.2 卡密批次管理（Redeem Card Batches）
+
+#### GET /api/v1/admin/redeem_cards/batches
+**描述**：获取卡密批次统计列表
+
+**请求头**：
+```http
+GET /api/v1/admin/redeem_cards/batches HTTP/1.1
+X-Admin-Token: <admin_token>
+```
+
+**响应体**：
+```json
+{
+  "items": [
+    {
+      "batch_id": "BATCH_20260122",
+      "created_at": "2026-01-22T10:00:00Z",
+      "total_count": 100,
+      "active_count": 75,
+      "redeemed_count": 20,
+      "expired_count": 5
+    }
+  ]
+}
+```
+
+#### POST /api/v1/admin/redeem_cards/batches/{batch_id}/disable
+**描述**：作废指定批次的所有未兑换卡密
+
+**请求头**：
+```http
+POST /api/v1/admin/redeem_cards/batches/BATCH_20260122/disable HTTP/1.1
+X-Admin-Token: <admin_token>
+```
+
+**响应体**：
+```json
+{
+  "ok": true,
+  "disabled_count": 75
+}
+```
+
+#### POST /api/v1/admin/redeem_cards/bulk_update
+**描述**：批量更新卡密状态
+
+**请求体**：
+```json
+{
+  "codes": ["ABCD-1234", "EFGH-5678"],
+  "status": "disabled"
+}
+```
+
+**响应体**：
+```json
+{
+  "ok": true,
+  "updated_count": 2
+}
+```
+
+### 11.3 管理员反馈管理（Admin Feedback）
+
+#### GET /api/v1/admin/feedback/users
+**描述**：获取有反馈消息的用户列表
+
+**请求头**：
+```http
+GET /api/v1/admin/feedback/users?limit=20&only_unread=true HTTP/1.1
+X-Admin-Token: <admin_token>
+```
+
+**查询参数**：
+- `limit`：可选，默认 20，最大 100
+- `only_unread`：可选，只返回有未读消息的用户
+
+**响应体**：
+```json
+{
+  "items": [
+    {
+      "user_id": "usr_abc123",
+      "unread_count": 2,
+      "last_message": "为什么我的余额不对？",
+      "last_at": "2026-01-22T14:30:00Z"
+    }
+  ]
+}
+```
+
+#### GET /api/v1/admin/feedback/{user_id}
+**描述**：获取指定用户的反馈消息列表
+
+**请求头**：
+```http
+GET /api/v1/admin/feedback/usr_abc123 HTTP/1.1
+X-Admin-Token: <admin_token>
+```
+
+**响应体**：
+```json
+{
+  "messages": [
+    {
+      "id": "msg_1",
+      "sender": "user",
+      "content": "为什么我的余额不对？",
+      "created_at": "2026-01-22T14:30:00Z"
+    },
+    {
+      "id": "msg_2",
+      "sender": "admin",
+      "content": "您好，我们正在查询...",
+      "created_at": "2026-01-22T14:35:00Z"
+    }
+  ]
+}
+```
+
+#### POST /api/v1/admin/feedback/{user_id}
+**描述**：向指定用户发送管理员回复
+
+**请求体**：
+```json
+{
+  "content": "您好，经查询您的余额正常..."
+}
+```
+
+**响应体**：
+```json
+{
+  "id": "msg_3",
+  "sender": "admin",
+  "content": "您好，经查询您的余额正常...",
+  "created_at": "2026-01-22T14:40:00Z"
+}
+```
+
+### 11.4 其他补充接口
+
+#### POST /api/v1/submissions/{submission_id}/qindex/rebuild
+**描述**：重建指定作业的题号索引
+
+**请求头**：
+```http
+POST /api/v1/submissions/sub_abc123/qindex/rebuild HTTP/1.1
+Authorization: Bearer <jwt_token>
+```
+
+**响应体**：
+```json
+{
+  "ok": true,
+  "job_id": "job_rebuild_xyz",
+  "status": "queued"
+}
+```
+
+#### POST /api/v1/me/password
+**描述**：修改用户密码（AUTH_MODE=local 时可用）
+
+**请求体**：
+```json
+{
+  "old_password": "old123",
+  "new_password": "new456"
+}
+```
+
+**响应体**：
+```json
+{
+  "ok": true
+}
+```
+
+#### POST /api/v1/me/email/bind
+**描述**：绑定邮箱地址
+
+**请求体**：
+```json
+{
+  "email": "user@example.com"
+}
+```
+
+**响应体**：
+```json
+{
+  "ok": true,
+  "verification_required": true
+}
+```
+
 ---
 
 ## 附录A: 示例调用 (Appendix A - Examples)
@@ -1101,7 +1444,7 @@ const res = await fetch('/api/v1/chat', {
 
 ---
 
-**文档版本**: v1.0.0
-**最后更新**: 2025-01-06
+**文档版本**: v1.1.0
+**最后更新**: 2026-01-20
 **维护人**: [Your Name]
 **审核人**: [Partner Name]

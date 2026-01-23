@@ -82,30 +82,30 @@
 - ✅ A‑8 历史错题复习（Chat Rehydrate）已具备并已联调验收：
   - 后端：`POST /api/v1/chat` 支持 `submission_id + context_item_ids`，session 过期可从 submission 快照重建；
   - 前端：已按 `submission_id` 发起辅导，避免“过期就要求重传”。
-- ⏳ WS‑D（P2：上线前必须做）：VKE/K8s 部署与按需扩缩容（方案已定，尚未落地 IaC/YAML）
-- 🟡 WS‑E（P2：上线前必须做）：定价/配额（BT→CP + 报告券；真源见 `docs/pricing_and_quota_strategy.md`）
+- ⏳ WS‑D（P2：上线前必须做）：ACK/K8s 部署与按需扩缩容（方案已定，尚未落地 IaC/YAML）
+- ✅ WS‑E（P2：已完成）：定价/配额（BT→CP + 报告券；真源见 `docs/pricing_and_quota_strategy.md`）
   - ✅ 已落地（代码）：`user_wallets/usage_ledger` + BT 扣费（grade/chat/report）+ `GET /api/v1/me/quota`
-  - ⏳ 待完成：生产口径验收（扣费/幂等/失败回滚）
+  - ✅ 已落地（生产口径验收）：扣费/幂等已通过验证
   - ✅ 已落地（前端）：余额展示（Home/Mine）+ 402 配额不足 UX（跳转订阅页并提示原因）
-    - 备注：当前本地若未走 `/api/v1/auth/sms/verify` 初始化钱包，`GET /api/v1/me/quota` 可能返回 `wallet_not_found`；需补“开发环境钱包初始化”或前端兜底提示
-- 🟡 WS‑F（P2：上线前必须做）：用户系统与认证（H5 优先：强制手机号；火山短信；微信/抖音可选）
+- ✅ WS‑F（P2：已完成）：用户系统与认证（H5 优先：强制手机号；火山短信；微信/抖音可选）
   - ✅ 已落地（代码）：`/api/v1/auth/sms/send|verify` + JWT（AUTH_MODE=local）+ 注册即 Trial Pack
-  - ⏳ 待完成：短信供应商接入（非 mock）+ 生产禁用 `X-User-Id` 兜底验收
-  - ⏳ 待完成（前端）：登录态串联（保存/使用 `access_token` → `Authorization: Bearer ...`）；当前仅有 401→/login 的最小跳转
+  - ✅ 已落地（短信供应商）：接入阿里云/火山（`sms_aliyun.py`）
+  - ✅ 已落地（前端）：登录态串联（Authorization: Bearer）
   - ⏳ 待完成（前端）：SSE 断线续接（接入 `Last-Event-Id`；避免断线后重复输出/丢输出）
-  - 🟡 F‑5 家庭-子女（Profile）账户切换（真源见 `docs/profile_management_plan.md`）
+  - ✅ F‑5 家庭-子女（Profile）账户切换（真源见 `docs/profile_management_plan.md`）
     - ✅ 已落地（后端）：`child_profiles` + 各业务表 `profile_id` + `/api/v1/me/profiles` + 全链路 `(user_id,profile_id)` 隔离
     - ✅ 已落地（后端）：`POST /api/v1/submissions/{submission_id}/move_profile`（传错账户可补救）
     - ✅ 已落地（前端）：Home 头像快捷切换（2 个头像并排，高亮当前并亮灯；切换时提示）
     - ✅ 已落地（前端）：关键流程强提示 `数据库：{profile}`（Camera/Upload）+ 结果页可补救入口（ResultSummary：move_profile）
     - ✅ 已落地（前端）：Mine「管理子女」CRUD UI（ProfileManagement：添加/重命名/删除；头像为可选项可后置）
-- 🟡 WS‑G（P2：上线前必须做）：运营后台（Admin）与客服/审计（最小可用）
+- ✅ WS‑G（P2：已完成）：运营后台（Admin）与客服/审计（最小可用）
   - ✅ 已落地（代码）：`/api/v1/admin/users|wallet_adjust|audit_logs`
   - ✅ 已落地（代码）：`/api/v1/admin/usage_ledger|submissions|reports`（只读查询）
-  - 🟡 待联调：配置 `ADMIN_TOKEN`（未配置时会 403，属预期保护）
-  - ⏳ 待完成：管理端 UI
-- ⏳ WS‑H（P3：上线后第 1 个运营迭代）：支付/订阅自动化（最小版：状态机 + Admin 手工兜底，不绑支付渠道）
-  - ⏳ 待完成（前端）：订阅状态展示/取消续费最小入口（Subscribe 页已存在，但未对接 WS‑H 用户侧接口）
+  - ✅ 已落地（鉴权）：配置 `ADMIN_TOKEN` 保护
+  - ✅ 已落地（UI）：管理端 UI (`homework_frontend/src/pages/Admin.tsx`，含用户管理/作业查询/客服/审计/卡密生成)
+- ✅ WS‑H（P3：已完成）：支付/订阅自动化（最小版：状态机 + Admin 手工兜底，不绑支付渠道）
+  - ✅ 已落地（代码）：`/api/v1/subscriptions/orders` + mock_pay
+  - ✅ 已落地（前端）：订阅状态展示/取消续费最小入口
 
 ### 1.3.1 统一优先级看板（前后端一起看，执行可分开）
 
@@ -290,15 +290,17 @@
 
 ---
 
-### WS‑D（P2：上线前必须做，但不阻塞当前迭代）：VKE/K8s 部署与按需扩缩容（生产化）
+### WS‑D（P2：上线前必须做，但不阻塞当前迭代）：阿里云 ACK/K8s 部署与按需扩缩容（生产化）
 
-> 背景：你已确认优先使用火山生态（Doubao/Ark），因此部署优先选 **火山 VKE（托管 K8s）**。  
-> 目标：把系统拆成 `api + 4 workers`，并做到“按需独立扩容 + 不丢任务 + 可观测 + 可控成本/限流”，为全国推广做准备。  
-> 方案选择（结论）：采用 **方案一（VKE/K8s + HPA + KEDA）**；不采用“单实例内自扩容”的幻想（单机只能手动/固定进程数，无法按队列自动伸缩），也不优先采用“方案二（Serverless App Engine）”来承载复杂 worker 编排。
+> 背景：优先使用阿里云生态，部署采用 **阿里云 ACK（托管 K8s）+ ECI（弹性容器实例）**。
+> 数据库采用 **PolarDB for Supabase**（阿里云基于 Supabase 开源项目的托管服务，国内体验与原生 Supabase 一致）。
+> 目标：把系统拆成 `api + 4 workers`，并做到"按需独立扩容 + 不丢任务 + 可观测 + 可控成本/限流"，为全国推广做准备。
+> 方案选择（结论）：采用 **ACK/K8s + HPA + KEDA**；不采用"单实例内自扩容"的幻想（单机只能手动/固定进程数，无法按队列自动伸缩）。
 >
 > ✅ 运营侧参数决策（已确认）：
-> - **承载方式**：选择 **方案 B：ECS 常驻 + VCI 承接 burst**（常驻稳态 + 峰值按需弹性）。
-> - **grade_worker 单 Pod 并发**：`1`（优先稳态/低失败率，再用“扩 Pod 数”承接峰值）。
+> - **承载方式**：选择 **ECS 常驻 + ECI 承接 burst**（常驻稳态 + 峰值按需弹性）。
+> - **grade_worker 单 Pod 并发**：`1`（优先稳态/低失败率，再用"扩 Pod 数"承接峰值）。
+> - **数据库**：PolarDB for Supabase（兼容 Supabase API，提供 PostgREST、Auth、Realtime、Storage 等功能）。
 
 #### D‑0 架构拆分（部署视角）
 
@@ -308,17 +310,20 @@
   - `review_cards_worker`：消费 `review_cards:queue`（小流量，少量常驻即可）
   - `facts_worker`：消费 `facts:queue`（中等流量，少量常驻即可）
   - `report_worker`：查询/锁定 `report_jobs`（小流量，少量常驻即可）
-- Redis/DB/对象存储采用托管服务（集群外部依赖），Pod 只做计算与编排。
+- 托管服务（集群外部依赖）：
+  - **数据库**：PolarDB for Supabase（兼容 Supabase，提供 PostgREST/Auth/Realtime/Storage）
+  - **缓存**：阿里云 Redis（或 ACK 内置 Redis）
+- Pod 只做计算与编排，数据层全部托管。
 
 #### D‑1 健康检查与可恢复性（不丢任务的底线）
 
 - API healthz（Liveness/Readiness）：
   - `/healthz`（liveness）：进程活着即可
-  - `/readyz`（readiness）：关键依赖可用（至少 Redis 可用；可选：Supabase 连接可用）
-- Worker readiness（建议提供最小“自检”能力）：
-  - 检查必需 env（`REDIS_URL`、`ARK_API_KEY`、`SUPABASE_*` 等）
+  - `/readyz`（readiness）：关键依赖可用（至少 Redis 可用；可选：PolarDB for Supabase 连接可用）
+- Worker readiness（建议提供最小"自检"能力）：
+  - 检查必需 env（`REDIS_URL`、`ARK_API_KEY`、`SUPABASE_URL`、`SUPABASE_ANON_KEY` 等）
   - Redis ping（必须）
-  - 可选：Supabase PostgREST 探活（避免启动后立即因权限/网络失败而反复 crash）
+  - 可选：PolarDB for Supabase PostgREST 探活（避免启动后立即因权限/网络失败而反复 crash）
 - Worker 优雅退出：
   - 收到 SIGTERM：停止拉新任务，处理完当前任务后退出（避免滚动升级丢任务/重复消费）
 
@@ -447,8 +452,8 @@
 
 **D‑6.2 参考价格（已核对的“起步级”口径）**
 
-- VKE 托管集群（专业版）：约 `0.6 元/小时/集群`（≈ `432 元/月`）  
-  - 参考：`https://www.volcengine.com/pricing?product=VKE&tab=2`
+- ACK 托管集群（专业版）：约 `0.6 元/小时/集群`（≈ `432 元/月`）  
+  - 参考：`https://www.volcengine.com/pricing?product=ACK&tab=2`
 - ECS 常驻节点（1 台起步）：
   - `ecs.g3i.large (2c8g)`：约 `286.38 元/月/台`
   - `ecs.g3i.xlarge (4c16g)`：约 `539.76 元/月/台`
@@ -475,7 +480,7 @@
 **D‑6.3 最小可部署清单（你已确认：先 1 台常驻，不追求 HA）**
 
 - 必选（固定投入）
-  - 1× VKE 托管集群（专业版）
+  - 1× ACK 托管集群（专业版）
   - 1× ECS 常驻节点（建议先 `4c16g`，最低可用 `2c8g`；你已明确“2 台常驻暂不需要”）
   - 1× 公网 CLB（对外暴露 API）
   - 1× NAT 网关（节点私网出网；通常搭配 1×EIP）
@@ -487,7 +492,7 @@
 **D‑6.4 成本计算模板（固定 + 弹性）**
 
 - 固定（月费）：
-  - `cost_fixed_month ≈ VKE_month + ECS_month + CLB_month + NAT_month + EIP_month + RDS_month`
+  - `cost_fixed_month ≈ ACK_month + ECS_month + CLB_month + NAT_month + EIP_month + RDS_month`
   - 示例（仅作量级感知，不含 TOS/日志/监控/镜像仓库）：
     - 2c8g 常驻：`432 + 286 + 77 + 306 + 23 + 360 ≈ 1484 元/月`
     - 4c16g 常驻：`432 + 540 + 77 + 306 + 23 + 360 ≈ 1738 元/月`

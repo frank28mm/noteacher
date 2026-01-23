@@ -5,7 +5,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=[".env", ".env.local"], extra="ignore")
+
+    # Critical infrastructure
+    supabase_url: str = Field(default="", validation_alias="SUPABASE_URL")
+    supabase_key: str = Field(default="", validation_alias="SUPABASE_KEY")
+    supabase_service_role_key: str = Field(default="", validation_alias="SUPABASE_SERVICE_ROLE_KEY")
+    supabase_db_url: str = Field(default="", validation_alias="SUPABASE_DB_URL")
+    supabase_bucket: str = Field(default="homework-test-staging", validation_alias="SUPABASE_BUCKET")
+    redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
+    cache_prefix: str = Field(default="", validation_alias="CACHE_PREFIX")
+    require_redis: bool = Field(default=False, validation_alias="REQUIRE_REDIS")
 
     # App environment
     # dev | test | staging | prod
@@ -381,7 +391,8 @@ class Settings(BaseSettings):
     )
     grade_review_cards_timeout_seconds: int = Field(
         # Per-item VFE budget (smaller than full grade vision budget).
-        default=60, validation_alias="GRADE_REVIEW_CARDS_TIMEOUT_SECONDS"
+        default=60,
+        validation_alias="GRADE_REVIEW_CARDS_TIMEOUT_SECONDS",
     )
 
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
@@ -417,7 +428,7 @@ class Settings(BaseSettings):
     jwt_secret: str = Field(default="", validation_alias="JWT_SECRET")
     jwt_issuer: str = Field(default="noteacher", validation_alias="JWT_ISSUER")
     jwt_access_token_ttl_seconds: int = Field(
-        default=7 * 24 * 3600, validation_alias="JWT_ACCESS_TOKEN_TTL_SECONDS"
+        default=0, validation_alias="JWT_ACCESS_TOKEN_TTL_SECONDS"
     )
 
     # SMS auth
@@ -429,9 +440,25 @@ class Settings(BaseSettings):
         default=60, validation_alias="SMS_SEND_COOLDOWN_SECONDS"
     )
     sms_return_code_in_response: bool = Field(
-        # Dev-only convenience; production should keep this false.
         default=True,
         validation_alias="SMS_RETURN_CODE_IN_RESPONSE",
+    )
+
+    # Aliyun SMS (号码认证服务 Dypnsapi)
+    aliyun_access_key_id: str = Field(
+        default="", validation_alias="ALIYUN_ACCESS_KEY_ID"
+    )
+    aliyun_access_key_secret: str = Field(
+        default="", validation_alias="ALIYUN_ACCESS_KEY_SECRET"
+    )
+    aliyun_sms_sign_name: str = Field(
+        default="", validation_alias="ALIYUN_SMS_SIGN_NAME"
+    )
+    aliyun_sms_template_code: str = Field(
+        default="", validation_alias="ALIYUN_SMS_TEMPLATE_CODE"
+    )
+    aliyun_sms_scheme_name: str = Field(
+        default="默认方案", validation_alias="ALIYUN_SMS_SCHEME_NAME"
     )
 
     # Admin API (WS-G): token-based gate for the first iteration (no admin auth UI yet).

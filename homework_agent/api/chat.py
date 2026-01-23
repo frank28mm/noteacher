@@ -69,6 +69,7 @@ def _safe_table(name: str):
     storage = get_storage_client()
     return storage.client.table(name)
 
+
 # 并发保护：防止线程池堆积导致“越跑越慢/无响应”
 _settings_for_limits = get_settings()
 VISION_SEMAPHORE = asyncio.Semaphore(
@@ -1047,24 +1048,25 @@ def _format_math_for_display(text: str) -> str:
         # Pattern 2: Things followed by ^{...} or _{...}
         # Pattern 3: Things like a^{b}, x_{n}, etc.
         latex_patterns = [
-            r'\\[a-zA-Z]+\{[^}]*\}(?:\{[^}]*\})?',  # \frac{a}{b}, \sqrt{a}
-            r'\\[a-zA-Z]+',  # \alpha, \beta, \sum, \int (without args)
-            r'[a-zA-Z0-9]+\^\{[^}]+\}',  # a^{12}, x^2
-            r'[a-zA-Z0-9]+_\{[^}]+\}',  # x_{n}, a_{i}
-            r'\\\{[^}]+\\\}',  # \{ ... \} for grouping
-            r'\\[a-zA-Z]+\[[^\]]*\](?:\{[^}]*\})?',  # \sqrt[n]{x}
+            r"\\[a-zA-Z]+\{[^}]*\}(?:\{[^}]*\})?",  # \frac{a}{b}, \sqrt{a}
+            r"\\[a-zA-Z]+",  # \alpha, \beta, \sum, \int (without args)
+            r"[a-zA-Z0-9]+\^\{[^}]+\}",  # a^{12}, x^2
+            r"[a-zA-Z0-9]+_\{[^}]+\}",  # x_{n}, a_{i}
+            r"\\\{[^}]+\\\}",  # \{ ... \} for grouping
+            r"\\[a-zA-Z]+\[[^\]]*\](?:\{[^}]*\})?",  # \sqrt[n]{x}
         ]
 
         # Apply patterns, but be careful not to wrap things that are already wrapped
         # First, mark existing $...$ sections to avoid double-wrapping
         placeholder_marker = "__MATH_BLOCK__"
         math_blocks = []
+
         def preserve_math(match):
             math_blocks.append(match.group(0))
-            return f"{placeholder_marker}{len(math_blocks)-1}__"
+            return f"{placeholder_marker}{len(math_blocks) - 1}__"
 
         # Temporarily replace existing math blocks
-        s = re.sub(r'\$\$[^$]+\$\$|\$[^$]+\$', preserve_math, s)
+        s = re.sub(r"\$\$[^$]+\$\$|\$[^$]+\$", preserve_math, s)
 
         # Now apply auto-wrapping to remaining text
         for pattern in latex_patterns:
@@ -1223,6 +1225,7 @@ def _format_session_history_for_display(session_data: Dict[str, Any]) -> None:
     focus_q = session_data.get("focus_question_number")
     if focus_q:
         from homework_agent.api.session import get_question_history
+
         q_hist = get_question_history(session_data, focus_q)
         if q_hist:
             hist = q_hist
@@ -1250,8 +1253,11 @@ class _ChatAbort(Exception):
         self.chunks = chunks
 
 
-def _sse_event(event: str, data: str) -> bytes:
-    return f"event: {event}\ndata: {data}\n\n".encode("utf-8")
+def _sse_event(event: str, data: str, event_id: Optional[str] = None) -> bytes:
+    parts = [f"event: {event}", f"data: {data}"]
+    if event_id:
+        parts.append(f"id: {event_id}")
+    return ("\n".join(parts) + "\n\n").encode("utf-8")
 
 
 def _abort_with_error_event(code: str, message: str) -> None:
@@ -1289,9 +1295,11 @@ def _abort_with_assistant_message(
         question_candidates=question_candidates,
     )
     chunks = [
-        _sse_event("chat", payload.model_dump_json()),
+        _sse_event("chat", payload.model_dump_json(), event_id=session_id),
         _sse_event(
-            "done", json.dumps({"status": done_status, "session_id": session_id})
+            "done",
+            json.dumps({"status": done_status, "session_id": session_id}),
+            event_id=session_id,
         ),
     ]
     raise _ChatAbort(chunks=chunks)
@@ -1324,9 +1332,11 @@ def _abort_with_user_and_assistant_message(
         question_candidates=question_candidates,
     )
     chunks = [
-        _sse_event("chat", payload.model_dump_json()),
+        _sse_event("chat", payload.model_dump_json(), event_id=session_id),
         _sse_event(
-            "done", json.dumps({"status": done_status, "session_id": session_id})
+            "done",
+            json.dumps({"status": done_status, "session_id": session_id}),
+            event_id=session_id,
         ),
     ]
     raise _ChatAbort(chunks=chunks)
@@ -1384,7 +1394,9 @@ def _rehydrate_session_from_submission_or_abort(
     Create a new session_id and seed minimal session/qbank/mistakes from durable submission facts.
     Returns (new_session_id, new_session_data). Aborts the SSE stream on deterministic failures.
     """
-    row = _load_submission_snapshot_for_chat(user_id=user_id, submission_id=submission_id)
+    row = _load_submission_snapshot_for_chat(
+        user_id=user_id, submission_id=submission_id
+    )
     if not isinstance(row, dict):
         _abort_with_error_event("SUBMISSION_NOT_FOUND", "submission not found")
 
@@ -1393,12 +1405,20 @@ def _rehydrate_session_from_submission_or_abort(
     if subj and req_subj and subj != req_subj:
         _abort_with_error_event("SUBJECT_MISMATCH", "subject mismatch for submission")
 
-    grade_result = row.get("grade_result") if isinstance(row.get("grade_result"), dict) else {}
+    grade_result = (
+        row.get("grade_result") if isinstance(row.get("grade_result"), dict) else {}
+    )
     questions = grade_result.get("questions")
     if not isinstance(questions, list) or not questions:
-        _abort_with_error_event("SUBMISSION_NOT_GRADED", "submission has no grade_result.questions")
+        _abort_with_error_event(
+            "SUBMISSION_NOT_GRADED", "submission has no grade_result.questions"
+        )
 
-    page_image_urls = row.get("page_image_urls") if isinstance(row.get("page_image_urls"), list) else []
+    page_image_urls = (
+        row.get("page_image_urls")
+        if isinstance(row.get("page_image_urls"), list)
+        else []
+    )
     page_image_urls = [str(u).strip() for u in page_image_urls if str(u).strip()]
     vision_raw_text = str(row.get("vision_raw_text") or "")
 
@@ -1414,11 +1434,17 @@ def _rehydrate_session_from_submission_or_abort(
         visual_facts_map=None,
     )
 
-    warnings = grade_result.get("warnings") if isinstance(grade_result.get("warnings"), list) else []
+    warnings = (
+        grade_result.get("warnings")
+        if isinstance(grade_result.get("warnings"), list)
+        else []
+    )
     grade_summary = str(grade_result.get("summary") or "").strip()
     persist_question_bank(
         session_id=new_session_id,
-        bank=_merge_bank_meta(bank, {"rehydrated_from_submission_id": str(submission_id)}),
+        bank=_merge_bank_meta(
+            bank, {"rehydrated_from_submission_id": str(submission_id)}
+        ),
         grade_status="done",
         grade_summary=grade_summary,
         grade_warnings=[str(w) for w in warnings if str(w).strip()],
@@ -1530,6 +1556,7 @@ def _emit_initial_events(
                 },
                 ensure_ascii=False,
             ),
+            event_id=session_id,
         )
     ]
 
@@ -1537,7 +1564,11 @@ def _emit_initial_events(
     # This ensures we get the correct question history when switching questions
     focus_q = None
     if req.context_item_ids:
-        from homework_agent.api._chat_stages import _try_extract_qn_from_context_id, _normalize_context_ids
+        from homework_agent.api._chat_stages import (
+            _try_extract_qn_from_context_id,
+            _normalize_context_ids,
+        )
+
         context_ids = _normalize_context_ids(req.context_item_ids or [])
         for cid in context_ids:
             if isinstance(cid, str):
@@ -1550,28 +1581,39 @@ def _emit_initial_events(
     if not focus_q:
         focus_q = session_data.get("focus_question_number")
 
-    logger.debug(f"[DEBUG _emit_initial_events] session_id={session_id}, focus_q={focus_q}, question_histories keys={list((session_data.get('question_histories') or {}).keys())}")
+    logger.debug(
+        f"[DEBUG _emit_initial_events] session_id={session_id}, focus_q={focus_q}, question_histories keys={list((session_data.get('question_histories') or {}).keys())}"
+    )
 
     question_history = None
     if focus_q:
         from homework_agent.api.session import get_question_history
+
         question_history = get_question_history(session_data, focus_q)
-        logger.debug(f"[DEBUG _emit_initial_events] question_history for focus_q={focus_q}: {len(question_history) if question_history else 0} messages")
+        logger.debug(
+            f"[DEBUG _emit_initial_events] question_history for focus_q={focus_q}: {len(question_history) if question_history else 0} messages"
+        )
 
     # Use question-specific history if available, otherwise fall back to global history
-    history_to_send = question_history if question_history else (session_data.get("history") or [])
+    history_to_send = (
+        question_history if question_history else (session_data.get("history") or [])
+    )
 
     # Send full history in a single chat event (not one message per event)
     # This ensures chat history persists when re-entering a question
     if history_to_send:
-        logger.debug(f"[DEBUG _emit_initial_events] Sending {len(history_to_send)} messages to client")
+        logger.debug(
+            f"[DEBUG _emit_initial_events] Sending {len(history_to_send)} messages to client"
+        )
         payload = ChatResponse(
             messages=history_to_send,
             session_id=session_id,
             retry_after_ms=None,
             cross_subject_flag=None,
         )
-        chunks.append(_sse_event("chat", payload.model_dump_json()))
+        chunks.append(
+            _sse_event("chat", payload.model_dump_json(), event_id=session_id)
+        )
 
     return chunks
 
@@ -2105,14 +2147,18 @@ async def chat_stream(
             request_id_override=request_id_override,
         )
     )
-    idempotency_key = str(request.headers.get("X-Idempotency-Key") or "").strip() or None
+    idempotency_key = (
+        str(request.headers.get("X-Idempotency-Key") or "").strip() or None
+    )
 
     # Client may request a history-only replay (no new LLM turn, no quota charge).
     # Used by frontend to show chat history immediately when entering AITutor page.
     is_init = str(request.headers.get("X-Chat-Init") or "").strip() == "1"
 
     settings = get_settings()
-    if (not is_init) and str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
+    if (not is_init) and str(
+        getattr(settings, "auth_mode", "dev") or "dev"
+    ).strip().lower() != "dev":
         wallet = load_wallet(user_id=user_id)
         if not wallet or wallet.bt_spendable <= 0:
             _abort_with_error_event(
@@ -2188,7 +2234,9 @@ async def chat_stream(
         yield c
 
     if is_init:
-        yield _sse_event("done", json.dumps({"status": "ready", "session_id": session_id}))
+        yield _sse_event(
+            "done", json.dumps({"status": "ready", "session_id": session_id})
+        )
         return
 
     try:

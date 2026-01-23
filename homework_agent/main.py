@@ -52,8 +52,33 @@ def _validate_prod_security(settings) -> None:
         )
 
 
+def _validate_env_fail_fast(settings) -> None:
+    """Check critical environment variables on startup."""
+    missing = []
+
+    # Critical for everyone
+    if not str(getattr(settings, "supabase_url", "") or "").strip():
+        missing.append("SUPABASE_URL")
+    if not str(getattr(settings, "supabase_key", "") or "").strip():
+        missing.append("SUPABASE_KEY")
+    if not str(getattr(settings, "redis_url", "") or "").strip():
+        missing.append("REDIS_URL")
+
+    # Critical for LLM/Vision
+    if not str(getattr(settings, "ark_api_key", "") or "").strip():
+        missing.append("ARK_API_KEY")
+    if not str(getattr(settings, "silicon_api_key", "") or "").strip():
+        missing.append("SILICON_API_KEY")
+
+    if missing:
+        raise RuntimeError(
+            f"Missing critical environment variables: {', '.join(missing)}"
+        )
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
+    _validate_env_fail_fast(settings)
     _validate_cors(settings)
     _validate_prod_security(settings)
 
@@ -74,9 +99,37 @@ def create_app() -> FastAPI:
     async def _request_context_middleware(request: Request, call_next):
         return await request_context_middleware(request, call_next)
 
+    @app.get("/healthz")
+    async def healthz():
+        """Liveness probe: returns 200 if the process is running."""
+        return PlainTextResponse("ok")
+
+    @app.get("/readyz")
+    async def readyz():
+        """
+        Readiness probe: returns 200 if critical dependencies are healthy.
+        Checks:
+        - Redis connection
+        - Supabase (optional? maybe just connectivity)
+        """
+        settings = get_settings()
+
+        # 1. Check Redis (critical for workers)
+        try:
+            import redis.asyncio as redis
+
+            r = redis.from_url(str(settings.redis_url), socket_timeout=1.0)
+            await r.ping()
+            await r.close()
+        except Exception as e:
+            logger.error(f"Readiness check failed (Redis): {e}")
+            return PlainTextResponse("not ready (redis)", status_code=503)
+
+        return PlainTextResponse("ready")
+
     @app.get("/metrics")
     async def metrics(
-        x_metrics_token: str | None = Header(default=None, alias="X-Metrics-Token")
+        x_metrics_token: str | None = Header(default=None, alias="X-Metrics-Token"),
     ):
         settings = get_settings()
         if not getattr(settings, "metrics_enabled", False):
@@ -158,6 +211,19 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(routes.router, prefix="/api/v1")
+
+    # Mount Admin Dashboard
+    import os
+    from fastapi.staticfiles import StaticFiles
+
+    # root/homework_agent/main.py -> root/homework_agent/static/admin
+    static_dir = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "homework_agent", "static", "admin"
+    )
+
+    if os.path.isdir(static_dir):
+        app.mount("/admin", StaticFiles(directory=static_dir, html=True), name="admin")
+
     return app
 
 

@@ -270,12 +270,33 @@ class SubmissionDetailResponse(BaseModel):
     questions: List[Dict[str, Any]] = Field(default_factory=list)
 
 
-def _compute_summary_from_grade_result(grade_result: Any) -> Optional[SubmissionSummary]:
+def _compute_summary_from_grade_result(
+    grade_result: Any, question_cards: Any = None
+) -> Optional[SubmissionSummary]:
     if not isinstance(grade_result, dict) or not grade_result:
         return None
     questions = grade_result.get("questions")
     if not isinstance(questions, list):
         questions = []
+
+    # If questions array is empty but we have aggregate fields, use those
+    if not questions:
+        # Try to use aggregate fields from grade_result
+        total_items = int(grade_result.get("total_items") or 0)
+        if total_items > 0:
+            # Has aggregate data but no questions array - use aggregates
+            wrong_count = int(grade_result.get("wrong_count") or 0)
+            uncertain_count = int(grade_result.get("uncertain_count") or 0)
+            blank_count = int(grade_result.get("blank_count") or 0)
+            return SubmissionSummary(
+                total_items=total_items,
+                wrong_count=wrong_count,
+                uncertain_count=uncertain_count,
+                blank_count=blank_count,
+                score_text=str(grade_result.get("score_text") or "").strip() or None,
+            )
+        # No data at all - return None to indicate incomplete grading
+        return None
     total_items = len(questions)
     wrong = 0
     uncertain = 0
@@ -387,7 +408,9 @@ def list_submissions(
             continue
         page_urls = r.get("page_image_urls")
         total_pages = len(page_urls) if isinstance(page_urls, list) else 0
-        summary = _compute_summary_from_grade_result(r.get("grade_result"))
+        summary = _compute_summary_from_grade_result(
+            r.get("grade_result")
+        )
         # If grade_result exists, treat as done; otherwise keep done_pages=0.
         done_pages = total_pages if summary is not None else 0
         items.append(

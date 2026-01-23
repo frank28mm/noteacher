@@ -14,6 +14,12 @@ from homework_agent.utils.jwt_utils import issue_access_token
 from homework_agent.utils.observability import log_event
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.supabase_client import get_worker_storage_client
+from homework_agent.utils.user_context import require_user_id
+from homework_agent.utils.security import verify_password, get_password_hash
+from homework_agent.services.sms_aliyun import (
+    send_sms_verify_code,
+    check_sms_verify_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +110,7 @@ class SmsSendResponse(BaseModel):
 
 
 @router.post("/sms/send", response_model=SmsSendResponse)
-def send_sms_code(req: SmsSendRequest):
+async def send_sms_code(req: SmsSendRequest):
     settings = get_settings()
     try:
         phone = normalize_cn_phone(req.phone)
@@ -113,29 +119,67 @@ def send_sms_code(req: SmsSendRequest):
 
     _check_send_cooldown(phone)
 
-    code = _issue_code()
-    cache = get_cache_store()
-    ttl = int(getattr(settings, "sms_code_ttl_seconds", 300) or 300)
-    cache.set(_get_sms_code_cache_key(phone), {"code": code}, ttl_seconds=ttl)
-
-    # Provider integration (WS-F): keep mock by default for dev.
     provider = str(getattr(settings, "sms_provider", "mock") or "mock").strip().lower()
-    if provider not in {"mock"}:
-        raise HTTPException(
-            status_code=500,
-            detail="sms provider not configured (use SMS_PROVIDER=mock for dev)",
-        )
-
-    # Mock provider: log code for local testing.
-    log_event(logger, "auth_sms_code_issued", phone=phone, ttl_seconds=ttl)
-    logger.info("DEV SMS code for %s: %s (ttl=%ss)", phone, code, ttl)
-
+    ttl = int(getattr(settings, "sms_code_ttl_seconds", 300) or 300)
     env = str(getattr(settings, "app_env", "dev") or "dev").strip().lower()
-    include = bool(getattr(settings, "sms_return_code_in_response", False)) and env not in {
+    include_code = bool(
+        getattr(settings, "sms_return_code_in_response", False)
+    ) and env not in {
         "prod",
         "production",
     }
-    return SmsSendResponse(ok=True, expires_in_seconds=ttl, code=(code if include else None))
+
+    if provider == "aliyun":
+        scheme_name = str(
+            getattr(settings, "aliyun_sms_scheme_name", "默认方案") or "默认方案"
+        )
+        success, verify_code, message = await send_sms_verify_code(
+            phone,
+            scheme_name=scheme_name,
+            code_length=6,
+            valid_time=ttl,
+            return_verify_code=include_code,
+        )
+        if not success:
+            log_event(logger, "auth_sms_send_failed", phone=phone, error=message)
+            if message == "FREQUENCY_FAIL":
+                raise HTTPException(status_code=429, detail="too many requests")
+            raise HTTPException(status_code=500, detail=f"sms send failed: {message}")
+
+        log_event(
+            logger,
+            "auth_sms_code_issued",
+            phone=phone,
+            ttl_seconds=ttl,
+            provider="aliyun",
+        )
+        return SmsSendResponse(
+            ok=True,
+            expires_in_seconds=ttl,
+            code=(verify_code if include_code and verify_code else None),
+        )
+
+    elif provider == "mock":
+        code = _issue_code()
+        cache = get_cache_store()
+        cache.set(_get_sms_code_cache_key(phone), {"code": code}, ttl_seconds=ttl)
+        log_event(
+            logger,
+            "auth_sms_code_issued",
+            phone=phone,
+            ttl_seconds=ttl,
+            provider="mock",
+        )
+        logger.info("DEV SMS code for %s: %s (ttl=%ss)", phone, code, ttl)
+        return SmsSendResponse(
+            ok=True, expires_in_seconds=ttl, code=(code if include_code else None)
+        )
+
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail="sms provider not configured (use SMS_PROVIDER=mock or aliyun)",
+        )
 
 
 class SmsVerifyRequest(BaseModel):
@@ -157,33 +201,33 @@ class SmsVerifyResponse(BaseModel):
     user: AuthUser
 
 
+def get_token_expires_at(settings) -> str:
+    ttl = int(getattr(settings, "jwt_access_token_ttl_seconds", 0) or 0)
+    if ttl <= 0:
+        return "never"
+    now = _utc_now()
+    exp = now + timedelta(seconds=ttl)
+    return _iso(exp)
+
+
 def _ensure_user_and_wallet(*, phone_e164: str) -> Dict[str, Any]:
     now = _utc_now()
-    # Upsert user by phone.
+    _safe_table("users").upsert(
+        {
+            "phone": phone_e164,
+            "last_login_at": _iso(now),
+        },
+        on_conflict="phone",
+    ).execute()
+
     resp = (
         _safe_table("users")
-        .upsert(
-            {
-                "phone": phone_e164,
-                "last_login_at": _iso(now),
-            },
-            on_conflict="phone",
-        )
         .select("user_id,phone,created_at,last_login_at")
+        .eq("phone", phone_e164)
         .limit(1)
         .execute()
     )
     rows = getattr(resp, "data", None)
-    if not isinstance(rows, list) or not rows:
-        # Fallback: fetch by phone.
-        resp2 = (
-            _safe_table("users")
-            .select("user_id,phone,created_at,last_login_at")
-            .eq("phone", phone_e164)
-            .limit(1)
-            .execute()
-        )
-        rows = getattr(resp2, "data", None)
     if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
         raise RuntimeError("failed to create user")
     user = rows[0]
@@ -242,7 +286,7 @@ def _ensure_user_and_wallet(*, phone_e164: str) -> Dict[str, Any]:
 
 
 @router.post("/sms/verify", response_model=SmsVerifyResponse)
-def verify_sms_code(req: SmsVerifyRequest):
+async def verify_sms_code(req: SmsVerifyRequest):
     settings = get_settings()
     try:
         phone = normalize_cn_phone(req.phone)
@@ -252,12 +296,27 @@ def verify_sms_code(req: SmsVerifyRequest):
     if not code:
         raise HTTPException(status_code=400, detail="code is required")
 
-    cache = get_cache_store()
-    payload = cache.get(_get_sms_code_cache_key(phone))
-    expected = str((payload or {}).get("code") or "").strip()
-    if not expected or expected != code:
-        raise HTTPException(status_code=401, detail="invalid code")
-    cache.delete(_get_sms_code_cache_key(phone))
+    provider = str(getattr(settings, "sms_provider", "mock") or "mock").strip().lower()
+
+    if provider == "aliyun":
+        scheme_name = str(
+            getattr(settings, "aliyun_sms_scheme_name", "默认方案") or "默认方案"
+        )
+        success, message = await check_sms_verify_code(
+            phone,
+            code,
+            scheme_name=scheme_name,
+        )
+        if not success:
+            log_event(logger, "auth_sms_verify_failed", phone=phone, result=message)
+            raise HTTPException(status_code=401, detail="invalid code")
+    else:
+        cache = get_cache_store()
+        payload = cache.get(_get_sms_code_cache_key(phone))
+        expected = str((payload or {}).get("code") or "").strip()
+        if not expected or expected != code:
+            raise HTTPException(status_code=401, detail="invalid code")
+        cache.delete(_get_sms_code_cache_key(phone))
 
     try:
         user = _ensure_user_and_wallet(phone_e164=phone)
@@ -266,13 +325,10 @@ def verify_sms_code(req: SmsVerifyRequest):
         raise HTTPException(status_code=500, detail="failed to create user")
 
     token = issue_access_token(user_id=str(user["user_id"]), phone=phone)
-    now = _utc_now()
-    exp = now + timedelta(
-        seconds=int(getattr(settings, "jwt_access_token_ttl_seconds", 0) or 0)
-    )
+    expires_at = get_token_expires_at(settings)
     return SmsVerifyResponse(
         access_token=token,
-        expires_at=_iso(exp),
+        expires_at=expires_at,
         user=AuthUser(**user),
     )
 
@@ -289,3 +345,62 @@ def logout(
     if authorization:
         log_event(logger, "auth_logout", has_auth=bool(authorization))
     return LogoutResponse(ok=True)
+
+
+class LoginEmailRequest(BaseModel):
+    email: str = Field(min_length=5)
+    password: str = Field(min_length=6)
+
+
+@router.post("/login/email", response_model=SmsVerifyResponse)
+def login_email(req: LoginEmailRequest):
+    settings = get_settings()
+    email = req.email.strip().lower()
+
+    # 1. Find user by email
+    resp = (
+        _safe_table("users")
+        .select("user_id,phone,password_hash,created_at,last_login_at")
+        .eq("email", email)
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(resp, "data", None)
+    if not isinstance(rows, list) or not rows:
+        # Avoid user enumeration? For MVP, explicit error is fine.
+        raise HTTPException(status_code=401, detail="invalid_credentials")
+
+    user = rows[0]
+    pwd_hash = str(user.get("password_hash") or "")
+    if not pwd_hash:
+        raise HTTPException(status_code=401, detail="password_not_set")
+
+    # 2. Verify password
+    if not verify_password(req.password, pwd_hash):
+        raise HTTPException(status_code=401, detail="invalid_credentials")
+
+    # 3. Issue token
+    user_id = str(user["user_id"])
+    phone = str(user.get("phone") or "")
+
+    # Update last login
+    try:
+        _safe_table("users").update({"last_login_at": _iso(_utc_now())}).eq(
+            "user_id", user_id
+        ).execute()
+    except Exception as e:
+        logger.warning(f"Failed to update last_login: {e}")
+
+    token = issue_access_token(user_id=user_id, phone=phone)
+    expires_at = get_token_expires_at(settings)
+
+    return SmsVerifyResponse(
+        access_token=token,
+        expires_at=expires_at,
+        user=AuthUser(
+            user_id=user_id,
+            phone=phone,
+            created_at=user.get("created_at"),
+            last_login_at=_iso(_utc_now()),
+        ),
+    )

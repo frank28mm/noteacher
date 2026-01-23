@@ -16,19 +16,19 @@ def issue_access_token(*, user_id: str, phone: Optional[str] = None) -> str:
         raise RuntimeError("JWT_SECRET is not configured")
 
     now = int(time.time())
-    exp = now + int(getattr(settings, "jwt_access_token_ttl_seconds", 0) or 0)
-    if exp <= now:
-        exp = now + 7 * 24 * 3600
+    ttl = int(getattr(settings, "jwt_access_token_ttl_seconds", 0) or 0)
 
     payload: Dict[str, Any] = {
         "sub": str(user_id),
         "iss": str(getattr(settings, "jwt_issuer", "noteacher") or "noteacher"),
         "iat": now,
-        "exp": exp,
         "role": "user",
     }
     if phone:
         payload["phone"] = str(phone)
+
+    if ttl > 0:
+        payload["exp"] = now + ttl
 
     return jwt.encode(payload, secret, algorithm="HS256")
 
@@ -42,11 +42,14 @@ def verify_access_token(token: str) -> Dict[str, Any]:
             detail="JWT_SECRET is not configured",
         )
     try:
+        ttl = int(getattr(settings, "jwt_access_token_ttl_seconds", 0) or 0)
+        require_exp = ["iat", "sub"] if ttl <= 0 else ["exp", "iat", "sub"]
+
         decoded = jwt.decode(
             token,
             secret,
             algorithms=["HS256"],
-            options={"require": ["exp", "iat", "sub"]},
+            options={"require": require_exp, "verify_exp": ttl > 0},
             issuer=str(getattr(settings, "jwt_issuer", "noteacher") or "noteacher"),
         )
         if not isinstance(decoded, dict):
@@ -60,4 +63,3 @@ def verify_access_token(token: str) -> Dict[str, Any]:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid auth token"
         )
-

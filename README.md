@@ -169,19 +169,29 @@ python3 homework_agent/demo_ui.py
 
 ## 🗓️ 开发计划 (Roadmap)
 
-- [x] **Phase 1: Agent Core** (当前状态)
+- [x] **Phase 1: Agent Core** (已完成)
     - [x] FastAPI 基础设施与路由
     - [x] LLM/Vision 双客户端实现
     - [x] 稳定性建设 (Retry, Guardrails)
-- [ ] **Phase 2: Gradio Demo UI** (进行中)
-    - [ ] 双 Tab 界面：批改 + 辅导
-    - [ ] 本地图片上传支持
-- [ ] **Phase 3: Asynchronous & Production**
-    - [ ] Redis 队列集成
-    - [ ] 批处理任务状态管理
-    - [ ] Submission 持久化（原始图片/识别原文/批改结果按时间可查）
-    - [ ] 会话/切片的短期数据 TTL（默认 24h；切片由 `SLICE_TTL_SECONDS` 控制）；长期数据清理归属上层“用户与数据管理后台”
-    - [ ] 错题排除（只影响统计/报告）+ 异步学业报告（可下载/历史报告）
+- [x] **Phase 2: Demo UI & Workers** (已完成)
+    - [x] Demo UI 2.0（Workflow Console）
+    - [x] 本地图片上传支持（`/uploads` API）
+    - [x] Redis 队列集成（grade/qindex/facts/report/review_cards worker）
+- [x] **Phase 3: Asynchronous & Production** (已完成)
+    - [x] 批处理任务状态管理（`/jobs/{job_id}` + 多页逐页可用）
+    - [x] Submission 持久化（原始图片/识别原文/批改结果按时间可查）
+    - [x] 会话/切片的短期数据 TTL（默认 24h；切片由 `SLICE_TTL_SECONDS` 控制）
+    - [x] 错题排除（只影响统计/报告）+ 异步学业报告（可下载/历史报告）
+- [x] **Phase 4: Auth & Monetization** (已完成)
+    - [x] SMS/邮箱登录（`/auth/sms/send`, `/auth/sms/verify`）
+    - [x] 家庭-子女档案（`/me/profiles`）
+    - [x] 配额与钱包（`/me/quota`, BT→CP 计费）
+    - [x] 订阅与支付（`/subscriptions/orders`）
+    - [x] 管理员接口（`/admin/*`）
+- [ ] **Phase 5: Scale & Ops** (进行中)
+    - [ ] 成本与并发治理（限流/优先级/缓存策略）
+    - [ ] 安全与合规（PII/Prompt Injection/RLS/signed URL）
+    - [ ] 灰度/回滚策略与故障演练
 
 ---
 

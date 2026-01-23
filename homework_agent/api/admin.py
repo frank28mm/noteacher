@@ -1,7 +1,8 @@
-from __future__ import annotations
-
 import logging
-from datetime import datetime, timezone
+import uuid
+import random
+import string
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request, Query
@@ -9,7 +10,10 @@ from pydantic import BaseModel, Field
 
 from homework_agent.utils.observability import log_event
 from homework_agent.utils.settings import get_settings
-from homework_agent.utils.supabase_client import get_worker_storage_client
+from homework_agent.utils.supabase_client import (
+    get_worker_storage_client,
+    get_service_role_storage_client,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +25,12 @@ def _utc_now() -> str:
 
 
 def _safe_table(name: str):
-    storage = get_worker_storage_client()
+    try:
+        # Force service role for admin operations to bypass RLS
+        storage = get_service_role_storage_client()
+    except Exception as e:
+        logger.warning(f"Service role key not available for admin: {e}")
+        storage = get_worker_storage_client()
     return storage.client.table(name)
 
 
@@ -84,6 +93,8 @@ def _map_wallet(row: Dict[str, Any]) -> Dict[str, Any]:
         "user_id": row.get("user_id"),
         "bt_trial": int(row.get("bt_trial") or 0),
         "bt_subscription": int(row.get("bt_subscription") or 0),
+        "bt_subscription_active": int(row.get("bt_subscription_active") or 0),
+        "bt_subscription_expired": int(row.get("bt_subscription_expired") or 0),
         "bt_report_reserve": int(row.get("bt_report_reserve") or 0),
         "report_coupons": int(row.get("report_coupons") or 0),
         "trial_expires_at": row.get("trial_expires_at"),
@@ -104,6 +115,8 @@ class WalletInfo(BaseModel):
     user_id: str
     bt_trial: int
     bt_subscription: int
+    bt_subscription_active: int = 0
+    bt_subscription_expired: int = 0
     bt_report_reserve: int
     report_coupons: int
     trial_expires_at: Optional[str] = None
@@ -142,13 +155,22 @@ def list_users(
     x_admin_actor: Optional[str] = Header(default=None, alias="X-Admin-Actor"),
 ):
     _require_admin(token=x_admin_token)
-    q = _safe_table("users").select("user_id,phone,created_at,last_login_at").limit(
-        max(1, min(limit, 200))
+    q = (
+        _safe_table("users")
+        .select("user_id,phone,created_at,last_login_at")
+        .limit(max(1, min(limit, 200)))
     )
     if phone:
-        q = q.eq("phone", phone)
+        # Support search by Phone OR User ID
+        # Clean the input
+        val = phone.strip()
+        # Supabase OR syntax: column.eq.val,column2.eq.val
+        q = q.or_(f"phone.eq.{val},user_id.eq.{val}")
+
+    logger.info(f"Listing users with phone='{phone}'")
     resp = q.execute()
     rows = getattr(resp, "data", None)
+    logger.info(f"Found {len(rows) if rows else 0} users")
     users: List[AdminUserDetail] = []
     if isinstance(rows, list):
         wallet_map: Dict[str, Dict[str, Any]] = {}
@@ -158,7 +180,7 @@ def list_users(
                 w_resp = (
                     _safe_table("user_wallets")
                     .select(
-                        "user_id,bt_trial,bt_subscription,bt_report_reserve,report_coupons,trial_expires_at,plan_tier,data_retention_tier,updated_at"
+                        "user_id,bt_trial,bt_subscription,bt_subscription_active,bt_subscription_expired,bt_report_reserve,report_coupons,trial_expires_at,plan_tier,data_retention_tier,updated_at"
                     )
                     .in_("user_id", ids)
                     .execute()
@@ -220,7 +242,7 @@ def get_user_detail(
     w_resp = (
         _safe_table("user_wallets")
         .select(
-            "user_id,bt_trial,bt_subscription,bt_report_reserve,report_coupons,trial_expires_at,plan_tier,data_retention_tier,updated_at"
+            "user_id,bt_trial,bt_subscription,bt_subscription_active,bt_subscription_expired,bt_report_reserve,report_coupons,trial_expires_at,plan_tier,data_retention_tier,updated_at"
         )
         .eq("user_id", user_id)
         .limit(1)
@@ -253,7 +275,7 @@ def adjust_wallet(
     w_resp = (
         _safe_table("user_wallets")
         .select(
-            "user_id,bt_trial,bt_subscription,bt_report_reserve,report_coupons,trial_expires_at,plan_tier,data_retention_tier,updated_at"
+            "user_id,bt_trial,bt_subscription,bt_subscription_active,bt_subscription_expired,bt_report_reserve,report_coupons,trial_expires_at,plan_tier,data_retention_tier,updated_at"
         )
         .eq("user_id", user_id)
         .limit(1)
@@ -266,8 +288,12 @@ def adjust_wallet(
 
     update: Dict[str, Any] = {"updated_at": _utc_now()}
     update["bt_trial"] = max(0, int(before["bt_trial"]) + int(payload.bt_trial_delta))
-    update["bt_subscription"] = max(
+    new_bt_sub = max(
         0, int(before["bt_subscription"]) + int(payload.bt_subscription_delta)
+    )
+    update["bt_subscription"] = new_bt_sub
+    update["bt_subscription_active"] = max(
+        0, int(before["bt_subscription_active"]) + int(payload.bt_subscription_delta)
     )
     update["bt_report_reserve"] = max(
         0, int(before["bt_report_reserve"]) + int(payload.bt_report_reserve_delta)
@@ -329,6 +355,139 @@ def adjust_wallet(
     return AdminUserDetail(user=user, wallet=wallet)
 
 
+class GrantQuotaRequest(BaseModel):
+    bt_amount: int = Field(..., ge=0, description="BT 额度")
+    coupon_amount: int = Field(default=0, ge=0, description="报告券数量")
+    expiry_days: int = Field(default=30, ge=1, le=365, description="额度有效天数")
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+@router.post("/users/{user_id}/grant", response_model=AdminUserDetail)
+def admin_grant_quota(
+    user_id: str,
+    request: Request,
+    payload: GrantQuotaRequest,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    x_admin_actor: Optional[str] = Header(default=None, alias="X-Admin-Actor"),
+):
+    _require_admin(token=x_admin_token)
+
+    from homework_agent.services.quota_service import load_wallet, BT_GRANT_EXPIRY_DAYS
+
+    wallet = load_wallet(user_id=user_id)
+    if not wallet:
+        raise HTTPException(status_code=404, detail="wallet_not_found")
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    expires_at = (now + timedelta(days=payload.expiry_days)).isoformat()
+    bt_amount = payload.bt_amount
+    coupon_amount = payload.coupon_amount
+
+    before = {
+        "bt_subscription": wallet.bt_subscription,
+        "bt_subscription_active": wallet.bt_subscription_active,
+        "report_coupons": wallet.report_coupons,
+    }
+
+    new_bt_sub = wallet.bt_subscription + bt_amount
+    new_bt_active = wallet.bt_subscription_active + bt_amount
+    new_coupons = wallet.report_coupons + coupon_amount
+
+    _safe_table("user_wallets").update(
+        {
+            "bt_subscription": new_bt_sub,
+            "bt_subscription_active": new_bt_active,
+            "report_coupons": new_coupons,
+            "updated_at": now_iso,
+        }
+    ).eq("user_id", user_id).execute()
+
+    if bt_amount > 0:
+        grant_id = str(uuid.uuid4())
+        _safe_table("bt_grants").insert(
+            {
+                "id": grant_id,
+                "user_id": user_id,
+                "bt_amount": bt_amount,
+                "grant_type": "admin_grant",
+                "expires_at": expires_at,
+                "created_from": "admin_grant",
+                "reference_id": None,
+                "meta": {
+                    "actor": x_admin_actor,
+                    "reason": payload.reason,
+                    "expiry_days": payload.expiry_days,
+                },
+            }
+        ).execute()
+
+    after = {
+        "bt_subscription": new_bt_sub,
+        "bt_subscription_active": new_bt_active,
+        "report_coupons": new_coupons,
+    }
+
+    _audit_log(
+        request=request,
+        actor=x_admin_actor,
+        action="admin_grant_quota",
+        target_type="user_wallets",
+        target_id=user_id,
+        payload={
+            "reason": payload.reason,
+            "bt_amount": bt_amount,
+            "coupon_amount": coupon_amount,
+            "expiry_days": payload.expiry_days,
+            "expires_at": expires_at,
+            "before": before,
+            "after": after,
+        },
+    )
+
+    log_event(
+        logger,
+        "admin_grant_quota",
+        user_id=user_id,
+        actor=x_admin_actor,
+        bt_amount=bt_amount,
+        coupon_amount=coupon_amount,
+        expiry_days=payload.expiry_days,
+    )
+
+    u_resp = (
+        _safe_table("users")
+        .select("user_id,phone,created_at,last_login_at")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    u_rows = getattr(u_resp, "data", None)
+    if not isinstance(u_rows, list) or not u_rows:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    u = u_rows[0]
+    user_obj = AdminUser(
+        user_id=str(u.get("user_id")),
+        phone=str(u.get("phone")),
+        created_at=u.get("created_at"),
+        last_login_at=u.get("last_login_at"),
+    )
+
+    w_resp = (
+        _safe_table("user_wallets")
+        .select(
+            "user_id,bt_trial,bt_subscription,bt_subscription_active,bt_subscription_expired,bt_report_reserve,report_coupons,trial_expires_at,plan_tier,data_retention_tier,updated_at"
+        )
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    w_rows = getattr(w_resp, "data", None)
+    wallet_info = WalletInfo(**_map_wallet(w_rows[0])) if w_rows else None
+
+    return AdminUserDetail(user=user_obj, wallet=wallet_info)
+
+
 @router.get("/audit_logs")
 def list_audit_logs(
     request: Request,
@@ -364,7 +523,9 @@ def list_usage_ledger(
     *,
     user_id: str = Query(..., min_length=1),
     limit: int = Query(default=50, ge=1, le=200),
-    before: Optional[str] = Query(default=None, description="ISO timestamp; created_at < before"),
+    before: Optional[str] = Query(
+        default=None, description="ISO timestamp; created_at < before"
+    ),
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     x_admin_actor: Optional[str] = Header(default=None, alias="X-Admin-Actor"),
 ):
@@ -402,7 +563,9 @@ def list_submissions_admin(
     user_id: str = Query(..., min_length=1),
     profile_id: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
-    before: Optional[str] = Query(default=None, description="ISO timestamp; created_at < before"),
+    before: Optional[str] = Query(
+        default=None, description="ISO timestamp; created_at < before"
+    ),
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     x_admin_actor: Optional[str] = Header(default=None, alias="X-Admin-Actor"),
 ):
@@ -413,7 +576,9 @@ def list_submissions_admin(
 
     q = (
         _safe_table("submissions")
-        .select("submission_id,user_id,profile_id,created_at,subject,session_id,warnings")
+        .select(
+            "submission_id,user_id,profile_id,created_at,subject,session_id,warnings"
+        )
         .eq("user_id", str(user_id))
         .order("created_at", desc=True)
         .limit(int(limit))
@@ -443,7 +608,9 @@ def list_reports_admin(
     user_id: str = Query(..., min_length=1),
     profile_id: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
-    before: Optional[str] = Query(default=None, description="ISO timestamp; created_at < before"),
+    before: Optional[str] = Query(
+        default=None, description="ISO timestamp; created_at < before"
+    ),
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     x_admin_actor: Optional[str] = Header(default=None, alias="X-Admin-Actor"),
 ):
@@ -454,7 +621,9 @@ def list_reports_admin(
 
     q = (
         _safe_table("reports")
-        .select("id,user_id,profile_id,report_job_id,title,period_from,period_to,created_at")
+        .select(
+            "id,user_id,profile_id,report_job_id,title,period_from,period_to,created_at"
+        )
         .eq("user_id", str(user_id))
         .order("created_at", desc=True)
         .limit(int(limit))
@@ -475,3 +644,322 @@ def list_reports_admin(
         payload={"profile_id": pid or None, "limit": int(limit), "before": before_iso},
     )
     return {"items": rows if isinstance(rows, list) else []}
+
+
+class GenerateRedeemCardsRequest(BaseModel):
+    card_type: str = Field(
+        ..., description="trial_pack / subscription_pack / report_coupon"
+    )
+    bt_amount: int = 0
+    coupon_amount: int = 0
+    premium_days: int = 0
+    count: int = Field(default=1, ge=1, le=1000)
+    batch_id: str = Field(..., min_length=1)
+    expires_days: int = Field(default=30, ge=1)
+    meta: Optional[Dict[str, Any]] = None
+
+
+@router.post("/redeem_cards/generate")
+def generate_redeem_cards(
+    request: Request,
+    payload: GenerateRedeemCardsRequest,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    x_admin_actor: Optional[str] = Header(default=None, alias="X-Admin-Actor"),
+):
+    _require_admin(token=x_admin_token)
+
+    codes = []
+    # Always set expires_at based on expires_days (default 30)
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(days=payload.expires_days)
+    ).isoformat()
+
+    now_str = _utc_now()
+    rows_to_insert = []
+
+    # Use uppercase letters and digits for the code
+    chars = string.ascii_uppercase + string.digits
+
+    for _ in range(payload.count):
+        # Format: 14 chars, A-Z0-9
+        code = "".join(random.choices(chars, k=14))
+
+        # Extract plan_tier from meta if present
+        plan_tier = None
+        if payload.meta and "target_tier" in payload.meta:
+            plan_tier = payload.meta["target_tier"]
+
+        rows_to_insert.append(
+            {
+                "code": code,
+                "card_type": payload.card_type,
+                "bt_amount": payload.bt_amount,
+                "report_coupons": payload.coupon_amount,
+                "premium_days": payload.premium_days,
+                "plan_tier": plan_tier,
+                "batch_id": payload.batch_id,
+                "status": "active",
+                "expires_at": expires_at,
+                "created_at": now_str,
+            }
+        )
+        codes.append(code)
+
+    if rows_to_insert:
+        _safe_table("redeem_cards").insert(rows_to_insert).execute()
+
+    _audit_log(
+        request=request,
+        actor=x_admin_actor,
+        action="redeem_cards_generate",
+        target_type="redeem_cards",
+        target_id=payload.batch_id,
+        payload=payload.model_dump(),
+    )
+
+    return {"codes": codes, "count": len(codes), "batch_id": payload.batch_id}
+
+
+@router.get("/redemptions")
+def list_redemptions_admin(
+    request: Request,
+    *,
+    user_id: Optional[str] = Query(default=None),
+    code: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    x_admin_actor: Optional[str] = Header(default=None, alias="X-Admin-Actor"),
+):
+    _require_admin(token=x_admin_token)
+    q = (
+        _safe_table("redeem_cards")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(limit)
+    )
+
+    if user_id:
+        q = q.eq("redeemed_by", str(user_id))
+    if code:
+        q = q.eq("code", str(code))
+    if status:
+        q = q.eq("status", str(status))
+
+    resp = q.execute()
+    rows = getattr(resp, "data", [])
+
+    _audit_log(
+        request=request,
+        actor=x_admin_actor,
+        action="redemptions_list",
+        target_type="redeem_cards",
+        target_id=None,
+        payload={"user_id": user_id, "code": code, "limit": limit},
+    )
+    return {"items": rows}
+
+
+@router.get("/redeem_cards/batches")
+def list_card_batches(
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    _require_admin(token=x_admin_token)
+    # Use RPC for aggregation
+    resp = (
+        _safe_table("redeem_cards").select("*").limit(0).execute()
+    )  # Dummy to get client
+    # Actually supabase-py client.rpc(...)
+    storage = get_worker_storage_client()
+    rpc_resp = storage.client.rpc("admin_get_batch_stats", {}).execute()
+
+    return {"items": getattr(rpc_resp, "data", [])}
+
+
+@router.post("/redeem_cards/batches/{batch_id}/disable")
+def disable_card_batch(
+    request: Request,
+    batch_id: str,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    x_admin_actor: Optional[str] = Header(default=None, alias="X-Admin-Actor"),
+):
+    _require_admin(token=x_admin_token)
+
+    # Disable only active cards in this batch
+    resp = (
+        _safe_table("redeem_cards")
+        .update({"status": "disabled", "updated_at": _utc_now()})
+        .eq("batch_id", batch_id)
+        .eq("status", "active")
+        .execute()
+    )
+
+    updated = getattr(resp, "data", [])
+    count = len(updated) if isinstance(updated, list) else 0
+
+    _audit_log(
+        request=request,
+        actor=x_admin_actor,
+        action="batch_disable",
+        target_type="redeem_cards",
+        target_id=batch_id,
+        payload={"disabled_count": count},
+    )
+
+    return {"ok": True, "disabled_count": count}
+
+
+class BulkUpdateCardsRequest(BaseModel):
+    codes: List[str]
+    status: str = Field(..., pattern="^(active|disabled)$")
+
+
+@router.post("/redeem_cards/bulk_update")
+def bulk_update_cards(
+    request: Request,
+    payload: BulkUpdateCardsRequest,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    x_admin_actor: Optional[str] = Header(default=None, alias="X-Admin-Actor"),
+):
+    _require_admin(token=x_admin_token)
+
+    if not payload.codes:
+        return {"updated_count": 0}
+
+    resp = (
+        _safe_table("redeem_cards")
+        .update({"status": payload.status, "updated_at": _utc_now()})
+        .in_("code", payload.codes)
+        .execute()
+    )
+
+    updated = getattr(resp, "data", [])
+    count = len(updated) if isinstance(updated, list) else 0
+
+    _audit_log(
+        request=request,
+        actor=x_admin_actor,
+        action="cards_bulk_update",
+        target_type="redeem_cards",
+        target_id=None,
+        payload={
+            "status": payload.status,
+            "count": count,
+            "codes": payload.codes[:10],
+        },  # truncate logs
+    )
+
+    return {"ok": True, "updated_count": count}
+
+
+@router.get("/stats/dashboard")
+def get_dashboard_stats(
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    _require_admin(token=x_admin_token)
+
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    month_start = now.replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    ).isoformat()
+
+    # --- 1. KPIs ---
+    # Total Users
+    u_resp = _safe_table("users").select("user_id", count="exact", head=True).execute()
+    total_users = u_resp.count or 0
+
+    # Paid Users (plan_tier != 'free' or has subscription balance)
+    w_resp = (
+        _safe_table("user_wallets")
+        .select("plan_tier")
+        .neq("plan_tier", "free")
+        .execute()
+    )
+    paid_users = len(getattr(w_resp, "data", []) or [])
+    paid_ratio = round((paid_users / total_users * 100) if total_users > 0 else 0, 1)
+
+    # DAU (Active Today)
+    dau_resp = (
+        _safe_table("users")
+        .select("user_id", count="exact", head=True)
+        .gt("last_login_at", today_start)
+        .execute()
+    )
+    dau = dau_resp.count or 0
+
+    mrr = 0.0
+
+    # --- 2. Cost & Usage ---
+    # Token Usage Today
+    usage_resp = (
+        _safe_table("usage_ledger")
+        .select("total_tokens")
+        .gt("created_at", today_start)
+        .limit(1000)
+        .execute()
+    )
+    tokens_today = sum(
+        int(r.get("total_tokens") or 0) for r in (getattr(usage_resp, "data", []) or [])
+    )
+
+    # Submissions Today
+    sub_resp = (
+        _safe_table("submissions")
+        .select("id", count="exact", head=True)
+        .gt("created_at", today_start)
+        .execute()
+    )
+    subs_today = sub_resp.count or 0
+
+    # Avg Cost per Submission
+    avg_cost_tokens = int(tokens_today / subs_today) if subs_today > 0 else 0
+
+    # --- 3. Conversion ---
+    # Card Redemption Rate
+    card_total_resp = (
+        _safe_table("redeem_cards").select("id", count="exact", head=True).execute()
+    )
+    card_total = card_total_resp.count or 0
+
+    card_redeemed_resp = (
+        _safe_table("redeem_cards")
+        .select("id", count="exact", head=True)
+        .eq("status", "redeemed")
+        .execute()
+    )
+    card_redeemed = card_redeemed_resp.count or 0
+
+    card_rate = round((card_redeemed / card_total * 100) if card_total > 0 else 0, 1)
+
+    # --- 4. Health ---
+    # Error Rate Mock
+    err_count = 0  # Placeholder
+    error_rate = round((err_count / subs_today * 100) if subs_today > 0 else 0, 2)
+
+    # Latency (P50) - Mock
+    latency_p50 = "1.2s"
+
+    return {
+        "kpi": {
+            "total_users": total_users,
+            "paid_ratio": f"{paid_ratio}%",
+            "dau": dau,
+            "mrr": f"¥{mrr:,.2f}",
+        },
+        "cost": {
+            "tokens_today": f"{tokens_today:,}",
+            "subs_today": subs_today,
+            "avg_cost": f"{avg_cost_tokens} T/sub",
+        },
+        "conversion": {
+            "card_redemption_rate": f"{card_rate}% ({card_redeemed}/{card_total})",
+            "trial_conversion": f"{paid_ratio}%",  # Reusing paid ratio as proxy
+        },
+        "health": {
+            "error_rate": f"{error_rate}%",
+            "latency_p50": latency_p50,
+        },
+    }
