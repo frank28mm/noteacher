@@ -10,7 +10,6 @@ from homework_agent.api.routes import (
     assistant_tail,
 )
 
-
 client = TestClient(create_app())
 
 
@@ -82,12 +81,23 @@ def test_job_status_with_cache():
     job_id = "job_test"
     routes.cache_store.set(
         f"job:{job_id}",
-        {"status": "done", "result": {"summary": "ok"}},
+        {"user_id": "dev_user", "status": "done", "result": {"summary": "ok"}},
         ttl_seconds=60,
     )
     resp = client.get(f"/api/v1/jobs/{job_id}")
     assert resp.status_code == 200
     assert resp.json()["status"] == "done"
+
+
+def test_job_status_enforces_ownership():
+    job_id = "job_owner_test"
+    routes.cache_store.set(
+        f"job:{job_id}",
+        {"user_id": "user_a", "status": "done", "result": {"summary": "ok"}},
+        ttl_seconds=60,
+    )
+    resp = client.get(f"/api/v1/jobs/{job_id}", headers={"X-User-Id": "user_b"})
+    assert resp.status_code == 404
 
 
 def test_resolve_context_items_supports_item_id_and_index():

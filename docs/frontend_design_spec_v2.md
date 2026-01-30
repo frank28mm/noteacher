@@ -240,6 +240,7 @@
 1. `主页` → 点击 `SCAN` → 进入 `拍照页面`
 2. 拍照/选图 → 进入 `照片预览/上传页面`
 3. 点击 `上传` 后，**自动进入批改流程**（没有“提交批改”第二按钮）：
+   - 上传约束：一次最多 4 张；单张图片 ≤ 5MB（超限需提示用户重新选择/压缩后再传）。
    - `POST /api/v1/uploads`（多图 FormData）→ `upload_id / page_image_urls / total_pages`
    - **立即自动** `POST /api/v1/grade`（建议前端固定 `X-Force-Async: 1`）→ `job_id`
 4. 自动进入 `批改结果页面（逐页披露）`，轮询 `GET /api/v1/jobs/{job_id}`

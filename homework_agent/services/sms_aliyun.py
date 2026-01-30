@@ -18,11 +18,10 @@ import hmac
 import base64
 import json
 import logging
-import time
 import urllib.parse
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import httpx
 
@@ -90,7 +89,7 @@ async def send_sms_verify_code(
     code_length: int = 6,
     valid_time: int = 300,
     return_verify_code: bool = True,
-) -> Tuple[bool, Optional[str], str]:
+) -> tuple[bool, Optional[str], str]:
     """
     Send SMS verification code via Aliyun SendSmsVerifyCode API.
 
@@ -186,7 +185,7 @@ async def check_sms_verify_code(
     verify_code: str,
     *,
     scheme_name: str = "默认方案",
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """
     Verify SMS code via Aliyun CheckSmsVerifyCode API.
 

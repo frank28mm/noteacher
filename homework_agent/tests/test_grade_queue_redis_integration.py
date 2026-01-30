@@ -12,7 +12,6 @@ from homework_agent.services.grade_queue import (
 )
 from homework_agent.utils.cache import get_cache_store
 
-
 pytestmark = pytest.mark.integration
 
 

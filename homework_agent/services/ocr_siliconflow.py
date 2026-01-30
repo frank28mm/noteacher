@@ -79,7 +79,9 @@ def _as_data_uri(url: str, *, timeout_seconds: float) -> Optional[str]:
                 0
             ].strip() or "image/jpeg"
             data = r.content or b""
-        if not data or len(data) > 20 * 1024 * 1024:
+        settings = get_settings()
+        max_bytes = int(getattr(settings, "max_upload_image_bytes", 5 * 1024 * 1024))
+        if not data or len(data) > max_bytes:
             return None
         b64 = base64.b64encode(data).decode("ascii")
         return f"data:{ct};base64,{b64}"

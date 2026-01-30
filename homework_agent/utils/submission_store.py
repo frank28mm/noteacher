@@ -219,25 +219,37 @@ def update_submission_after_grade(
         # choice placeholders "（ ）" are misread as "（A）" and then treated as a student's answer.
         # This runs before persistence so list/detail UIs stay consistent without requiring a re-grade.
         try:
-            questions = grade_result.get("questions") if isinstance(grade_result, dict) else None
+            questions = (
+                grade_result.get("questions")
+                if isinstance(grade_result, dict)
+                else None
+            )
             if (
                 isinstance(questions, list)
                 and vision_raw_text
                 and str(vision_raw_text).strip()
                 and subject
             ):
-                from homework_agent.core.qbank_parser import build_question_bank_from_vision_raw_text
-                from homework_agent.core.qbank_builder import normalize_questions as _normalize_questions_for_storage
+                from homework_agent.core.qbank_parser import (
+                    build_question_bank_from_vision_raw_text,
+                )
+                from homework_agent.core.qbank_builder import (
+                    normalize_questions as _normalize_questions_for_storage,
+                )
                 from homework_agent.models.schemas import Subject as SubjectEnum
 
                 subj_raw = str(subject or "").strip().lower()
-                subj = SubjectEnum.ENGLISH if subj_raw == "english" else SubjectEnum.MATH
+                subj = (
+                    SubjectEnum.ENGLISH if subj_raw == "english" else SubjectEnum.MATH
+                )
                 page_urls = page_image_urls if isinstance(page_image_urls, list) else []
                 vision_qbank = build_question_bank_from_vision_raw_text(
                     session_id=str(session_id or ""),
                     subject=subj,
                     vision_raw_text=str(vision_raw_text),
-                    page_image_urls=[str(u).strip() for u in page_urls if str(u).strip()],
+                    page_image_urls=[
+                        str(u).strip() for u in page_urls if str(u).strip()
+                    ],
                 )
                 vision_questions_map = (
                     vision_qbank.get("questions")
@@ -261,7 +273,9 @@ def update_submission_after_grade(
                             cq["options"] = vq.get("options")
                     # Some heuristics depend on a full stem+options text.
                     try:
-                        from homework_agent.core.qbank_builder import _compose_question_text_full
+                        from homework_agent.core.qbank_builder import (
+                            _compose_question_text_full,
+                        )
 
                         cq["question_text"] = _compose_question_text_full(cq)
                     except Exception:

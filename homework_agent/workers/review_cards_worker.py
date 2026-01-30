@@ -78,7 +78,9 @@ def _pick_qindex_refs_for_question(
     if not isinstance(pages, list):
         return entry
     # Filter to the requested page_index when possible.
-    filtered = [p for p in pages if isinstance(p, dict) and p.get("page_index") == page_index]
+    filtered = [
+        p for p in pages if isinstance(p, dict) and p.get("page_index") == page_index
+    ]
     if filtered:
         e = dict(entry)
         e["pages"] = filtered
@@ -158,7 +160,9 @@ async def _run_vfe_review(
 
     # For large page images, generate a lightweight proxy to reduce timeouts.
     if image_source == "page":
-        proxy_urls = _create_proxy_image_urls(image_urls, session_id=session_id, prefix="vfe_proxy/")
+        proxy_urls = _create_proxy_image_urls(
+            image_urls, session_id=session_id, prefix="vfe_proxy/"
+        )
         if proxy_urls:
             image_urls = proxy_urls
             image_source = "page_proxy"
@@ -257,13 +261,25 @@ async def _run_vfe_review(
         try:
             bundle = facts.facts
             for line in (bundle.lines or [])[:6]:
-                parts = [getattr(line, "name", None), getattr(line, "direction", None), getattr(line, "relative", None)]
+                parts = [
+                    getattr(line, "name", None),
+                    getattr(line, "direction", None),
+                    getattr(line, "relative", None),
+                ]
                 preview_lines.append("- " + " ".join([str(p) for p in parts if p]))
             for ang in (bundle.angles or [])[:6]:
                 parts = [
                     getattr(ang, "name", None),
-                    (f"at {getattr(ang, 'at', None)}" if getattr(ang, "at", None) else None),
-                    (f"between {','.join(getattr(ang, 'between', None) or [])}" if getattr(ang, "between", None) else None),
+                    (
+                        f"at {getattr(ang, 'at', None)}"
+                        if getattr(ang, "at", None)
+                        else None
+                    ),
+                    (
+                        f"between {','.join(getattr(ang, 'between', None) or [])}"
+                        if getattr(ang, "between", None)
+                        else None
+                    ),
                     f"side={getattr(ang, 'transversal_side', None)}",
                     f"between_lines={getattr(ang, 'between_lines', None)}",
                 ]
@@ -320,12 +336,16 @@ def main() -> int:
     _install_signal_handlers(stopper)
     ttl_seconds = 24 * 3600
     try:
-        ttl_seconds = int(getattr(settings, "slice_ttl_seconds", ttl_seconds) or ttl_seconds)
+        ttl_seconds = int(
+            getattr(settings, "slice_ttl_seconds", ttl_seconds) or ttl_seconds
+        )
     except Exception:
         ttl_seconds = 24 * 3600
 
     max_attempts = 3
-    budget = max(10, int(getattr(settings, "grade_review_cards_timeout_seconds", 60) or 60))
+    budget = max(
+        10, int(getattr(settings, "grade_review_cards_timeout_seconds", 60) or 60)
+    )
     log_event(logger, "review_cards_worker_started", queue=qkey, budget_s=budget)
 
     while not stopper.stop:

@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional
 
 from homework_agent.core.qbank_builder import normalize_questions
 
-
 EXTRACT_VERSION = "facts_v1"
 DIAGNOSIS_VERSION = "diag_v0"
 
@@ -71,7 +70,18 @@ def _derive_question_severity(q: Dict[str, Any]) -> Optional[str]:
     if not text:
         return None
     # Unknown: unreadable / not answered / insufficient evidence
-    if any(k in text for k in ("未作答", "未填写", "空白", "看不清", "识别不清", "无法判定", "证据不足")):
+    if any(
+        k in text
+        for k in (
+            "未作答",
+            "未填写",
+            "空白",
+            "看不清",
+            "识别不清",
+            "无法判定",
+            "证据不足",
+        )
+    ):
         return "unknown"
     # Calculation error hints
     if any(

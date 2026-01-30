@@ -1,5 +1,53 @@
 # Product Requirements & Design Decisions
 
+> **文档状态**: 已更新至代码实际实现（2026-01-30）  
+> **当前阶段**: Beyond MVP - 功能完整的教育平台
+
+## 功能实现状态总览
+
+### ✅ 已完成功能 (Implemented)
+
+#### 核心功能
+- [x] **作业批改** (`/grade`): 数学/英语双科目，同步/异步双模式
+- [x] **苏格拉底辅导** (`/chat`): SSE 流式对话，基于 Submission 上下文
+- [x] **图片上传** (`/uploads`): 后端权威上传，支持 HEIC/PDF/多页
+- [x] **题目定位** (qindex): bbox 定位 + 切片裁剪，24h TTL
+
+#### 用户系统
+- [x] **多认证方式**: 短信验证码、邮箱登录
+- [x] **JWT 鉴权**: 完整 token 签发/验证/刷新
+- [x] **家庭多档案**: 家长账号下多子女数据隔离 (`/me/profiles`)
+- [x] **个人中心**: 账户管理、密码修改、邮箱绑定
+
+#### 支付与计费
+- [x] **配额系统**: BT (Brain Token) + CP (Compute Point) 双轨计费
+- [x] **订阅系统**: 订阅订单创建、Mock 支付 (`/subscriptions/orders`)
+- [x] **兑换卡系统**: 兑换码生成、分发、兑换 (`/subscriptions/redeem`)
+- [x] **钱包管理**: 配额查询、使用记录
+
+#### 数据与报告
+- [x] **错题本**: 历史错题聚合、排除/恢复、统计 (`/mistakes`)
+- [x] **学情报告**: 异步生成、历史查看、资格检查 (`/reports`)
+- [x] **提交历史**: 按时间查询、详情查看、移动档案 (`/submissions`)
+- [x] **数据归档**: 长期保存原始图片 + 批改结果
+
+#### 运营支持
+- [x] **用户反馈**: 提交反馈、管理员回复、未读检查 (`/feedback`)
+- [x] **管理员后台**: 用户管理、钱包调整、兑换卡批量生成 (`/admin`)
+- [x] **审计日志**: 操作记录、使用统计
+- [x] **审核队列**: 高风险题目人工复核 (`/review`)
+
+### 🔄 实验性功能 (Experimental)
+- [ ] **Autonomous Grade Agent**: 规划-工具-反思-汇总流程（稳定性待验证）
+- [ ] **视觉事实抽取 (VFE)**: 几何/图表视觉理解（门槛待固化）
+
+### ⏳ 规划功能 (Planned)
+- [ ] **原生 App 支持**: iOS/Android/HarmonyOS 客户端
+- [ ] **BFF 层**: 仅在多客户端时考虑引入
+- [ ] **GraphQL API**: 按需评估
+
+---
+
 ## 1. 核心业务流程与用户旅程 (Core Business Flow)
 
 ### 1.1 操作模式 (Input Workflow)
@@ -150,16 +198,138 @@
 
 **后端契约口径**
 *   前端应在业务请求头携带 `X-Profile-Id`（若已选择孩子）；未携带时后端自动落到默认 profile（兼容旧客户端）。
-*   Profiles 相关接口/行为详见：`homework_agent/API_CONTRACT.md`（Profiles Draft）与 `docs/profile_management_plan.md`。
+*   Profiles 相关接口/行为详见：`homework_agent/API_CONTRACT.md` 与 `docs/profile_management_plan.md`。
+
+---
+
+## 5. 业务功能模块详解
+
+### 5.1 支付与计费系统 (Payment & Billing)
+
+#### 5.1.1 配额体系 (Quota System)
+
+**钱包字段** (user_wallets 表):
+*   `bt_trial`: 试用额度（新用户赠送）
+*   `bt_subscription`: 订阅总额度
+*   `bt_subscription_active`: 激活的订阅额度
+*   `bt_subscription_expired`: 过期的订阅额度（30天后过期）
+*   `bt_report_reserve`: 报告生成预留额度
+*   `report_coupons`: 报告券数量（独立配额）
+
+**BT 计算规则** (WS-E frozen rule):
+```
+BT = prompt_tokens + 10 × completion_tokens
+```
+
+**CP (Compute Point) 转换**:
+```
+CP = BT // 12400
+```
+显示给用户的最小单位是 CP，但计费按 BT 精确扣除。
+
+**消耗顺序**:
+1. 先消耗 `bt_trial`（试用额度）
+2. 再消耗 `bt_subscription_active`（激活的订阅额度）
+3. 报告生成消耗 `report_coupons` → 再消耗 `bt_report_reserve`
+
+**额度过期**:
+*   订阅额度 30 天后自动过期（expiry_worker 处理）
+*   过期后 `bt_subscription_active` → `bt_subscription_expired`
+
+#### 5.1.2 订阅系统 (Subscription)
+*   **订单创建**: `POST /subscriptions/orders`
+    *   创建订阅订单（月度/年度）
+    *   返回订单 ID 和支付信息
+*   **Mock 支付**: `POST /subscriptions/orders/{id}/mock_pay` (开发环境)
+    *   模拟支付成功，用于测试
+*   **实际支付**: 生产环境对接支付宝/微信支付 (待接入)
+
+#### 5.1.3 兑换卡系统 (Redemption)
+*   **兑换码生成** (管理员): `POST /admin/redeem_cards/generate`
+    *   批量生成兑换码（指定 BT 额度、有效期）
+    *   支持批次管理、禁用批次
+*   **兑换流程** (用户): `POST /subscriptions/redeem`
+    1. 用户输入兑换码
+    2. 验证兑换码有效性（未使用、未过期）
+    3. 将对应 BT 额度加入用户钱包
+    4. 记录兑换历史
+*   **查询**: `GET /subscriptions/redemptions`
+    *   查看个人兑换历史
+
+### 5.2 用户反馈系统 (Feedback)
+
+#### 5.2.1 用户侧功能
+*   **提交反馈**: `POST /feedback`
+    *   支持文本反馈
+    *   支持上传图片（images 字段，图片 URL 列表）
+*   **查看反馈**: `GET /feedback`
+    *   分页查看个人反馈历史
+    *   显示管理员回复状态
+    *   自动标记管理员消息为已读
+*   **未读检查**: `GET /feedback/check_unread`
+    *   检查是否有管理员新回复
+
+#### 5.2.2 管理员侧功能
+*   **用户列表**: `GET /admin/feedback/users`
+    *   查看有反馈的用户列表
+*   **查看反馈**: `GET /admin/feedback/{user_id}`
+    *   查看特定用户的所有反馈
+*   **回复反馈**: `POST /admin/feedback/{user_id}`
+    *   管理员回复用户反馈
+    *   标记为已处理
+
+### 5.3 管理员后台 (Admin)
+
+#### 5.3.1 用户管理
+*   **用户列表**: `GET /admin/users`
+    *   分页查询所有用户
+    *   支持按注册时间、配额筛选
+*   **用户详情**: `GET /admin/users/{id}`
+    *   查看用户完整信息（账户、钱包、档案）
+*   **钱包调整**: `POST /admin/users/{id}/wallet_adjust`
+    *   手动调整用户 BT 额度（补偿/奖励）
+    *   支持分池调整：试用额度(bt_trial)、订阅额度(bt_subscription)、报告预留(bt_report_reserve)
+    *   请求体：`{ "bt_trial_delta": 0, "bt_subscription_delta": 50000, "bt_report_reserve_delta": 0, "reason": "补偿" }`
+*   **配额授予**: `POST /admin/users/{id}/grant`
+    *   批量授予订阅或报告券
+
+#### 5.3.2 数据审计
+*   **审计日志**: `GET /admin/audit_logs`
+    *   查看管理员操作记录
+*   **使用记录**: `GET /admin/usage_ledger`
+    *   查看系统资源使用统计
+*   **提交查询**: `GET /admin/submissions`
+    *   查看所有用户提交
+*   **报告查询**: `GET /admin/reports`
+    *   查看所有生成报告
+
+#### 5.3.3 运营统计
+*   **仪表盘**: `GET /admin/stats/dashboard`
+    *   日活/月活用户
+    *   批改量统计
+    *   收入统计
+
+### 5.4 数据归档与复习 (Archive & Review)
+
+#### 5.4.1 数据归档 (Data Archive)
+*   **长期保留**: 原始图片 + 批改结果 + 识别原文
+*   **查看历史**: 按时间轴查看所有提交
+*   **跨档案移动**: 支持将提交移动到不同子女档案
+
+#### 5.4.2 错题复习 (Review Flow)
+*   **错题本**: 聚合历史所有错题
+*   **排除机制**: 标记已掌握的错题（不影响统计）
+*   **复习卡片**: 系统自动生成复习计划
+*   **审核队列**: 高风险错题进入人工复核
 
 ## 4. 接口协议与架构 (Interface & Architecture)
 
 ### 4.1 通信协议 (Protocol)
 *   **流式交互 (Streaming)**：采用 **SSE (Server-Sent Events)** 协议。
     *   目的：支持 Agent 较长的思考推理过程，实现“打字机”即时反馈效果，避免客户端超时等待。
-    *   实时/流式场景（苏格拉底式辅导、小批量批改）：客户端/BFF ⇄ Python 直连 HTTP + SSE，单次超时 60s，可重试 1 次，需携带 idempotency-key 防重复；SSE 保持心跳，断线可选用 last-event-id 续接。
-    *   异步长任务（批量/多页批改）：客户端/BFF 通过 HTTP 提交任务，Python 接收后内部入队（Redis）。状态回传可用 webhook 回调（失败重试 ≤3 次，指数退避）或轮询任务状态接口；任务创建请求超时 60s，可重试 1 次，需 idempotency-key。
-    *   本仓库实现以 Python Agent + Redis worker 为主；BFF/前端可后续接入，不影响后端契约。
+    *   实时/流式场景（苏格拉底式辅导、小批量批改）：前端 ⇄ FastAPI 直连 HTTP + SSE，单次超时 60s，可重试 1 次，需携带 idempotency-key 防重复；SSE 保持心跳，断线可选用 last-event-id 续接。
+    *   异步长任务（批量/多页批改）：前端通过 HTTP 提交任务，后端接收后内部入队（Redis）。状态回传可用 webhook 回调（失败重试 ≤3 次，指数退避）或轮询任务状态接口；任务创建请求超时 60s，可重试 1 次，需 idempotency-key。
+    *   本仓库实现以 FastAPI + Redis Worker 为主；前端 React 应用直接调用后端 API。
 
 ### 4.2 数据同步策略 (Data Sync)
 *   **云端为本 (Cloud-First)**：
@@ -167,14 +337,36 @@
     *   对话历史与切片为短期数据（默认 24h），允许清理后不可恢复；客户端应优先展示 Submission 的批改结果与识别原文以保证可解释性。
 
 ### 4.3 服务形态 (Service Topology)
-*   **独立 Agent 服务 (Microservice)**：
-    *   将作业检查核心逻辑封装为独立的微服务 (Agent Service)。
-    *   **内部通信**：BFF 与 Agent 之间采用 **HTTP (REST)** 直接调用，避免引入 MQ 增加复杂度。
-    *   通过 API 网关对各端提供统一服务，实现核心业务逻辑解耦。
-    *   说明：本仓库仅包含 Python Agent 与 qindex worker；BFF/客户端实现不在本仓库范围。
+*   **独立后端服务 (Microservice)**：
+    *   将作业检查核心逻辑封装为独立的后端服务 (FastAPI)。
+    *   **前端通信**：前端 React 应用直接调用后端 **HTTP (REST)** API，无需 BFF 层。
+    *   通过 API 网关对外提供统一服务（生产环境建议使用阿里云 API Gateway）。
+*   说明：本仓库包含 FastAPI 主服务与多个后台 workers（grade/qindex/facts/report/review_cards/expiry）；前端实现在 `homework_frontend/` 目录。
 
-### 4.4 技术双引擎 (Dual-Engine Stack)
-*   **前端交互层 (BFF)**（可选，未来）：Node.js (NestJS/Koa)
-    *   处理 WebSocket/SSE 连接、业务逻辑、用户鉴权。
-*   **AI 计算层 (Core Engine)**（本仓库实现）：Python (FastAPI)
-    *   专注图像识别、批改推理、辅导对话与 qindex 切片生成。
+### 4.4 技术栈 (Tech Stack)
+
+#### 前端层 (Frontend)
+*   **框架**: React 19 + TypeScript 5.9
+*   **构建**: Vite 7.2
+*   **样式**: Tailwind CSS 3.4
+*   **数据**: axios + SWR
+*   **路由**: react-router-dom 7
+*   **动画**: framer-motion
+*   **数学渲染**: KaTeX
+*   **目录**: `homework_frontend/`
+
+#### 后端层 (Backend)
+*   **框架**: FastAPI (Python 3.10+)
+*   **AI 模型**: Doubao (Ark) + Qwen3 (SiliconFlow)
+*   **数据库**: Supabase (PostgreSQL + Storage)
+*   **缓存/队列**: Redis
+*   **部署**: 阿里云 ACK + ECI + PolarDB
+*   **目录**: `homework_agent/`
+
+#### 工作流 (Workers)
+*   `grade_worker`: 异步批改
+*   `qindex_worker`: 题目定位与切片
+*   `facts_worker`: 事实特征提取
+*   `report_worker`: 学情报告生成
+*   `review_cards_worker`: 复习卡片生成
+*   `expiry_worker`: 过期数据清理

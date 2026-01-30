@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-import random
+import secrets
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -14,8 +14,7 @@ from homework_agent.utils.jwt_utils import issue_access_token
 from homework_agent.utils.observability import log_event
 from homework_agent.utils.settings import get_settings
 from homework_agent.utils.supabase_client import get_worker_storage_client
-from homework_agent.utils.user_context import require_user_id
-from homework_agent.utils.security import verify_password, get_password_hash
+from homework_agent.utils.security import verify_password
 from homework_agent.services.sms_aliyun import (
     send_sms_verify_code,
     check_sms_verify_code,
@@ -79,7 +78,7 @@ def _get_sms_cooldown_key(phone_e164: str) -> str:
 
 
 def _issue_code() -> str:
-    return f"{random.randint(0, 999999):06d}"
+    return f"{secrets.randbelow(1_000_000):06d}"
 
 
 def _check_send_cooldown(phone_e164: str) -> None:
@@ -141,7 +140,13 @@ async def send_sms_code(req: SmsSendRequest):
             return_verify_code=include_code,
         )
         if not success:
-            log_event(logger, "auth_sms_send_failed", phone=phone, error=message)
+            log_event(
+                logger,
+                "auth_sms_send_failed",
+                phone=phone,
+                error_type="sms_send_failed",
+                error=message,
+            )
             if message == "FREQUENCY_FAIL":
                 raise HTTPException(status_code=429, detail="too many requests")
             raise HTTPException(status_code=500, detail=f"sms send failed: {message}")
@@ -246,7 +251,6 @@ def _ensure_user_and_wallet(*, phone_e164: str) -> Dict[str, Any]:
     )
     wallet_rows = getattr(wallet_resp, "data", None)
     if not isinstance(wallet_rows, list) or not wallet_rows:
-        settings = get_settings()
         bt_per_cp = 12400
         trial_cp = 200
         trial_bt = trial_cp * bt_per_cp

@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homework-agent-api
+  namespace: homework-agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: homework-agent-api
+  template:
+    metadata:
+      labels:
+        app: homework-agent-api
+    spec:
+      containers:
+        - name: api
+          image: homework-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: APP_ENV
+              value: "prod"
+            - name: AUTH_REQUIRED
+              value: "1"
+            # IMPORTANT:
+            # - local: verify locally-issued JWT (from /api/v1/auth/*)
+            # - supabase: verify Supabase Auth JWT via /auth/v1/user
+            - name: AUTH_MODE
+              value: "local"
+            # IMPORTANT: must be a JSON list string, e.g. ["https://app.example.com"]
+            # Replace before production deployment (fail-fast default).
+            - name: ALLOW_ORIGINS
+              value: "[]"
+            # In Kubernetes, prefer stdout/stderr for log aggregation.
+            - name: LOG_TO_FILE
+              value: "0"
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: redis-url
+            - name: REDIS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: redis-host
+            - name: SUPABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: supabase-url
+            - name: SUPABASE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: supabase-anon-key
+            - name: ARK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: ark-api-key
+            - name: SILICON_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: silicon-api-key
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: jwt-secret
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"

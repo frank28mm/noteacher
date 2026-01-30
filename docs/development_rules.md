@@ -20,6 +20,13 @@
 
 ---
 
+## 运行环境约定（dev/test/prod）
+
+运行环境与上线依赖的**单一真源**已收敛到：`docs/runtime_env_contract.md`  
+请以该文档为准，避免重复/冲突。
+
+---
+
 ## 一、可观测性优先 (Observability-First)
 
 ### 规则1.1: 所有新函数必须添加Tracing

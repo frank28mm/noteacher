@@ -23,6 +23,7 @@ def load_project_dotenv() -> bool:
 
     candidates = [
         project_root / ".env",
+        project_root / ".env.local",
         project_root / "homework_agent" / ".env",
     ]
 

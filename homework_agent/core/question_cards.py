@@ -6,7 +6,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 # Import from qbank_parser directly to avoid circular import
 from homework_agent.core.qbank_parser import _normalize_question_number
 
-
 AnswerState = str
 
 
@@ -133,7 +132,9 @@ def build_question_cards_from_questions_list(
     for q in questions or []:
         if not isinstance(q, dict):
             continue
-        qn = _normalize_question_number(q.get("question_number") or q.get("question_index"))
+        qn = _normalize_question_number(
+            q.get("question_number") or q.get("question_index")
+        )
         item_id = make_card_item_id(page_index=page_index, question_number=qn)
         ans_state = infer_answer_state(
             student_answer=q.get("student_answer"),

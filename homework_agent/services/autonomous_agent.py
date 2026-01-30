@@ -985,7 +985,9 @@ class AggregatorAgent:
                 "completion_tokens": int(usage.get("completion_tokens") or 0),
                 "total_tokens": int(usage.get("total_tokens") or 0),
             }
-        state.partial_results.setdefault("llm_trace", {})["llm_model"] = str(model or "")
+        state.partial_results.setdefault("llm_trace", {})["llm_model"] = str(
+            model or ""
+        )
         state.partial_results.setdefault("llm_trace", {})["llm_provider"] = str(
             self.provider or ""
         )

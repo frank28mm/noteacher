@@ -4,7 +4,6 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from homework_agent.models.schemas import Subject
 
-
 _VISUAL_KEYWORDS_STRONG = (
     # Explicit diagram references
     "如图",

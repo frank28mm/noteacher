@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Tuple
 
 from homework_agent.utils.observability import log_event
-from homework_agent.utils.settings import get_settings
+from homework_agent.utils.observability import trace_span
 from homework_agent.utils.supabase_client import get_worker_storage_client
 
 logger = logging.getLogger(__name__)
@@ -226,15 +226,15 @@ def _apply_spend(
             "endpoint": str(endpoint or ""),
             "stage": str(stage or ""),
             "model": str(model or "") or None,
-            "prompt_tokens": int((usage or {}).get("prompt_tokens") or 0)
-            if usage
-            else None,
-            "completion_tokens": int((usage or {}).get("completion_tokens") or 0)
-            if usage
-            else None,
-            "total_tokens": int((usage or {}).get("total_tokens") or 0)
-            if usage
-            else None,
+            "prompt_tokens": (
+                int((usage or {}).get("prompt_tokens") or 0) if usage else None
+            ),
+            "completion_tokens": (
+                int((usage or {}).get("completion_tokens") or 0) if usage else None
+            ),
+            "total_tokens": (
+                int((usage or {}).get("total_tokens") or 0) if usage else None
+            ),
             "bt_delta": int(bt_delta_i),
             "bt_trial_delta": int(bt_trial_delta),
             "bt_subscription_delta": int(bt_subscription_delta),
@@ -305,6 +305,67 @@ def charge_bt_spendable(
         model=model,
         usage=usage,
     )
+
+
+@trace_span("consume_report_coupon_and_reserve")
+def consume_report_coupon_and_reserve(
+    *,
+    user_id: str,
+    bt_cost: int,
+    idempotency_key: Optional[str],
+    request_id: Optional[str],
+    endpoint: str,
+    stage: str,
+    model: Optional[str],
+    usage: Optional[Dict[str, Any]],
+) -> Tuple[bool, Optional[str]]:
+    """
+    Consume 1 report coupon and deduct BT from `bt_report_reserve`.
+
+    Notes:
+    - Uses usage_ledger idempotency (user_id,idempotency_key) to avoid double-charging.
+    - Fails if coupon or reserve is insufficient.
+    """
+    uid = str(user_id or "").strip()
+    if not uid:
+        return False, "user_id is required"
+
+    bt_cost_i = max(0, int(bt_cost))
+    wallet = load_wallet(user_id=uid)
+    if not wallet:
+        return False, "wallet not found"
+
+    if int(wallet.report_coupons) <= 0:
+        return False, "no_report_coupons"
+    if int(wallet.bt_report_reserve) < bt_cost_i:
+        return False, "insufficient_bt_report_reserve"
+
+    ok, err = _apply_spend(
+        user_id=uid,
+        bt_delta=-abs(bt_cost_i),
+        from_pool="report_reserve",
+        report_coupons_delta=-1,
+        idempotency_key=idempotency_key,
+        request_id=request_id,
+        endpoint=endpoint,
+        stage=stage,
+        model=model,
+        usage=usage,
+    )
+    if ok:
+        try:
+            log_event(
+                logger,
+                "report_quota_consumed",
+                user_id=uid,
+                bt_cost=bt_cost_i,
+                endpoint=endpoint,
+                stage=stage,
+                idempotency_key=str(idempotency_key or "") or None,
+            )
+        except Exception:
+            pass
+    return ok, err
 
 
 def grant_subscription_quota(

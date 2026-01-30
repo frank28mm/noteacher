@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 PROMPT_VERSION = "autonomous_v1"
 
 PLANNER_SYSTEM_PROMPT = r"""

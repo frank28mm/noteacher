@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-
 """
 Verify key Supabase tables/columns via PostgREST (SUPABASE_URL + SUPABASE_KEY).
 
@@ -12,6 +10,8 @@ Limitations:
 - Cannot validate column defaults or RLS flags precisely (needs direct SQL).
 """
 
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -20,11 +20,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from homework_agent.utils.supabase_client import get_storage_client
-from homework_agent.utils.env import load_project_dotenv
-
 
 def _select_one(table: str, cols: str) -> Optional[Dict[str, Any]]:
+    from homework_agent.utils.supabase_client import get_storage_client
+
     try:
         resp = get_storage_client().client.table(table).select(cols).limit(1).execute()
         rows = getattr(resp, "data", None)
@@ -45,6 +44,8 @@ def _check_table(table: str, cols: List[str]) -> tuple[bool, str]:
 
 
 def main() -> int:
+    from homework_agent.utils.env import load_project_dotenv
+
     load_project_dotenv()
 
     checks = [
@@ -66,6 +67,10 @@ def main() -> int:
         ),
         ("reports", ["id", "user_id", "created_at"]),
         (
+            "bt_grants",
+            ["id", "user_id", "bt_amount", "expires_at", "is_expired", "created_at"],
+        ),
+        (
             "question_attempts",
             ["user_id", "submission_id", "item_id", "verdict", "created_at"],
         ),
@@ -86,6 +91,7 @@ def main() -> int:
             "\n提示：若 report_jobs/question_attempts/question_steps 缺失，请在 Supabase SQL Editor 执行：\n"
             "- `supabase/schema.sql`\n"
             "- `supabase/patches/20260101_add_facts_tables_and_report_job_locks.sql`\n",
+            "- `migrations/0014_create_bt_grants_table.up.sql`\n",
             file=sys.stderr,
         )
     return 0 if ok_all else 1

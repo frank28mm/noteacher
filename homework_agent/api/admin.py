@@ -1,6 +1,6 @@
 import logging
 import uuid
-import random
+import secrets
 import string
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -372,7 +372,7 @@ def admin_grant_quota(
 ):
     _require_admin(token=x_admin_token)
 
-    from homework_agent.services.quota_service import load_wallet, BT_GRANT_EXPIRY_DAYS
+    from homework_agent.services.quota_service import load_wallet
 
     wallet = load_wallet(user_id=user_id)
     if not wallet:
@@ -682,7 +682,7 @@ def generate_redeem_cards(
 
     for _ in range(payload.count):
         # Format: 14 chars, A-Z0-9
-        code = "".join(random.choices(chars, k=14))
+        code = "".join(secrets.choice(chars) for _ in range(14))
 
         # Extract plan_tier from meta if present
         plan_tier = None
@@ -766,11 +766,6 @@ def list_card_batches(
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
     _require_admin(token=x_admin_token)
-    # Use RPC for aggregation
-    resp = (
-        _safe_table("redeem_cards").select("*").limit(0).execute()
-    )  # Dummy to get client
-    # Actually supabase-py client.rpc(...)
     storage = get_worker_storage_client()
     rpc_resp = storage.client.rpc("admin_get_batch_stats", {}).execute()
 
@@ -862,9 +857,6 @@ def get_dashboard_stats(
 
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    month_start = now.replace(
-        day=1, hour=0, minute=0, second=0, microsecond=0
-    ).isoformat()
 
     # --- 1. KPIs ---
     # Total Users

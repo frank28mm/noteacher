@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, status
 
@@ -21,6 +21,12 @@ def _profiles_backend_configured() -> bool:
     Profiles live in Supabase Postgres. In unit tests we often monkeypatch table access without
     configuring Supabase env vars, so treat missing env as "profiles backend unavailable".
     """
+    # Hard rule: in APP_ENV=test we should not rely on external Supabase, even if the
+    # developer machine has SUPABASE_* exported. This keeps unit tests deterministic and
+    # prevents accidental real network calls.
+    if (os.getenv("APP_ENV") or "").strip().lower() == "test":
+        return False
+
     url = (os.getenv("SUPABASE_URL") or "").strip()
     key = (
         os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -66,7 +72,9 @@ def ensure_default_profile(*, user_id: str) -> str:
     """
     uid = str(user_id or "").strip()
     if not uid:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="user_id required")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="user_id required"
+        )
 
     profiles = list_profiles(user_id=uid)
     for p in profiles:

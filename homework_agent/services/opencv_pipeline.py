@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-import httpx
+from homework_agent.utils.url_image_helpers import _safe_fetch_public_url_bytes
 
 try:
     import numpy as np
@@ -45,16 +45,16 @@ def _load_image_bytes(
 ) -> Optional[bytes]:
     if ref.url:
         try:
-            with httpx.Client(
-                timeout=timeout_seconds, follow_redirects=True, trust_env=False
-            ) as client:
-                r = client.get(str(ref.url))
-            if r.status_code != 200:
+            fetched = _safe_fetch_public_url_bytes(
+                str(ref.url),
+                timeout_seconds=float(timeout_seconds),
+                max_redirects=3,
+                max_bytes=int(max_bytes),
+            )
+            if not fetched:
                 return None
-            data = r.content or b""
-            if not data or len(data) > max_bytes:
-                return None
-            return data
+            data, _ct = fetched
+            return data or None
         except Exception:
             return None
     if ref.base64:
@@ -107,7 +107,7 @@ def _deskew_image(img: Any) -> Any:
             angle = -(90 + angle)
         else:
             angle = -angle
-        (h, w) = img.shape[:2]
+        h, w = img.shape[:2]
         center = (w // 2, h // 2)
         M = cv2.getRotationMatrix2D(center, angle, 1.0)
         rotated = cv2.warpAffine(
@@ -157,7 +157,13 @@ def _crop(img: Any, bbox: Tuple[int, int, int, int]) -> Any:
 def run_opencv_pipeline(ref: ImageRef) -> Optional[OpenCVSliceResult]:
     settings = get_settings()
     timeout_s = float(getattr(settings, "opencv_processing_timeout", 30))
-    max_bytes = int(getattr(settings, "opencv_processing_max_bytes", 20 * 1024 * 1024))
+    max_bytes = int(
+        getattr(
+            settings,
+            "opencv_processing_max_bytes",
+            getattr(settings, "max_upload_image_bytes", 5 * 1024 * 1024),
+        )
+    )
     if not _CV_AVAILABLE:
         return None
 

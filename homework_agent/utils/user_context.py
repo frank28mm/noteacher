@@ -6,7 +6,12 @@ import httpx
 from fastapi import HTTPException, status
 
 from homework_agent.utils.settings import get_settings
-from homework_agent.utils.jwt_utils import verify_access_token
+from homework_agent.utils import jwt_utils
+
+
+def verify_access_token(token: str) -> dict:
+    # Keep a stable symbol for tests/monkeypatching.
+    return jwt_utils.verify_access_token(token)
 
 
 def get_user_id(x_user_id: Optional[str]) -> str:

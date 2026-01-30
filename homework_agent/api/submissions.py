@@ -140,7 +140,23 @@ def _compose_question_text_full(q: Dict[str, Any]) -> Optional[str]:
         try:
             raw = str(options.get("A") or "").strip()
             if raw and (
-                any(m in raw for m in ("B.", "C.", "D.", "B、", "C、", "D、", "(B)", "(C)", "(D)", "（B）", "（C）", "（D）"))
+                any(
+                    m in raw
+                    for m in (
+                        "B.",
+                        "C.",
+                        "D.",
+                        "B、",
+                        "C、",
+                        "D、",
+                        "(B)",
+                        "(C)",
+                        "(D)",
+                        "（B）",
+                        "（C）",
+                        "（D）",
+                    )
+                )
             ):
                 parsed: Dict[str, str] = {}
                 # Some graders/regexes collapse options into "A": "3  B. 4  C. 2  D. 1" (missing "A." marker).
@@ -408,9 +424,7 @@ def list_submissions(
             continue
         page_urls = r.get("page_image_urls")
         total_pages = len(page_urls) if isinstance(page_urls, list) else 0
-        summary = _compute_summary_from_grade_result(
-            r.get("grade_result")
-        )
+        summary = _compute_summary_from_grade_result(r.get("grade_result"))
         # If grade_result exists, treat as done; otherwise keep done_pages=0.
         done_pages = total_pages if summary is not None else 0
         items.append(
@@ -485,9 +499,17 @@ def get_submission_detail(
     )
     total_pages = len(page_image_urls)
 
-    grade_result = row.get("grade_result") if isinstance(row.get("grade_result"), dict) else {}
-    questions = grade_result.get("questions") if isinstance(grade_result.get("questions"), list) else []
-    qindex_slices = _load_qindex_slices_for_submission(user_id=str(user_id), profile_id=profile_id, submission_id=sid)
+    grade_result = (
+        row.get("grade_result") if isinstance(row.get("grade_result"), dict) else {}
+    )
+    questions = (
+        grade_result.get("questions")
+        if isinstance(grade_result.get("questions"), list)
+        else []
+    )
+    qindex_slices = _load_qindex_slices_for_submission(
+        user_id=str(user_id), profile_id=profile_id, submission_id=sid
+    )
     vision_raw_text = str(row.get("vision_raw_text") or "").strip()
 
     # Best-effort: reconstruct question_text from stored vision_raw_text.
@@ -495,7 +517,9 @@ def get_submission_detail(
     vision_qbank: Dict[str, Any] = {}
     if vision_raw_text:
         try:
-            from homework_agent.core.qbank_parser import build_question_bank_from_vision_raw_text
+            from homework_agent.core.qbank_parser import (
+                build_question_bank_from_vision_raw_text,
+            )
             from homework_agent.models.schemas import Subject
 
             subj_raw = str(row.get("subject") or "").strip().lower()
@@ -509,13 +533,21 @@ def get_submission_detail(
         except Exception:
             vision_qbank = {}
     vision_questions_map = (
-        vision_qbank.get("questions") if isinstance(vision_qbank.get("questions"), dict) else {}
+        vision_qbank.get("questions")
+        if isinstance(vision_qbank.get("questions"), dict)
+        else {}
     )
     # If grade_result has no per-question payload (older records / partial runs),
     # fall back to OCR-derived questions so the UI can still display full stems.
-    if (not questions) and isinstance(vision_questions_map, dict) and vision_questions_map:
+    if (
+        (not questions)
+        and isinstance(vision_questions_map, dict)
+        and vision_questions_map
+    ):
         questions = [
-            v for v in vision_questions_map.values() if isinstance(v, dict) and v.get("question_number")
+            v
+            for v in vision_questions_map.values()
+            if isinstance(v, dict) and v.get("question_number")
         ]
 
     # Best-effort: enforce blank policy + repair common OCR/LLM misreads for existing records.
@@ -523,7 +555,9 @@ def get_submission_detail(
     try:
         from datetime import datetime, timezone
 
-        from homework_agent.core.qbank_builder import normalize_questions as _normalize_questions_for_storage
+        from homework_agent.core.qbank_builder import (
+            normalize_questions as _normalize_questions_for_storage,
+        )
 
         original = [q for q in questions if isinstance(q, dict)]
         # Enrich with OCR-grounded stems/options so the blank/choice heuristics can catch
@@ -559,7 +593,13 @@ def get_submission_detail(
             qn = _normalize_question_key(copy_q.get("question_number"))
             fixed = repaired_map.get(qn) if qn else None
             if isinstance(fixed, dict):
-                for k in ("verdict", "answer_state", "student_answer", "answer_status", "warnings"):
+                for k in (
+                    "verdict",
+                    "answer_state",
+                    "student_answer",
+                    "answer_status",
+                    "warnings",
+                ):
                     if k in fixed:
                         copy_q[k] = fixed.get(k)
             repaired.append(copy_q)
@@ -646,8 +686,14 @@ def get_submission_detail(
             subj = Subject.ENGLISH if subj_raw == "english" else Subject.MATH
             vr, vr_reasons = analyze_visual_risk(
                 subject=subj,
-                question_content=str(copy_q.get("question_text") or copy_q.get("question_content") or "").strip(),
-                warnings=copy_q.get("warnings") if isinstance(copy_q.get("warnings"), list) else [],
+                question_content=str(
+                    copy_q.get("question_text") or copy_q.get("question_content") or ""
+                ).strip(),
+                warnings=(
+                    copy_q.get("warnings")
+                    if isinstance(copy_q.get("warnings"), list)
+                    else []
+                ),
             )
             copy_q["visual_risk"] = bool(vr)
             copy_q["visual_risk_reasons"] = list(vr_reasons or [])[:8]
@@ -678,7 +724,9 @@ def get_submission_detail(
                 copy_q["question_slice_image_url"] = _pick_first_slice_url(
                     refs, kind="question"
                 )
-                copy_q["figure_slice_image_url"] = _pick_first_slice_url(refs, kind="figure")
+                copy_q["figure_slice_image_url"] = _pick_first_slice_url(
+                    refs, kind="figure"
+                )
         safe_questions.append(copy_q)
 
     # Build derived question_cards from stored questions list (expects page_index; fallback to 0).
@@ -754,7 +802,9 @@ def get_submission_detail(
 
 
 class UpdateQuestionVerdictRequest(BaseModel):
-    verdict: str = Field(..., description="New verdict: correct, incorrect, or uncertain")
+    verdict: str = Field(
+        ..., description="New verdict: correct, incorrect, or uncertain"
+    )
 
 
 @router.post("/submissions/{submission_id}/questions/{question_id}")
@@ -779,7 +829,7 @@ def update_question_verdict(
     if not sid or not qid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="missing submission_id or question_id"
+            detail="missing submission_id or question_id",
         )
 
     # Validate verdict
@@ -788,7 +838,7 @@ def update_question_verdict(
     if verdict not in valid_verdicts:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"invalid verdict. Must be one of: {valid_verdicts}"
+            detail=f"invalid verdict. Must be one of: {valid_verdicts}",
         )
 
     try:
@@ -852,13 +902,18 @@ def update_question_verdict(
 
     if not isinstance(row, dict):
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="submission not found"
+            status_code=status.HTTP_404_NOT_FOUND, detail="submission not found"
         )
 
     # Update grade_result
-    grade_result = row.get("grade_result") if isinstance(row.get("grade_result"), dict) else {}
-    questions = grade_result.get("questions") if isinstance(grade_result.get("questions"), list) else []
+    grade_result = (
+        row.get("grade_result") if isinstance(row.get("grade_result"), dict) else {}
+    )
+    questions = (
+        grade_result.get("questions")
+        if isinstance(grade_result.get("questions"), list)
+        else []
+    )
 
     # Find and update the question
     from homework_agent.core.question_cards import infer_answer_state
@@ -908,7 +963,7 @@ def update_question_verdict(
     if not question_found:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="question not found in submission"
+            detail="question not found in submission",
         )
 
     # Recalculate summary + rebuild wrong_items from questions (avoid stale aggregates).
@@ -952,7 +1007,9 @@ def update_question_verdict(
     grade_result["wrong_count"] = int(wrong)
     grade_result["uncertain_count"] = int(uncertain)
     grade_result["blank_count"] = int(blank)
-    grade_result["total_items"] = int(len([q for q in questions if isinstance(q, dict)]))
+    grade_result["total_items"] = int(
+        len([q for q in questions if isinstance(q, dict)])
+    )
     grade_result["wrong_items"] = wrong_items
 
     # Update submission in database
@@ -1071,7 +1128,9 @@ def rebuild_submission_qindex(
         if request and request.question_numbers
         else None
     )
-    ok = enqueue_qindex_job(session_id=session_id, page_urls=urls, question_numbers=allow)
+    ok = enqueue_qindex_job(
+        session_id=session_id, page_urls=urls, question_numbers=allow
+    )
     if not ok:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1133,7 +1192,11 @@ def move_submission_profile(
             q = q.eq("profile_id", str(from_profile_id))
         resp = q.limit(1).execute()
         rows = getattr(resp, "data", None)
-        row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+        row = (
+            rows[0]
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict)
+            else None
+        )
     except Exception as e:
         logger.exception("move_profile failed to load submission")
         raise HTTPException(

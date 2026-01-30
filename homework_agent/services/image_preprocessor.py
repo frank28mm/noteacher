@@ -4,7 +4,7 @@ import base64
 import logging
 from typing import Optional
 
-import httpx
+from homework_agent.utils.url_image_helpers import _safe_fetch_public_url_bytes
 
 try:
     import numpy as np
@@ -17,7 +17,7 @@ except Exception:
     _CV_AVAILABLE = False
 
 from homework_agent.utils.supabase_client import get_storage_client
-from homework_agent.utils.settings import get_settings
+from homework_agent.utils.settings import DEFAULT_MAX_UPLOAD_IMAGE_BYTES, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -61,20 +61,20 @@ def preprocess_image_url(
     *,
     prefix: str,
     timeout_seconds: float = 20.0,
-    max_bytes: int = 20 * 1024 * 1024,
+    max_bytes: int = DEFAULT_MAX_UPLOAD_IMAGE_BYTES,
 ) -> Optional[str]:
     if not url:
         return None
     try:
-        with httpx.Client(
-            timeout=timeout_seconds, follow_redirects=True, trust_env=False
-        ) as client:
-            r = client.get(url)
-        if r.status_code != 200:
+        fetched = _safe_fetch_public_url_bytes(
+            url,
+            timeout_seconds=float(timeout_seconds),
+            max_redirects=3,
+            max_bytes=int(max_bytes),
+        )
+        if not fetched:
             return None
-        data = r.content or b""
-        if not data or len(data) > max_bytes:
-            return None
+        data, _ct = fetched
         processed = preprocess_image_bytes(data)
         storage = get_storage_client()
         return storage.upload_bytes(
@@ -92,20 +92,20 @@ def preprocess_image_url_to_data_uri(
     url: str,
     *,
     timeout_seconds: float = 20.0,
-    max_bytes: int = 20 * 1024 * 1024,
+    max_bytes: int = DEFAULT_MAX_UPLOAD_IMAGE_BYTES,
 ) -> Optional[str]:
     if not url:
         return None
     try:
-        with httpx.Client(
-            timeout=timeout_seconds, follow_redirects=True, trust_env=False
-        ) as client:
-            r = client.get(url)
-        if r.status_code != 200:
+        fetched = _safe_fetch_public_url_bytes(
+            url,
+            timeout_seconds=float(timeout_seconds),
+            max_redirects=3,
+            max_bytes=int(max_bytes),
+        )
+        if not fetched:
             return None
-        data = r.content or b""
-        if not data or len(data) > max_bytes:
-            return None
+        data, _ct = fetched
         processed = preprocess_image_bytes(data)
         return _bytes_to_data_uri(processed, "image/jpeg")
     except Exception as e:
@@ -123,7 +123,9 @@ def maybe_preprocess_for_vision(url: str) -> Optional[str]:
             getattr(settings, "vision_preprocess_timeout_seconds", 20.0)
         ),
         max_bytes=int(
-            getattr(settings, "vision_preprocess_max_bytes", 20 * 1024 * 1024)
+            getattr(
+                settings, "vision_preprocess_max_bytes", settings.max_upload_image_bytes
+            )
         ),
     )
 
@@ -139,5 +141,9 @@ def maybe_preprocess_for_ocr(url: str) -> Optional[str]:
         timeout_seconds=float(
             getattr(settings, "ocr_preprocess_timeout_seconds", 20.0)
         ),
-        max_bytes=int(getattr(settings, "ocr_preprocess_max_bytes", 20 * 1024 * 1024)),
+        max_bytes=int(
+            getattr(
+                settings, "ocr_preprocess_max_bytes", settings.max_upload_image_bytes
+            )
+        ),
     )

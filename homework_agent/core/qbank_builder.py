@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional
 from homework_agent.core.slice_policy import analyze_visual_risk
 from homework_agent.core.qbank_parser import (
     build_question_bank_from_vision_raw_text,
-    _normalize_question_number,
 )
 from homework_agent.core.question_cards import infer_answer_state
 from homework_agent.models.schemas import GeometryInfo, Severity, Subject
@@ -75,10 +74,14 @@ def _compose_question_text_full(q: Dict[str, Any]) -> Optional[str]:
                 opt_lines.append(f"{k}. {s}")
 
     # Avoid duplicating options if stem already contains A./B. etc.
-    if opt_lines and stem and (
-        re.search(r"(^|\n)\s*A[\.\、:：]\s*", stem)
-        or "(A)" in stem
-        or "（A）" in stem
+    if (
+        opt_lines
+        and stem
+        and (
+            re.search(r"(^|\n)\s*A[\.\、:：]\s*", stem)
+            or "(A)" in stem
+            or "（A）" in stem
+        )
     ):
         opt_lines = []
 
@@ -123,6 +126,7 @@ def sanitize_wrong_items(wrong_items: List[Dict[str, Any]]) -> List[Dict[str, An
         # Normalize question_number to string for schema compatibility
         # Import locally to avoid circular import
         from homework_agent.core.qbank_parser import _normalize_question_number as _norm
+
         qn = _norm(
             copy_item.get("question_number")
             or copy_item.get("question_index")
@@ -209,6 +213,7 @@ def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         copy_q = dict(q)
         # Use local import to avoid circular import
         from homework_agent.core.qbank_parser import _normalize_question_number as _norm
+
         qn = _norm(copy_q.get("question_number"))
         if qn is not None:
             copy_q["question_number"] = qn
@@ -233,9 +238,7 @@ def normalize_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             ans = str(student_answer or "").strip().upper()
             status = str(answer_status or "").strip()
             content = str(
-                copy_q.get("question_content")
-                or copy_q.get("question_text")
-                or ""
+                copy_q.get("question_content") or copy_q.get("question_text") or ""
             )
             if (
                 qt == "choice"

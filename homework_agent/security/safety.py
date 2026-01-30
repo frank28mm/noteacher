@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-
 _RE_EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _RE_CN_PHONE = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
 _RE_CN_IDCARD = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")

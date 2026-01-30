@@ -91,7 +91,7 @@
   - ✅ 已落地（代码）：`/api/v1/auth/sms/send|verify` + JWT（AUTH_MODE=local）+ 注册即 Trial Pack
   - ✅ 已落地（短信供应商）：接入阿里云/火山（`sms_aliyun.py`）
   - ✅ 已落地（前端）：登录态串联（Authorization: Bearer）
-  - ⏳ 待完成（前端）：SSE 断线续接（接入 `Last-Event-Id`；避免断线后重复输出/丢输出）
+  - ⚠️ 前端（SSE 续接）：存在实现但需按“部分完成”认定（history replay 有 `Last-Event-Id` + 自动重连；但游标未持久化、主流式请求无通用重连循环）
   - ✅ F‑5 家庭-子女（Profile）账户切换（真源见 `docs/profile_management_plan.md`）
     - ✅ 已落地（后端）：`child_profiles` + 各业务表 `profile_id` + `/api/v1/me/profiles` + 全链路 `(user_id,profile_id)` 隔离
     - ✅ 已落地（后端）：`POST /api/v1/submissions/{submission_id}/move_profile`（传错账户可补救）
@@ -140,8 +140,8 @@
 - 代码核对报告：`docs/reports/healthcheck_report_code_alignment_20260103.md`
 - 需要特别注意的出入点（避免后续误读）：
   - **API 端点数量**不是稳定指标：当前 `/api/v1/*` 为 20 条 unique paths（以 `homework_agent/API_CONTRACT.md` 为准，不写固定数字）。
-  - **SSE 客户端实现**：后端支持 `Last-Event-Id`（恢复 session + 最多重放 3 条 assistant），但当前 demo 前端用 `fetch + ReadableStream` 解析 SSE，尚未接入 `Last-Event-Id` 断线续接。
-  - **SSE 续接状态**：🟡 未完成（当前仅解析 SSE；尚未实现断线自动重连 + `Last-Event-Id` 续接），后续以“能自动恢复 + 不重复输出”为验收。
+  - **SSE 客户端实现**：后端支持 `Last-Event-Id`；前端已实现 `fetch + ReadableStream` 解析 SSE，并在 history replay 路径注入 `Last-Event-Id`。
+  - **SSE 续接状态**：⚠️ 部分完成（history replay 可重连；但 `Last-Event-Id` 未持久化、主流式请求无通用重连循环）。
   - **类型口径**：核心字段已对齐，但前端仍存在少量 `any` 作为过渡（不应宣称“完全无 any”）。
 
 ## 2) 工作流拆分（Workstreams）
@@ -883,7 +883,7 @@
   - 返回：`eligible/current_submissions/current_distinct_days/required_* /reason`（并提供 demo 友好的样本 submission_ids）
 - 数据源（权威）
   - 优先：`submissions`（按 `created_at` + `subject` + `user_id` 聚合）
-  - 兜底：`user_uploads`（仅代表上传，不代表 grade 完成；需谨慎）
+  - 兜底：无（已统一以 `submissions` 为唯一权威来源；上传阶段也会创建 submissions 记录）
 
 #### C‑5 Submissions/History List（Stitch UI：Recent Activity / History）
 

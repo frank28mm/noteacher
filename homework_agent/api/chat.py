@@ -1189,7 +1189,7 @@ def assistant_tail(
     return tail
 
 
-def _init_chat_request(
+async def _init_chat_request(
     *,
     req: ChatRequest,
     headers: Any,
@@ -1207,7 +1207,8 @@ def _init_chat_request(
     ) or get_request_id_from_headers(headers)
     if not request_id:
         request_id = f"req_{uuid.uuid4().hex[:12]}"
-    user_id = require_user_id(
+    user_id = await asyncio.to_thread(
+        require_user_id,
         authorization=(
             headers.get("Authorization") if hasattr(headers, "get") else None
         ),
@@ -1215,7 +1216,7 @@ def _init_chat_request(
     )
     started_m = time.monotonic()
     now_ts = _now_ts()
-    session_data = get_session(session_id)
+    session_data = await asyncio.to_thread(get_session, session_id)
     return session_id, request_id, user_id, started_m, now_ts, session_data
 
 
@@ -1342,9 +1343,11 @@ def _abort_with_user_and_assistant_message(
     raise _ChatAbort(chunks=chunks)
 
 
-def _touch_submission_best_effort(*, user_id: str, session_id: str) -> None:
+async def _touch_submission_best_effort(*, user_id: str, session_id: str) -> None:
     try:
-        touch_submission(user_id=user_id, session_id=session_id)
+        await asyncio.to_thread(
+            touch_submission, user_id=user_id, session_id=session_id
+        )
     except Exception as e:
         logger.debug(f"touch_submission failed (best-effort): {e}")
 
@@ -1731,7 +1734,7 @@ async def _best_effort_relook_if_needed(
                 wrong_item_context["focus_question"] = focus_obj
                 # Persist patch back to qbank for subsequent turns (best-effort).
                 try:
-                    qbank_now = get_question_bank(session_id)
+                    qbank_now = await asyncio.to_thread(get_question_bank, session_id)
                     if isinstance(qbank_now, dict):
                         qs = qbank_now.get("questions")
                         if (
@@ -1748,7 +1751,9 @@ async def _best_effort_relook_if_needed(
                             qbank_now = _merge_bank_meta(
                                 qbank_now, {"updated_at": datetime.now().isoformat()}
                             )
-                            save_question_bank(session_id, qbank_now)
+                            await asyncio.to_thread(
+                                save_question_bank, session_id, qbank_now
+                            )
                 except Exception as e:
                     logger.debug(f"Persisting relook patch to qbank failed: {e}")
     except Exception as e:
@@ -2038,7 +2043,7 @@ async def _run_chat_turn(
                     logger.debug(
                         f"Sanitizing compacted session for persistence failed (best-effort): {e}"
                     )
-                save_session(session_id, session_data)
+                await asyncio.to_thread(save_session, session_id, session_data)
             except Exception as e:
                 logger.debug(f"Persisting compacted session failed (best-effort): {e}")
     except Exception as e:
@@ -2140,7 +2145,7 @@ async def chat_stream(
 
     request_id_override = getattr(getattr(request, "state", None), "request_id", None)
     session_id, request_id, user_id, started_m, now_ts, session_data = (
-        _init_chat_request(
+        await _init_chat_request(
             req=req,
             headers=request.headers,
             last_event_id=last_event_id,
@@ -2159,7 +2164,7 @@ async def chat_stream(
     if (not is_init) and str(
         getattr(settings, "auth_mode", "dev") or "dev"
     ).strip().lower() != "dev":
-        wallet = load_wallet(user_id=user_id)
+        wallet = await asyncio.to_thread(load_wallet, user_id=user_id)
         if not wallet or wallet.bt_spendable <= 0:
             _abort_with_error_event(
                 "quota_insufficient",
@@ -2215,14 +2220,20 @@ async def chat_stream(
         rehydrated=rehydrated,
     )
 
-    _touch_submission_best_effort(user_id=user_id, session_id=session_id)
-    session_data = _ensure_chat_session_or_abort(
-        req=req,
-        session_id=session_id,
-        session_data=session_data,
-        now_ts=now_ts,
-        last_event_id=last_event_id,
-    )
+    await _touch_submission_best_effort(user_id=user_id, session_id=session_id)
+    try:
+        session_data = await asyncio.to_thread(
+            _ensure_chat_session_or_abort,
+            req=req,
+            session_id=session_id,
+            session_data=session_data,
+            now_ts=now_ts,
+            last_event_id=last_event_id,
+        )
+    except _ChatAbort as abort:
+        for c in abort.chunks:
+            yield c
+        return
 
     for c in _emit_initial_events(
         req=req,
@@ -2268,10 +2279,14 @@ async def chat_stream(
             error=str(e),
             elapsed_ms=int((time.monotonic() - started_m) * 1000),
         )
+        env = str(getattr(settings, "app_env", "dev") or "dev").strip().lower()
+        client_message = (
+            "Internal server error" if env in {"prod", "production"} else str(e)
+        )
         error_msg = json.dumps(
             build_error_payload(
                 code=ErrorCode.SERVICE_ERROR,
-                message=str(e),
+                message=client_message,
                 request_id=request_id,
                 session_id=session_id,
             )

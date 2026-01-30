@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from homework_agent.models.vision_facts import SceneType
 
-
 BASE_VFE_PROMPT = """
 You only do "visual fact extraction" from the image(s). Do NOT solve, do NOT prove, do NOT infer.
 

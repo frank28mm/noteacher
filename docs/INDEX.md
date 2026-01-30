@@ -18,7 +18,19 @@
 - 数学知识点口径（知识图谱/命名规范）：`docs/math_knowledge_graph.md`
 - 工程对齐与约束：`docs/engineering_guidelines.md`
 - 开发规则（门禁/日志/安全/回滚）：`docs/development_rules.md`
-- 数据库 Schema 真源（当前以实际 DB 为准）：`supabase/schema.sql`
+- 运行环境约定与上线清单（真源）：`docs/runtime_env_contract.md`
+- 部署实施（ACK+ECI+ECS 常驻，生产落地清单）：`docs/deployment_plan_ack_eci_ecs_baseline.md`
+- Autonomous Grade Agent 结构设计：`docs/autonomous_grade_agent_design.md`
+- **安全审计发现（SSOT）**：`docs/CROSS_AUDIT_REVIEW_CONSOLIDATED_20260129.md`
+  - 包含 P0 级安全漏洞验证、修复方案、验收标准、任务清单
+- **执行指导（简化版）**：`docs/CROSS_REPORT_REVIEW_ACTIONS_20260129.md`
+  - 高密度行动清单，用于任务分配
+- 数据库 Schema 真源（以代码仓库为准）：
+  - `migrations/*.up.sql`（可回滚迁移，结构主干）
+  - `supabase/patches/*.sql`（增量补丁：补字段/补锁/补 RLS 等）
+  - `supabase/harden_rls_complete.sql`（生产收紧 RLS：覆盖 facts/report_jobs 等 dev-time anon 策略）
+  - `supabase/harden_rls_production.sql`（历史最小脚本：仅 feedback_messages，对照/兼容用）
+  - 说明：`supabase/schema.sql` 仅保留少量独立表的 SQL（如 feedback），不再作为全库 schema 真源
 
 ## 2) 路线图（只保留 1 份）
 
@@ -47,6 +59,21 @@
 ## 5) 报告/分析（只作为参考，不当计划执行）
 
 > 注：归档报告已移至项目外 `../archive_作业检查大师/`。
+
+### 5.1 审计报告归档（2026-01-29 交叉审查）
+
+**原始审计报告**：
+- Kimi Code CLI 审计：`../archive_作业检查大师/release_audit_2026-01-29.md`
+- Claude 代码事实审计：`../archive_作业检查大师/RELEASE_AUDIT_REPORT_20260129.md`
+- Security Review 专项审查：`../archive_作业检查大师/SECURITY_REVIEW_SSRF_JOBS_RLS_20260129.md`
+- Trae 综合评估：`../archive_作业检查大师/Trae-noteacher-accessment.md`
+
+**交叉对比审查归档**：
+- 交叉对比审查反馈（我生成的）：`../archive_作业检查大师/CROSS_AUDIT_REVIEW_FEEDBACK_20260129.md`
+- Trae 交叉对比审查：`../archive_作业检查大师/REVIEW_FEEDBACK_CROSS_REPORT_20260129.md`
+- 我的交叉对比报告：`../archive_作业检查大师/CROSS_AUDIT_REVIEW_20260129.md`
+
+### 5.2 历史报告
 
 - 接手调研（阶段性快照）：`../archive_作业检查大师/archive/cto_onboarding_report.md`
 - 接手结论（阶段性快照）：`../archive_作业检查大师/archive/reports/cto_takeover_report_20251229.md`

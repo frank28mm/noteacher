@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-
 FEATURES_VERSION = "features_v2"
 
 SEVERITY_ORDER = ["calculation", "concept", "format", "unknown"]
@@ -86,6 +85,7 @@ def _is_wrongish(verdict: Any) -> bool:
 def _coerce_severity(v: Any) -> str:
     s = str(v or "").strip().lower()
     return s or "unknown"
+
 
 def _attempt_cause(a: Dict[str, Any]) -> str:
     """
@@ -250,7 +250,9 @@ def _compute_trends(
     for a in attempts:
         if not _is_wrongish(a.get("verdict")):
             continue
-        for tag in _dedupe_str_list(a.get("knowledge_tags_norm") or a.get("knowledge_tags")):
+        for tag in _dedupe_str_list(
+            a.get("knowledge_tags_norm") or a.get("knowledge_tags")
+        ):
             tag_wrong_counts[tag] = tag_wrong_counts.get(tag, 0) + 1
         sev = _attempt_cause(a)
         cause_wrong_counts[sev] = cause_wrong_counts.get(sev, 0) + 1

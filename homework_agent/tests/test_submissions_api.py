@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 
 from homework_agent.main import create_app
 
-
 client = TestClient(create_app())
 
 
@@ -74,7 +73,9 @@ class _FakeTable:
                 if k == "created_at":
                     bound = _parse_dt(str(v))
                     if bound is not None:
-                        rows = [r for r in rows if _dt_or_min(str(r.get(k) or "")) < bound]
+                        rows = [
+                            r for r in rows if _dt_or_min(str(r.get(k) or "")) < bound
+                        ]
                 else:
                     rows = [r for r in rows if str(r.get(k) or "") < str(v)]
 
@@ -91,7 +92,9 @@ class _FakeTable:
         return _Resp(data=rows)
 
 
-def test_list_submissions_sorted_and_includes_all_correct(monkeypatch: pytest.MonkeyPatch):
+def test_list_submissions_sorted_and_includes_all_correct(
+    monkeypatch: pytest.MonkeyPatch,
+):
     db: Dict[str, List[Dict[str, Any]]] = {
         "submissions": [
             {
@@ -103,8 +106,16 @@ def test_list_submissions_sorted_and_includes_all_correct(monkeypatch: pytest.Mo
                 "page_image_urls": ["u1p1"],
                 "grade_result": {
                     "questions": [
-                        {"question_number": "1", "verdict": "correct", "answer_state": "has_answer"},
-                        {"question_number": "2", "verdict": "correct", "answer_state": "has_answer"},
+                        {
+                            "question_number": "1",
+                            "verdict": "correct",
+                            "answer_state": "has_answer",
+                        },
+                        {
+                            "question_number": "2",
+                            "verdict": "correct",
+                            "answer_state": "has_answer",
+                        },
                     ],
                     "wrong_items": [],
                 },
@@ -118,9 +129,21 @@ def test_list_submissions_sorted_and_includes_all_correct(monkeypatch: pytest.Mo
                 "page_image_urls": ["u1p1", "u1p2"],
                 "grade_result": {
                     "questions": [
-                        {"question_number": "1", "verdict": "incorrect", "answer_state": "has_answer"},
-                        {"question_number": "2", "verdict": "uncertain", "answer_state": "has_answer"},
-                        {"question_number": "3", "verdict": "correct", "answer_state": "blank"},
+                        {
+                            "question_number": "1",
+                            "verdict": "incorrect",
+                            "answer_state": "has_answer",
+                        },
+                        {
+                            "question_number": "2",
+                            "verdict": "uncertain",
+                            "answer_state": "has_answer",
+                        },
+                        {
+                            "question_number": "3",
+                            "verdict": "correct",
+                            "answer_state": "blank",
+                        },
                     ],
                     "wrong_items": [{"question_number": "1", "reason": "x"}],
                 },
@@ -154,7 +177,9 @@ def test_list_submissions_subject_filter_and_before(monkeypatch: pytest.MonkeyPa
                 "subject": "math",
                 "created_at": "2026-01-03T11:00:00Z",
                 "page_image_urls": ["p1"],
-                "grade_result": {"questions": [{"question_number": "1", "verdict": "correct"}]},
+                "grade_result": {
+                    "questions": [{"question_number": "1", "verdict": "correct"}]
+                },
             },
             {
                 "submission_id": "e1",
@@ -162,7 +187,9 @@ def test_list_submissions_subject_filter_and_before(monkeypatch: pytest.MonkeyPa
                 "subject": "english",
                 "created_at": "2026-01-03T10:00:00Z",
                 "page_image_urls": ["p1"],
-                "grade_result": {"questions": [{"question_number": "1", "verdict": "correct"}]},
+                "grade_result": {
+                    "questions": [{"question_number": "1", "verdict": "correct"}]
+                },
             },
             {
                 "submission_id": "m0",
@@ -170,7 +197,9 @@ def test_list_submissions_subject_filter_and_before(monkeypatch: pytest.MonkeyPa
                 "subject": "math",
                 "created_at": "2026-01-02T10:00:00Z",
                 "page_image_urls": ["p1"],
-                "grade_result": {"questions": [{"question_number": "1", "verdict": "correct"}]},
+                "grade_result": {
+                    "questions": [{"question_number": "1", "verdict": "correct"}]
+                },
             },
         ]
     }
@@ -213,8 +242,18 @@ def test_get_submission_detail_returns_cards(monkeypatch: pytest.MonkeyPatch):
                 "vision_raw_text": "Q1...",
                 "grade_result": {
                     "questions": [
-                        {"question_number": "1", "page_index": 0, "verdict": "incorrect", "answer_state": "has_answer"},
-                        {"question_number": "2", "page_index": 1, "verdict": "uncertain", "answer_state": "has_answer"},
+                        {
+                            "question_number": "1",
+                            "page_index": 0,
+                            "verdict": "incorrect",
+                            "answer_state": "has_answer",
+                        },
+                        {
+                            "question_number": "2",
+                            "page_index": 1,
+                            "verdict": "uncertain",
+                            "answer_state": "has_answer",
+                        },
                     ],
                 },
             }

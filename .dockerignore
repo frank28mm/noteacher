@@ -1,0 +1,33 @@
+.git
+.github
+.vscode
+.DS_Store
+
+# Python
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+
+# Node / frontend
+node_modules
+homework_frontend/node_modules
+homework_frontend/dist
+homework_frontend/.vite
+
+# Logs / tmp
+logs
+*.log
+tmp
+
+# Local env files (never bake secrets into images)
+.env
+.env.*
+homework_agent/.env
+homework_agent/.env.*
+
+# Local reports / artifacts
+qa_metrics
+.sisyphus
+

@@ -10,6 +10,8 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
+from postgrest.exceptions import APIError
+
 from homework_agent.utils.supabase_client import get_worker_storage_client
 from homework_agent.utils.observability import log_event
 
@@ -25,18 +27,50 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _is_missing_table_error(e: Exception, *, table: str) -> bool:
+    """
+    Supabase/PostgREST raises APIError with code PGRST205 when a table is missing
+    from the schema cache (i.e. table doesn't exist / migrations not applied).
+    """
+    if not isinstance(e, APIError):
+        return False
+    try:
+        code = str(getattr(e, "code", "") or "")
+        msg = str(getattr(e, "message", "") or "")
+        if code == "PGRST205" and table in msg:
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def find_expired_grants(*, limit: int = 1000) -> List[Dict[str, Any]]:
     now = _utc_now().isoformat()
 
-    resp = (
-        _safe_table("bt_grants")
-        .select("*")
-        .lt("expires_at", now)
-        .eq("is_expired", False)
-        .order("expires_at", desc=False)
-        .limit(limit)
-        .execute()
-    )
+    try:
+        resp = (
+            _safe_table("bt_grants")
+            .select("*")
+            .lt("expires_at", now)
+            .eq("is_expired", False)
+            .order("expires_at", desc=False)
+            .limit(limit)
+            .execute()
+        )
+    except Exception as e:
+        if _is_missing_table_error(e, table="bt_grants"):
+            log_event(
+                logger,
+                "expiry_check_skipped_missing_table",
+                table="bt_grants",
+                hint="apply migrations/0014_create_bt_grants_table.up.sql to Supabase",
+            )
+            logger.error(
+                "expiry_worker skipped: missing table public.bt_grants. "
+                "Apply migrations/0014_create_bt_grants_table.up.sql to Supabase."
+            )
+            return []
+        raise
 
     return getattr(resp, "data", [])
 
@@ -178,12 +212,8 @@ def main():
     )
 
     stats = run_expiry_check()
-
-    print(f"\n=== BT 额度过期检测完成 ===")
-    print(f"处理记录数: {stats['total_processed']}")
-    print(f"过期额度: {stats['total_expired']} BT")
-    print(f"失败数: {stats['total_failed']}")
-    print(f"批次: {stats['batches_processed']}")
+    log_event(logger, "expiry_check_summary", **stats)
+    logger.info("BT 额度过期检测完成: %s", stats)
 
     return 0
 

@@ -29,6 +29,7 @@
 ## 📌 文档入口
 
 - `docs/INDEX.md`（唯一导航入口：真源/契约/路线图/Backlog）
+- 运行环境约定与上线清单（真源）：`docs/runtime_env_contract.md`
 
 ---
 
@@ -62,7 +63,12 @@ cp .env.template .env
 # 编辑 .env 填入 SILICON_API_KEY, ARK_API_KEY 等
 
 # 4.1 初始化 Supabase 数据表（可选但推荐）
-# 在 Supabase 控制台 -> SQL Editor 运行 supabase/schema.sql（含开发期 user_uploads 表等）
+# 说明：数据库结构以 migrations/*.up.sql + supabase/patches/*.sql 为准；supabase/schema.sql 仅包含少量独立表（如 feedback）
+# 方式A（推荐，Supabase 控制台 -> SQL Editor）：按顺序执行 migrations/*.up.sql（忽略 *.down.sql），再执行 supabase/patches/*.sql
+# 方式B（需要 SUPABASE_DB_URL，直连 Postgres 执行 DDL）：
+#   - python3 scripts/apply_supabase_sql.py --dir migrations
+#   - python3 scripts/apply_supabase_sql.py --dir supabase/patches
+#   - python3 scripts/apply_supabase_sql.py supabase/schema.sql
 
 # 5. 启动服务（从项目根目录运行）
 export PYTHONPATH=$(pwd)
@@ -117,6 +123,7 @@ python3 homework_agent/demo_ui.py
 > ⚠️ **重要**：发布前务必完成以下验证！
 
 - [ ] **E2E 冒烟测试**：运行 `python3 scripts/e2e_grade_chat.py` 验证 `/upload→/grade→/chat` 完整链路
+- [ ] **环境/依赖核对**：按 `docs/runtime_env_contract.md` 检查 prod 依赖与开关
 - [ ] **Live Inventory 验收**（可选）：`python3 scripts/collect_inventory_live_metrics.py --limit 5` 验证真实样本
 - [ ] **CI 全绿**：确认 GitHub Actions 所有 job 通过
 - [ ] **SSE 兜底断线（B 方案）**：生产建议设置 `CHAT_IDLE_DISCONNECT_SECONDS=120`，上线后按日志事件 `chat_llm_first_output` 的 p99 回调（如调到 90/120/180）

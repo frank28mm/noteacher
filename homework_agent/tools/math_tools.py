@@ -7,7 +7,6 @@ from typing import Any, Dict
 
 from homework_agent.core.tools import tool
 
-
 _ALLOWED_NODES = (
     ast.Expression,
     ast.BinOp,

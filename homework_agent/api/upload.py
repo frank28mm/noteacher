@@ -1,18 +1,19 @@
+import asyncio
+import logging
 import os
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, Header, HTTPException, UploadFile, status, Request
+from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile, status
 
-from homework_agent.utils.supabase_client import get_storage_client
 from homework_agent.utils.observability import get_request_id_from_headers, log_event
 from homework_agent.utils.profile_context import require_profile_id
-from homework_agent.utils.user_context import require_user_id
+from homework_agent.utils.settings import get_settings
 from homework_agent.utils.submission_store import create_submission_on_upload
-
-import logging
+from homework_agent.utils.supabase_client import get_storage_client
+from homework_agent.utils.user_context import require_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,12 @@ async def upload_files(
     - Otherwise (AUTH_REQUIRED=0), dev fallback applies: X-User-Id or DEV_USER_ID.
     - Returns public URLs (bucket may be public during development).
     """
-    user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
-    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
+    user_id = await asyncio.to_thread(
+        require_user_id, authorization=authorization, x_user_id=x_user_id
+    )
+    profile_id = await asyncio.to_thread(
+        require_profile_id, user_id=user_id, x_profile_id=x_profile_id
+    )
     request_id = getattr(
         getattr(request, "state", None), "request_id", None
     ) or get_request_id_from_headers(request.headers)
@@ -45,7 +50,9 @@ async def upload_files(
     files_in = [f for f in (file or []) if f is not None]
     first = files_in[0] if files_in else None
     filename0 = (getattr(first, "filename", None) or "").strip() if first else ""
-    content_type0 = (getattr(first, "content_type", None) or "").strip() if first else ""
+    content_type0 = (
+        (getattr(first, "content_type", None) or "").strip() if first else ""
+    )
     filename = filename0 or "upload"
     if len(files_in) > 1:
         filename = f"{filename} (+{len(files_in) - 1} files)"
@@ -56,12 +63,15 @@ async def upload_files(
     storage = get_storage_client()
     try:
         prefix = f"users/{user_id}/uploads/{upload_id}/"
-        # Keep small and predictable: max 8 files per submission (PDF can still expand into pages).
-        if len(files_in) > 8:
+        # Keep small and predictable: max 4 images per submission.
+        if len(files_in) > 4:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="too many files (max 8)",
+                detail="too many files (max 4)",
             )
+
+        settings = get_settings()
+        max_bytes = int(getattr(settings, "max_upload_image_bytes", 5 * 1024 * 1024))
 
         for f in files_in:
             fname = (f.filename or "").strip() or "upload"
@@ -77,9 +87,10 @@ async def upload_files(
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST, detail="empty file"
                 )
-            if len(raw) > 20 * 1024 * 1024:
+            if len(raw) > max_bytes:
                 raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail="file exceeds 20MB"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"file exceeds {max_bytes} bytes",
                 )
             total_size += int(len(raw))
 
@@ -89,15 +100,19 @@ async def upload_files(
                 tmp_paths.append(tmp.name)
 
             # For doubao compatibility, keep min_side conservative; heic/pdf conversion handled inside client.
-            urls.extend(storage.upload_files(tmp.name, prefix=prefix, min_side=14))
+            urls.extend(
+                await asyncio.to_thread(
+                    storage.upload_files,
+                    tmp.name,
+                    prefix=prefix,
+                    min_side=14,
+                )
+            )
     except HTTPException:
         raise
     except ValueError as e:
         # Catch image validation errors (e.g. too small) as 400
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         log_event(
             logger,
@@ -111,9 +126,14 @@ async def upload_files(
             error_type=e.__class__.__name__,
             error=str(e),
         )
+        settings = get_settings()
+        env = str(getattr(settings, "app_env", "dev") or "dev").strip().lower()
+        detail = "Internal server error"
+        if env not in {"prod", "production"}:
+            detail = f"Internal server error: {str(e)}"
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}",  # Expose error for debugging
+            detail=detail,
         )
     finally:
         for tmp_path in tmp_paths:
@@ -123,26 +143,11 @@ async def upload_files(
                 except Exception as e:
                     logger.debug(f"Failed to clean up temp file: {e}")
 
-    # Best-effort: persist metadata to Supabase Postgres (requires table created via supabase/schema.sql).
-    try:
-        record = {
-            "upload_id": upload_id,
-            "user_id": user_id,
-            "session_id": session_id,
-            "filename": filename,
-            "content_type": content_type0 or "multipart/mixed",
-            "size_bytes": int(total_size),
-            "page_image_urls": urls,
-        }
-        storage.client.table("user_uploads").insert(record).execute()
-    except Exception as e:
-        # Never fail upload response for optional DB insert during early dev.
-        logger.debug(f"DB insert for upload failed (best-effort): {e}")
-
     # Best-effort: persist a durable Submission record (long-term "hard disk" source of truth).
     # We treat upload_id as submission_id (one upload == one submission).
     try:
-        create_submission_on_upload(
+        await asyncio.to_thread(
+            create_submission_on_upload,
             submission_id=upload_id,
             user_id=user_id,
             profile_id=profile_id,

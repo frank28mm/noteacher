@@ -239,6 +239,15 @@ def validate_images_payload(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Images cannot be empty"
         )
+    if len(images) > 4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="too many images (max 4)",
+        )
+
+    settings = get_settings()
+    max_bytes = int(getattr(settings, "max_upload_image_bytes", 5 * 1024 * 1024))
+
     for img in images:
         url = img.get("url")
         b64 = img.get("base64")
@@ -246,15 +255,15 @@ def validate_images_payload(
             if not _is_public_url(url):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Image URL must be public HTTP/HTTPS (no localhost/127)",
+                    detail="Image URL must be public HTTP/HTTPS",
                 )
         elif b64:
             cleaned = _strip_base64_prefix(b64)
             est_bytes = int(len(cleaned) * 0.75)
-            if est_bytes > 20 * 1024 * 1024:
+            if est_bytes > max_bytes:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Image size exceeds 20MB; use URL",
+                    detail=f"Image size exceeds {max_bytes} bytes; use URL",
                 )
             if vision_provider == VisionProvider.DOUBAO:
                 # Ark/Doubao is URL-preferred but can accept data-url fallback (avoids provider-side URL fetch).
@@ -445,9 +454,6 @@ def _init_grading_ctx(req: GradeRequest, provider_str: str) -> _GradingCtx:
     deadline_m = started_m + float(settings.grade_completion_sla_seconds)
     timings_ms: Dict[str, int] = {}
     request_id = getattr(req, "_request_id", None)
-    save_grade_progress(
-        session_id, "grade_start", "已接收请求，准备识别…", {"request_id": request_id}
-    )
 
     meta_base: Dict[str, Any] = {
         "vision_provider_requested": getattr(
@@ -717,6 +723,13 @@ async def _perform_autonomous_grading(
 ) -> GradeResponse:
     """Run the autonomous agent loop and map to GradeResponse."""
     ctx = _init_grading_ctx(req, provider_str)
+    await asyncio.to_thread(
+        save_grade_progress,
+        ctx.session_id,
+        "grade_start",
+        "已接收请求，准备识别…",
+        {"request_id": ctx.request_id},
+    )
     experiments_meta, overrides = _decide_autonomous_variant(
         settings=ctx.settings,
         experiment_key=str(experiment_key or ctx.session_id),
@@ -727,8 +740,12 @@ async def _perform_autonomous_grading(
     grade_variant = getattr(req, "_grade_image_input_variant", None)
     if isinstance(grade_variant, str) and grade_variant.strip():
         ctx.meta_base["grade_image_input_variant"] = grade_variant.strip()
-    save_grade_progress(
-        ctx.session_id, "vision_start", "自主阅卷中（规划→工具→反思）…", None
+    await asyncio.to_thread(
+        save_grade_progress,
+        ctx.session_id,
+        "vision_start",
+        "自主阅卷中（规划→工具→反思）…",
+        None,
     )
     log_event(
         logger,
@@ -776,7 +793,9 @@ async def _perform_autonomous_grading(
                 if isinstance(llm_usage, dict):
                     ctx.meta_base["llm_usage"] = {
                         "prompt_tokens": int(llm_usage.get("prompt_tokens") or 0),
-                        "completion_tokens": int(llm_usage.get("completion_tokens") or 0),
+                        "completion_tokens": int(
+                            llm_usage.get("completion_tokens") or 0
+                        ),
                         "total_tokens": int(llm_usage.get("total_tokens") or 0),
                     }
                 llm_model = llm_trace.get("llm_model")
@@ -802,7 +821,13 @@ async def _perform_autonomous_grading(
                 error_type=e.__class__.__name__,
                 error=str(e),
             )
-            save_grade_progress(ctx.session_id, "failed", "批改失败", {"error": str(e)})
+            await asyncio.to_thread(
+                save_grade_progress,
+                ctx.session_id,
+                "failed",
+                "批改失败",
+                {"error": str(e)},
+            )
             return GradeResponse(
                 wrong_items=[],
                 summary="批改失败",
@@ -819,8 +844,12 @@ async def _perform_autonomous_grading(
             )
 
     if autonomous.status == "rejected":
-        save_grade_progress(
-            ctx.session_id, "failed", "输入非作业图片，已拒绝批改", None
+        await asyncio.to_thread(
+            save_grade_progress,
+            ctx.session_id,
+            "failed",
+            "输入非作业图片，已拒绝批改",
+            None,
         )
         return GradeResponse(
             wrong_items=[],
@@ -853,7 +882,8 @@ async def _perform_autonomous_grading(
             grading_result.warnings = []
         grading_result.warnings.extend(gate_warnings)
 
-    extra_warn = _persist_done_qbank_snapshot(
+    extra_warn = await asyncio.to_thread(
+        _persist_done_qbank_snapshot,
         ctx=ctx,
         req=req,
         grading_result=grading_result,
@@ -865,8 +895,12 @@ async def _perform_autonomous_grading(
 
     _ensure_grading_counts(grading_result)
     _log_grade_done(ctx=ctx, grading_result=grading_result)
-    save_grade_progress(
-        ctx.session_id, "done", "批改结果已生成", {"timings_ms": ctx.timings_ms}
+    await asyncio.to_thread(
+        save_grade_progress,
+        ctx.session_id,
+        "done",
+        "批改结果已生成",
+        {"timings_ms": ctx.timings_ms},
     )
 
     return _build_done_grade_response(
@@ -894,11 +928,17 @@ async def perform_grading(
 
 async def background_grade(job_id: str, req: GradeRequest, provider_str: str):
     """后台执行批改，更新 job_cache。"""
+    existing = await asyncio.to_thread(cache_store.get, f"job:{job_id}")
+    existing_user_id = (
+        str(existing.get("user_id") or "").strip() if isinstance(existing, dict) else ""
+    )
     try:
         result = await perform_grading(req, provider_str)
-        cache_store.set(
+        await asyncio.to_thread(
+            cache_store.set,
             f"job:{job_id}",
             {
+                "user_id": existing_user_id,
                 "status": "done",
                 "created_at": datetime.now().isoformat(),
                 "request": req.model_dump(),
@@ -908,9 +948,11 @@ async def background_grade(job_id: str, req: GradeRequest, provider_str: str):
             ttl_seconds=IDP_TTL_HOURS * 3600,
         )
     except Exception as e:
-        cache_store.set(
+        await asyncio.to_thread(
+            cache_store.set,
             f"job:{job_id}",
             {
+                "user_id": existing_user_id,
                 "status": "failed",
                 "created_at": datetime.now().isoformat(),
                 "request": req.model_dump(),
@@ -934,18 +976,20 @@ def background_build_question_index(session_id: str, page_urls: List[str]) -> No
 
 def validate_images(images: List[Any], provider: VisionProvider):
     """Early validation of image inputs to fail fast."""
+    settings = get_settings()
+    max_bytes = int(getattr(settings, "max_upload_image_bytes", 5 * 1024 * 1024))
+    if len(images) > 4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="too many images (max 4)",
+        )
     for idx, img in enumerate(images):
         if img.url:
             url_str = str(img.url)
-            if not (url_str.startswith("http://") or url_str.startswith("https://")):
+            if not _is_public_url(url_str):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Image index {idx}: URL must be HTTP/HTTPS",
-                )
-            if "localhost" in url_str or "127.0.0.1" in url_str:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Image index {idx}: URL must be public (no localhost/127)",
+                    detail=f"Image index {idx}: URL must be public HTTP/HTTPS",
                 )
         elif img.base64:
             if provider == VisionProvider.DOUBAO:
@@ -957,10 +1001,10 @@ def validate_images(images: List[Any], provider: VisionProvider):
                     )
             # Estimate size: len * 0.75
             est_size = len(img.base64) * 0.75
-            if est_size > 20 * 1024 * 1024:
+            if est_size > max_bytes:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Image index {idx}: Base64 image too large (>20MB), please use URL",
+                    detail=f"Image index {idx}: Base64 image too large (>{max_bytes} bytes), please use URL",
                 )
 
 
@@ -1008,14 +1052,18 @@ async def grade_homework(
     批改作业 API (Stub)
     """
     # 1. Resolve images (optional upload_id) + Early Validation
-    user_id = require_user_id(
-        authorization=request.headers.get("Authorization"), x_user_id=x_user_id
+    user_id = await asyncio.to_thread(
+        require_user_id,
+        authorization=request.headers.get("Authorization"),
+        x_user_id=x_user_id,
     )
-    profile_id = require_profile_id(user_id=user_id, x_profile_id=x_profile_id)
+    profile_id = await asyncio.to_thread(
+        require_profile_id, user_id=user_id, x_profile_id=x_profile_id
+    )
     settings = get_settings()
     # WS-E: Quota enforcement is enabled when we're not in pure dev auth mode.
     if str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
-        wallet = load_wallet(user_id=user_id)
+        wallet = await asyncio.to_thread(load_wallet, user_id=user_id)
         if not wallet or wallet.bt_spendable <= 0:
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
@@ -1048,8 +1096,12 @@ async def grade_homework(
         logger.debug(f"Setting _grade_image_input_variant on request failed: {e}")
 
     if upload_id and not (req.images or []):
-        urls = _resolve_images_from_upload_id(
-            upload_id, user_id=user_id, profile_id=profile_id, prefer_proxy=prefer_proxy
+        urls = await asyncio.to_thread(
+            _resolve_images_from_upload_id,
+            upload_id,
+            user_id=user_id,
+            profile_id=profile_id,
+            prefer_proxy=prefer_proxy,
         )
         if not urls:
             raise HTTPException(
@@ -1092,7 +1144,12 @@ async def grade_homework(
     # Best-effort: touch Submission last_active_at (180-day inactivity cleanup uses this).
     if upload_id:
         try:
-            touch_submission(user_id=user_id, profile_id=profile_id, submission_id=upload_id)
+            await asyncio.to_thread(
+                touch_submission,
+                user_id=user_id,
+                profile_id=profile_id,
+                submission_id=upload_id,
+            )
         except Exception as e:
             logger.debug(f"touch_submission failed (best-effort): {e}")
 
@@ -1100,8 +1157,10 @@ async def grade_homework(
     idempotency_key = get_idempotency_key(None, x_idempotency_key)
     if idempotency_key:
         fp = _idempotency_fingerprint(req)
-        cached_response = _check_idempotency_or_raise(
-            idempotency_key=idempotency_key, fingerprint=fp
+        cached_response = await asyncio.to_thread(
+            _check_idempotency_or_raise,
+            idempotency_key=idempotency_key,
+            fingerprint=fp,
         )
         if cached_response:
             log_event(
@@ -1115,8 +1174,12 @@ async def grade_homework(
     # 2.5 Ensure session_id is always present so results can be delivered to /chat
     session_for_ctx = _ensure_session_id(req.session_id or req.batch_id)
     req = req.model_copy(update={"session_id": session_for_ctx})
-    save_grade_progress(
-        session_for_ctx, "accepted", "已开始处理…", {"request_id": request_id}
+    await asyncio.to_thread(
+        save_grade_progress,
+        session_for_ctx,
+        "accepted",
+        "已开始处理…",
+        {"request_id": request_id},
     )
 
     # Best-effort: link session_id back to durable Submission for later history/chat mapping.
@@ -1125,7 +1188,8 @@ async def grade_homework(
             subj = (
                 req.subject.value if hasattr(req.subject, "value") else str(req.subject)
             )
-            link_session_to_submission(
+            await asyncio.to_thread(
+                link_session_to_submission,
                 user_id=user_id,
                 submission_id=upload_id,
                 session_id=session_for_ctx,
@@ -1136,13 +1200,19 @@ async def grade_homework(
 
     # 3. 决定同步/异步
     force_async = str(x_force_async or "").strip().lower() in {"1", "true", "yes"}
-    is_large_batch = len(req.images) > 5 or force_async
+    # With current product constraints (max 4 images per submission), treat the max case as "large".
+    is_large_batch = len(req.images) >= 4 or force_async
     # LLM provider: use explicit llm_provider if set, else derive from vision_provider
     if req.llm_provider:
         provider_str = req.llm_provider  # "ark" or "silicon"
     else:
         provider_str = (
             "silicon" if req.vision_provider == VisionProvider.QWEN3 else "ark"
+        )
+    if provider_str not in {"ark", "silicon"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid llm_provider. Allowed values: ['ark', 'silicon']",
         )
     log_event(
         logger,
@@ -1167,7 +1237,8 @@ async def grade_homework(
             "yes",
         }
         try:
-            queued = enqueue_grade_job(
+            queued = await asyncio.to_thread(
+                enqueue_grade_job,
                 job_id=job_id,
                 grade_request=req.model_dump(),
                 provider=provider_str,
@@ -1195,9 +1266,11 @@ async def grade_homework(
 
         if not queued:
             # Dev fallback: keep old in-process BackgroundTasks behavior when Redis is unavailable.
-            cache_store.set(
+            await asyncio.to_thread(
+                cache_store.set,
                 f"job:{job_id}",
                 {
+                    "user_id": user_id,
                     "status": "processing",
                     "created_at": datetime.now().isoformat(),
                     "request": req.model_dump(),
@@ -1248,7 +1321,9 @@ async def grade_homework(
         if upload_id:
             try:
                 bank_now = (
-                    get_question_bank(session_for_ctx) if session_for_ctx else None
+                    await asyncio.to_thread(get_question_bank, session_for_ctx)
+                    if session_for_ctx
+                    else None
                 )
                 meta_now = (
                     (bank_now or {}).get("meta") if isinstance(bank_now, dict) else None
@@ -1273,7 +1348,8 @@ async def grade_homework(
                     else str(req.subject)
                 )
                 db_start = time.monotonic()
-                update_submission_after_grade(
+                await asyncio.to_thread(
+                    update_submission_after_grade,
                     user_id=user_id,
                     submission_id=upload_id,
                     session_id=session_for_ctx,
@@ -1310,7 +1386,8 @@ async def grade_homework(
                     elapsed_ms=int((time.monotonic() - db_start) * 1000),
                 )
                 try:
-                    enqueue_facts_job(
+                    await asyncio.to_thread(
+                        enqueue_facts_job,
                         submission_id=upload_id,
                         user_id=user_id,
                         session_id=session_for_ctx,
@@ -1337,16 +1414,22 @@ async def grade_homework(
                     except Exception as e:
                         logger.debug(f"dict conversion for wrong_item failed: {e}")
                         continue
-            save_mistakes(session_for_ctx, wrong_items_payload)
+            await asyncio.to_thread(save_mistakes, session_for_ctx, wrong_items_payload)
             # QIndex: optional background optimization (bbox/slice).
             # Product decision: keep grading fast/stable by default; only run qindex when user explicitly requests it
             # (e.g. from Question Detail "生成图示切片") or when AUTO_QINDEX_ON_GRADE=1 is set.
-            auto_qindex = str(os.getenv("AUTO_QINDEX_ON_GRADE", "0") or "0").strip() in {
+            auto_qindex = str(
+                os.getenv("AUTO_QINDEX_ON_GRADE", "0") or "0"
+            ).strip() in {
                 "1",
                 "true",
                 "yes",
             }
-            bank = get_question_bank(session_for_ctx) if session_for_ctx else None
+            bank = (
+                await asyncio.to_thread(get_question_bank, session_for_ctx)
+                if session_for_ctx
+                else None
+            )
             page_urls = None
             if isinstance(bank, dict):
                 pu = bank.get("page_image_urls")
@@ -1370,8 +1453,10 @@ async def grade_homework(
             ):
                 ok, reason = qindex_is_configured()
                 if not ok:
-                    save_qindex_placeholder(
-                        session_for_ctx, f"qindex skipped: {reason}"
+                    await asyncio.to_thread(
+                        save_qindex_placeholder,
+                        session_for_ctx,
+                        f"qindex skipped: {reason}",
                     )
                 else:
                     allow = pick_question_numbers_for_slices(bank)
@@ -1386,7 +1471,8 @@ async def grade_homework(
                                 f"Fallback question number extraction failed: {e}"
                             )
                             allow = []
-                    enqueued = enqueue_qindex_job(
+                    enqueued = await asyncio.to_thread(
+                        enqueue_qindex_job,
                         session_for_ctx,
                         [
                             v
@@ -1398,28 +1484,40 @@ async def grade_homework(
                         request_id=request_id,
                     )
                     if enqueued:
-                        save_question_index(
+                        await asyncio.to_thread(
+                            save_question_index,
                             session_for_ctx,
                             {"questions": {}, "warnings": ["qindex queued"]},
                         )
                     else:
-                        save_qindex_placeholder(
-                            session_for_ctx, "qindex skipped: redis_unavailable"
+                        await asyncio.to_thread(
+                            save_qindex_placeholder,
+                            session_for_ctx,
+                            "qindex skipped: redis_unavailable",
                         )
 
         # WS-E: bill grade by LLM usage (BT = prompt + 10 * completion).
         if str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
             try:
-                bank_now = get_question_bank(session_for_ctx) if session_for_ctx else None
-                meta_now = (bank_now or {}).get("meta") if isinstance(bank_now, dict) else None
+                bank_now = (
+                    await asyncio.to_thread(get_question_bank, session_for_ctx)
+                    if session_for_ctx
+                    else None
+                )
+                meta_now = (
+                    (bank_now or {}).get("meta") if isinstance(bank_now, dict) else None
+                )
                 meta_now = meta_now if isinstance(meta_now, dict) else {}
-                usage = meta_now.get("llm_usage") if isinstance(meta_now, dict) else None
+                usage = (
+                    meta_now.get("llm_usage") if isinstance(meta_now, dict) else None
+                )
                 if isinstance(usage, dict):
                     bt_cost = bt_from_usage(
                         prompt_tokens=int(usage.get("prompt_tokens") or 0),
                         completion_tokens=int(usage.get("completion_tokens") or 0),
                     )
-                    ok, err = charge_bt_spendable(
+                    ok, err = await asyncio.to_thread(
+                        charge_bt_spendable,
                         user_id=user_id,
                         bt_cost=int(bt_cost),
                         idempotency_key=idempotency_key or request_id,
@@ -1429,7 +1527,9 @@ async def grade_homework(
                         model=str(meta_now.get("llm_model") or "") or None,
                         usage={
                             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-                            "completion_tokens": int(usage.get("completion_tokens") or 0),
+                            "completion_tokens": int(
+                                usage.get("completion_tokens") or 0
+                            ),
                             "total_tokens": int(usage.get("total_tokens") or 0),
                         },
                     )
@@ -1443,6 +1543,7 @@ async def grade_homework(
                             user_id=user_id,
                             endpoint="/api/v1/grade",
                             stage="grade",
+                            error_type="quota_charge_failed",
                             error=str(err or ""),
                         )
                 else:
@@ -1470,14 +1571,18 @@ async def grade_homework(
                     error=str(e),
                 )
         if idempotency_key:
-            cache_response(
-                idempotency_key, response, fingerprint=_idempotency_fingerprint(req)
+            await asyncio.to_thread(
+                cache_response,
+                idempotency_key,
+                response,
+                fingerprint=_idempotency_fingerprint(req),
             )
         return response
     except HTTPException:
         raise
     except Exception as e:
-        save_grade_progress(
+        await asyncio.to_thread(
+            save_grade_progress,
             session_for_ctx,
             "failed",
             f"系统错误：{str(e)}",

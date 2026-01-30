@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 
 from homework_agent.main import create_app
 
-
 client = TestClient(create_app())
 
 

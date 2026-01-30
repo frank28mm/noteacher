@@ -243,13 +243,9 @@ def get_report_eligibility(
 
     required_count = int(min_submissions) if min_submissions is not None else 3
     if mode_norm == "periodic":
-        required_days = (
-            int(min_distinct_days) if min_distinct_days is not None else 3
-        )
+        required_days = int(min_distinct_days) if min_distinct_days is not None else 3
     else:
-        required_days = (
-            int(min_distinct_days) if min_distinct_days is not None else 0
-        )
+        required_days = int(min_distinct_days) if min_distinct_days is not None else 0
 
     since = _utc_now() - timedelta(days=int(window_days))
     try:

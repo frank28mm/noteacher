@@ -1,4 +1,5 @@
 import logging
+import os
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -52,8 +53,20 @@ def _validate_prod_security(settings) -> None:
         )
 
 
+def _is_test_env(settings) -> bool:
+    env = str(getattr(settings, "app_env", "dev") or "dev").strip().lower()
+    if env in {"test", "testing"}:
+        return True
+    # pytest sets this for each test; treat as test env for safety
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return True
+    return False
+
+
 def _validate_env_fail_fast(settings) -> None:
-    """Check critical environment variables on startup."""
+    """Check critical environment variables on startup (skip in test env)."""
+    if _is_test_env(settings):
+        return
     missing = []
 
     # Critical for everyone
@@ -144,6 +157,8 @@ def create_app() -> FastAPI:
     @app.exception_handler(HTTPException)
     async def _http_exception_handler(request: Request, exc: HTTPException):
         code = error_code_for_http_status(int(exc.status_code))
+        settings = get_settings()
+        env = str(getattr(settings, "app_env", "dev") or "dev").strip().lower()
         detail = exc.detail
         # Keep FastAPI's default `detail` for compatibility, but also add our canonical payload.
         if isinstance(detail, dict):
@@ -151,6 +166,11 @@ def create_app() -> FastAPI:
             details = detail
         else:
             message = str(detail)
+            details = None
+        if int(exc.status_code) >= 500 and env in {"prod", "production"}:
+            # Do not leak internal error details in production.
+            detail = "Internal server error"
+            message = "Internal server error"
             details = None
         request_id = getattr(
             getattr(request, "state", None), "request_id", None

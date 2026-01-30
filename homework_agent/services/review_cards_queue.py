@@ -74,12 +74,14 @@ class ReviewCardJob:
             item_id=str(obj.get("item_id") or ""),
             page_image_url=(
                 str(obj.get("page_image_url")).strip()
-                if obj.get("page_image_url") is not None and str(obj.get("page_image_url")).strip()
+                if obj.get("page_image_url") is not None
+                and str(obj.get("page_image_url")).strip()
                 else None
             ),
             question_content=(
                 str(obj.get("question_content")).strip()
-                if obj.get("question_content") is not None and str(obj.get("question_content")).strip()
+                if obj.get("question_content") is not None
+                and str(obj.get("question_content")).strip()
                 else None
             ),
             review_reasons=[
@@ -160,8 +162,16 @@ def enqueue_review_card_job(
         page_index=int(page_index),
         question_number=str(question_number),
         item_id=str(item_id),
-        page_image_url=str(page_image_url).strip() if page_image_url and str(page_image_url).strip() else None,
-        question_content=str(question_content).strip() if question_content and str(question_content).strip() else None,
+        page_image_url=(
+            str(page_image_url).strip()
+            if page_image_url and str(page_image_url).strip()
+            else None
+        ),
+        question_content=(
+            str(question_content).strip()
+            if question_content and str(question_content).strip()
+            else None
+        ),
         review_reasons=[str(x) for x in (review_reasons or []) if str(x).strip()],
         attempt=int(attempt),
         enqueued_at=time.time(),

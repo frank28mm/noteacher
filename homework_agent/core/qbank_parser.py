@@ -20,16 +20,16 @@ def _normalize_question_number(value: Any) -> Optional[str]:
     return s or None
 
 
-def _split_subquestions(
-    *, base_number: str, question_content: str
-) -> Dict[str, str]:
+def _split_subquestions(*, base_number: str, question_content: str) -> Dict[str, str]:
     """
     Split a compound question like "15. 计算： (1)... (2)..." into sub-questions:
     - returns {"15(1)": "<content without (1)>", "15(2)": "..."}
     We intentionally remove the leading "(n)" marker because the UI already shows the sub-number.
     """
     qn = str(base_number or "").strip()
-    content = str(question_content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    content = (
+        str(question_content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    )
     if not qn or not content:
         return {}
     # If the question number already contains a sub-index, don't split again.
@@ -78,7 +78,12 @@ def _split_subquestions(
                     s = str(ln).strip()
                     if not s:
                         break
-                    if solution_start_re.match(s) or s.startswith("\\(") or s.startswith("$") or s.startswith("答"):
+                    if (
+                        solution_start_re.match(s)
+                        or s.startswith("\\(")
+                        or s.startswith("$")
+                        or s.startswith("答")
+                    ):
                         break
                     body_lines.append(s)
 
@@ -138,15 +143,22 @@ def build_question_bank_from_vision_raw_text(
         label_stop = re.compile(
             r"^\s*[\-\*\s]*((\*\*)?(答案|作答状态|学生作答状态|学生答案|学生作答|学生作答步骤|作答步骤|解题步骤)(\*\*)?)\s*[:：]"
         )
-        option_line = re.compile(
-            r"^\s*[\-\*\s]*([\(\（]?[A-D][\)\）]?)[\.\、:：]?\s+"
-        )
+        option_line = re.compile(r"^\s*[\-\*\s]*([\(\（]?[A-D][\)\）]?)[\.\、:：]?\s+")
         for i, ln in enumerate(blk_lines):
             if re.search(r"(?:\*\*题目\*\*|题目)\s*[:：]", ln):
                 first = re.split(r"[:：]", ln, maxsplit=1)
                 head = (first[1] if len(first) > 1 else "").strip()
                 # If the head already contains inline options, keep only the stem.
-                for marker in ("(A)", "(B)", "(C)", "(D)", "（A）", "（B）", "（C）", "（D）"):
+                for marker in (
+                    "(A)",
+                    "(B)",
+                    "(C)",
+                    "(D)",
+                    "（A）",
+                    "（B）",
+                    "（C）",
+                    "（D）",
+                ):
                     idx = head.find(marker)
                     if idx > 0:
                         head = head[:idx].strip()
@@ -161,7 +173,11 @@ def build_question_bank_from_vision_raw_text(
                         continue
                     if label_stop.search(nxt):
                         break
-                    if option_line.match(nxt) or ("(A)" in nxt and "(B)" in nxt) or ("（A）" in nxt and "（B）" in nxt):
+                    if (
+                        option_line.match(nxt)
+                        or ("(A)" in nxt and "(B)" in nxt)
+                        or ("（A）" in nxt and "（B）" in nxt)
+                    ):
                         break
                     # drop leading bullets for readability
                     nxt = re.sub(r"^[\-\*\s]+", "", nxt).strip()
@@ -213,7 +229,19 @@ def build_question_bank_from_vision_raw_text(
                     v = mopt2.group(2).strip()
                     if v:
                         # If this line actually contains multiple options, let the inline splitter handle it.
-                        if any(mark in v for mark in ("(A)", "(B)", "(C)", "(D)", "（A）", "（B）", "（C）", "（D）")):
+                        if any(
+                            mark in v
+                            for mark in (
+                                "(A)",
+                                "(B)",
+                                "(C)",
+                                "(D)",
+                                "（A）",
+                                "（B）",
+                                "（C）",
+                                "（D）",
+                            )
+                        ):
                             pass
                         else:
                             options[k] = v
@@ -277,7 +305,9 @@ def build_question_bank_from_vision_raw_text(
         try:
             splits = _split_subquestions(
                 base_number=str(current_qn),
-                question_content=str(questions[str(current_qn)].get("question_content") or ""),
+                question_content=str(
+                    questions[str(current_qn)].get("question_content") or ""
+                ),
             )
             for sub_qn, sub_content in splits.items():
                 if not sub_qn or sub_qn in questions:

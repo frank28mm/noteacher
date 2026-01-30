@@ -18,7 +18,6 @@ from contextlib import ExitStack
 from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple
 from homework_agent.utils.settings import get_settings
 
-
 # 加载环境变量 - 使用脚本所在目录的父目录（项目根目录）
 from pathlib import Path
 
@@ -273,13 +272,15 @@ def upload_to_backend(
 
     if not paths:
         raise ValueError("文件不存在")
+    if len(paths) > 4:
+        raise ValueError("一次最多上传 4 张图片")
     for p in paths:
         if not p or not os.path.exists(p):
             raise ValueError(f"文件不存在: {p}")
-        # 检查文件大小 (<20MB each)
+        # 检查文件大小 (<5MB each)
         file_size = os.path.getsize(p)
-        if file_size > 20 * 1024 * 1024:
-            raise ValueError(f"文件超过 20MB: {p}")
+        if file_size > 5 * 1024 * 1024:
+            raise ValueError(f"文件超过 5MB: {p}")
     params: Dict[str, str] = {}
     if session_id:
         params["session_id"] = str(session_id)
@@ -289,9 +290,7 @@ def upload_to_backend(
         files: List[Tuple[str, Tuple[str, Any, str]]] = []
         for p in paths:
             filename = os.path.basename(p)
-            content_type = (
-                mimetypes.guess_type(p)[0] or "application/octet-stream"
-            )
+            content_type = mimetypes.guess_type(p)[0] or "application/octet-stream"
             f = stack.enter_context(open(p, "rb"))
             files.append(("file", (filename, f, content_type)))
         with httpx.Client(timeout=120.0) as client:
@@ -375,7 +374,7 @@ def format_grading_result(result: Dict[str, Any]) -> str:
                 md += f"- LLM fallback: {meta.get('llm_used_fallback')}\n"
             t = meta.get("timings_ms") or {}
             if isinstance(t, dict) and t:
-                md += f"- 耗时(ms): vision={t.get('vision_ms','?')} llm={t.get('llm_ms','?')}\n"
+                md += f"- 耗时(ms): vision={t.get('vision_ms', '?')} llm={t.get('llm_ms', '?')}\n"
 
     return md
 
@@ -1106,9 +1105,13 @@ def _render_timing_panel_md(
     lines.append(f"- upload_ms: `{_fmt_ms(ctx.get('upload_ms'))}`")
     lines.append(f"- grade_submit_ms: `{_fmt_ms(ctx.get('grade_submit_ms'))}`")
     lines.append(f"- grade_queue_wait_ms: `{_fmt_ms(ctx.get('grade_queue_wait_ms'))}`")
-    lines.append(f"- grade_worker_elapsed_ms: `{_fmt_ms(ctx.get('grade_worker_elapsed_ms'))}`")
+    lines.append(
+        f"- grade_worker_elapsed_ms: `{_fmt_ms(ctx.get('grade_worker_elapsed_ms'))}`"
+    )
     lines.append(f"- grade_wall_ms: `{_fmt_ms(ctx.get('grade_wall_ms'))}`")
-    lines.append(f"- report_queue_wait_ms: `{_fmt_ms(ctx.get('report_queue_wait_ms'))}`")
+    lines.append(
+        f"- report_queue_wait_ms: `{_fmt_ms(ctx.get('report_queue_wait_ms'))}`"
+    )
     lines.append(f"- report_wall_ms: `{_fmt_ms(ctx.get('report_wall_ms'))}`")
 
     qbank = ctx.get("qbank_meta")
@@ -1116,7 +1119,9 @@ def _render_timing_panel_md(
     if isinstance(qbank, dict) and isinstance(qbank.get("meta"), dict):
         meta = qbank.get("meta") or {}
 
-    timings_ms = meta.get("timings_ms") if isinstance(meta.get("timings_ms"), dict) else {}
+    timings_ms = (
+        meta.get("timings_ms") if isinstance(meta.get("timings_ms"), dict) else {}
+    )
     llm_trace = meta.get("llm_trace") if isinstance(meta.get("llm_trace"), dict) else {}
 
     if timings_ms:
@@ -1142,7 +1147,12 @@ def _render_timing_panel_md(
     if llm_trace:
         lines.append("")
         lines.append("**Ark 追溯（qbank.meta.llm_trace）**")
-        for k in ["ark_response_id", "ark_image_process_requested", "grade_image_input_variant", "ark_image_input_mode"]:
+        for k in [
+            "ark_response_id",
+            "ark_image_process_requested",
+            "grade_image_input_variant",
+            "ark_image_input_mode",
+        ]:
             if k in llm_trace:
                 lines.append(f"- {k}: `{llm_trace.get(k)}`")
 
@@ -1151,7 +1161,9 @@ def _render_timing_panel_md(
         lines.append("**Job 状态**")
         lines.append(f"- grade_job_status: `{grade_job.get('status')}`")
         if grade_job.get("elapsed_ms") is not None:
-            lines.append(f"- grade_job_elapsed_ms: `{_fmt_ms(grade_job.get('elapsed_ms'))}`")
+            lines.append(
+                f"- grade_job_elapsed_ms: `{_fmt_ms(grade_job.get('elapsed_ms'))}`"
+            )
         if grade_job.get("error"):
             lines.append(f"- grade_job_error: `{str(grade_job.get('error'))[:500]}`")
     if isinstance(report_job, dict) and report_job.get("status"):
@@ -1179,7 +1191,11 @@ def _render_timing_summary_md(
 
     e2e_grade_ms = None
     try:
-        if upload_ms is not None and grade_submit_ms is not None and grade_wall_ms is not None:
+        if (
+            upload_ms is not None
+            and grade_submit_ms is not None
+            and grade_wall_ms is not None
+        ):
             e2e_grade_ms = int(upload_ms) + int(grade_submit_ms) + int(grade_wall_ms)
     except Exception:
         e2e_grade_ms = None
@@ -1205,9 +1221,7 @@ def _render_timing_summary_md(
         lines.append(f"- report：`{_fmt_ms(report_wall_ms)}`")
         lines.append(f"- 用户感知 E2E（含报告）：`{_fmt_ms(e2e_full_ms)}`")
     lines.append("")
-    lines.append(
-        "（已隐藏详细分段；需要排查时再展开“高级：调试指标”）"
-    )
+    lines.append("（已隐藏详细分段；需要排查时再展开“高级：调试指标”）")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -1235,7 +1249,6 @@ async def _call_get_report(
         raise Exception(f"report 查询失败: {r.status_code} - {r.text}")
     data = r.json() if r.content else {}
     return data if isinstance(data, dict) else {}
-
 
 
 async def submit_job_handler(img_path, auth_token):
@@ -1344,9 +1357,7 @@ async def submit_job_handler(img_path, auth_token):
                 else ""
             )
         ),
-        gr.update(
-            value="已提交任务，等待 grade_worker ...", visible=True
-        ),
+        gr.update(value="已提交任务，等待 grade_worker ...", visible=True),
         "",  # timings_summary_md (reset)
         "",  # timings_detail_md (reset)
         "",  # grade_result_md (reset)
@@ -1362,7 +1373,9 @@ async def submit_job_handler(img_path, auth_token):
     )
 
 
-async def generate_report_handler(upload_id: str, auth_token: str, timing_ctx: Dict[str, Any]):
+async def generate_report_handler(
+    upload_id: str, auth_token: str, timing_ctx: Dict[str, Any]
+):
     """Manually trigger single-submission report generation."""
     submission_id = str(upload_id or "").strip()
     if not submission_id:
@@ -1373,9 +1386,7 @@ async def generate_report_handler(upload_id: str, auth_token: str, timing_ctx: D
     t_submit = _now_m()
     try:
         resp = await _call_create_report_job(
-            subject="math",
-            submission_id=submission_id,
-            auth_token=auth_token
+            subject="math", submission_id=submission_id, auth_token=auth_token
         )
         job_id = str(resp.get("job_id") or "").strip()
         if not job_id:
@@ -1389,8 +1400,6 @@ async def generate_report_handler(upload_id: str, auth_token: str, timing_ctx: D
         )
     except Exception as e:
         raise gr.Error(f"Generate report failed: {e}")
-
-
 
 
 async def poll_job_status(
@@ -1425,7 +1434,9 @@ async def poll_job_status(
             report_id or "",
             gr.update(interactive=False, value="生成学业报告"),
             ctx,
-            dict(page_progress or {"total_pages": 0, "done_pages": 0, "page_context": {}}),
+            dict(
+                page_progress or {"total_pages": 0, "done_pages": 0, "page_context": {}}
+            ),
         )
 
     auth_token = (auth_token or "").strip() or None
@@ -1441,11 +1452,16 @@ async def poll_job_status(
         grade_err = str(e)
 
     # Update timing ctx for grade job
-    if grade_status in {"processing", "queued", "running"} and ctx.get("grade_job_running_m") is None:
+    if (
+        grade_status in {"processing", "queued", "running"}
+        and ctx.get("grade_job_running_m") is None
+    ):
         ctx["grade_job_running_m"] = float(now_m)
     if grade_status in {"done", "failed"} and ctx.get("grade_job_done_m") is None:
         ctx["grade_job_done_m"] = float(now_m)
-    ctx["grade_queue_wait_ms"] = _ms_between(ctx.get("grade_job_submitted_m"), ctx.get("grade_job_running_m"))
+    ctx["grade_queue_wait_ms"] = _ms_between(
+        ctx.get("grade_job_submitted_m"), ctx.get("grade_job_running_m")
+    )
     worker_elapsed_ms = None
     if isinstance(grade_job, dict) and grade_job.get("elapsed_ms") is not None:
         try:
@@ -1453,16 +1469,26 @@ async def poll_job_status(
         except Exception:
             worker_elapsed_ms = None
     if worker_elapsed_ms is None:
-        worker_elapsed_ms = _ms_between(ctx.get("grade_job_running_m"), ctx.get("grade_job_done_m"))
+        worker_elapsed_ms = _ms_between(
+            ctx.get("grade_job_running_m"), ctx.get("grade_job_done_m")
+        )
     ctx["grade_worker_elapsed_ms"] = worker_elapsed_ms
-    ctx["grade_wall_ms"] = _ms_between(ctx.get("grade_job_submitted_m"), ctx.get("grade_job_done_m"))
+    ctx["grade_wall_ms"] = _ms_between(
+        ctx.get("grade_job_submitted_m"), ctx.get("grade_job_done_m")
+    )
 
     s1_html = '<div style="color: gray">⏳ grade 等待中</div>'
     if grade_err:
         s1_html = '<div style="color: red">❌ grade 查询失败</div>'
     elif grade_status in {"processing", "queued", "running"}:
-        q_wait = _fmt_ms(ctx.get("grade_queue_wait_ms")) if ctx.get("grade_job_running_m") else "…"
-        s1_html = f'<div style="color: blue">🔄 grade 处理中... (queue_wait={q_wait})</div>'
+        q_wait = (
+            _fmt_ms(ctx.get("grade_queue_wait_ms"))
+            if ctx.get("grade_job_running_m")
+            else "…"
+        )
+        s1_html = (
+            f'<div style="color: blue">🔄 grade 处理中... (queue_wait={q_wait})</div>'
+        )
     elif grade_status == "done":
         s1_html = (
             f'<div style="color: green">✅ grade 已完成 '
@@ -1532,10 +1558,10 @@ async def poll_job_status(
                 bc = s.get("blank_count")
                 nr = "needs_review" if bool(s.get("needs_review")) else "ok"
                 lines.append(
-                    f"- 第 `{i+1}` 页：wrong=`{wc}` · uncertain=`{uc}` · blank=`{bc}` · `{nr}`"
+                    f"- 第 `{i + 1}` 页：wrong=`{wc}` · uncertain=`{uc}` · blank=`{bc}` · `{nr}`"
                 )
             else:
-                lines.append(f"- 第 `{i+1}` 页：⏳ 处理中…")
+                lines.append(f"- 第 `{i + 1}` 页：⏳ 处理中…")
 
         if question_cards:
             lines.append("")
@@ -1572,7 +1598,7 @@ async def poll_job_status(
                     continue
                 b = by_page[i]
                 lines.append(
-                    f"- 第 `{i+1}` 页：placeholder=`{b.get('placeholder', 0)}` · verdict_ready=`{b.get('verdict_ready', 0)}` · review_pending=`{b.get('review_pending', 0)}` · review_ready=`{b.get('review_ready', 0)}` · blank=`{b.get('blank', 0)}`"
+                    f"- 第 `{i + 1}` 页：placeholder=`{b.get('placeholder', 0)}` · verdict_ready=`{b.get('verdict_ready', 0)}` · review_pending=`{b.get('review_pending', 0)}` · review_ready=`{b.get('review_ready', 0)}` · blank=`{b.get('blank', 0)}`"
                 )
         pages_progress_md = "\n".join(lines)
 
@@ -1608,17 +1634,17 @@ async def poll_job_status(
     # Stage 2: Report job (Postgres-backed)
     r_job_id = str(report_job_id or "").strip()
     r_report_id = str(report_id or "").strip()
-    
+
     report_job: Dict[str, Any] = {}
     report_status = "unknown"
-    
+
     # Check button interactivity logic
     # Default: disabled (generating or not ready)
     btn_update = gr.update(interactive=False, value="生成学业报告")
-    
+
     if grade_status == "done" and not r_job_id:
-         # Grade done but report not started -> Enable button
-         btn_update = gr.update(interactive=True, value="生成学业报告")
+        # Grade done but report not started -> Enable button
+        btn_update = gr.update(interactive=True, value="生成学业报告")
 
     if r_job_id:
         # Polling report job
@@ -1643,16 +1669,23 @@ async def poll_job_status(
             s2_html = '<div style="color: red">❌ report 失败</div>'
             btn_update = gr.update(interactive=True, value="重试生成报告")
     else:
-         s2_html = '<div style="color: gray">⬜ 等待触发</div>'
+        s2_html = '<div style="color: gray">⬜ 等待触发</div>'
 
     # Update timing ctx for report job
     if r_job_id:
-        if report_status in {"processing", "running"} and ctx.get("report_job_running_m") is None:
+        if (
+            report_status in {"processing", "running"}
+            and ctx.get("report_job_running_m") is None
+        ):
             ctx["report_job_running_m"] = float(now_m)
         if report_status in {"done", "failed"} and ctx.get("report_job_done_m") is None:
             ctx["report_job_done_m"] = float(now_m)
-    ctx["report_queue_wait_ms"] = _ms_between(ctx.get("report_job_submitted_m"), ctx.get("report_job_running_m"))
-    ctx["report_wall_ms"] = _ms_between(ctx.get("report_job_submitted_m"), ctx.get("report_job_done_m"))
+    ctx["report_queue_wait_ms"] = _ms_between(
+        ctx.get("report_job_submitted_m"), ctx.get("report_job_running_m")
+    )
+    ctx["report_wall_ms"] = _ms_between(
+        ctx.get("report_job_submitted_m"), ctx.get("report_job_done_m")
+    )
 
     class_report_md = ""
     if r_report_id and report_status == "done":
@@ -1667,6 +1700,7 @@ async def poll_job_status(
                     # JSON -> Markdown
                     try:
                         import json
+
                         obj = json.loads(c)
                         class_report_md = f"```json\n{json.dumps(obj, ensure_ascii=False, indent=2)}\n```"
                     except Exception:
@@ -1702,17 +1736,17 @@ async def poll_job_status(
     logs = "\n".join(logs_lines)
 
     return (
-        s1_html, 
-        s2_html, 
+        s1_html,
+        s2_html,
         pages_progress_md,
         page_no_dd_update,
         timings_summary_md,
         timings_detail_md,
-        grade_report_md, 
-        class_report_md, 
-        logs, 
-        r_job_id, 
-        r_report_id, 
+        grade_report_md,
+        class_report_md,
+        logs,
+        r_job_id,
+        r_report_id,
         btn_update,
         ctx,
         p_state,
@@ -1731,7 +1765,9 @@ def pick_page_for_tutoring(
     p = dict(page_progress or {})
     total_pages = int(p.get("total_pages") or 0)
     done_pages = int(p.get("done_pages") or 0)
-    page_context = p.get("page_context") if isinstance(p.get("page_context"), dict) else {}
+    page_context = (
+        p.get("page_context") if isinstance(p.get("page_context"), dict) else {}
+    )
 
     s = str(page_no or "").strip()
     if not s or not s.isdigit():
@@ -1745,7 +1781,7 @@ def pick_page_for_tutoring(
         return (
             gr.update(value=""),
             [],
-            f"第 {page_index+1} 页尚未完成（当前 {done_pages}/{total_pages}）。请稍后再试。",
+            f"第 {page_index + 1} 页尚未完成（当前 {done_pages}/{total_pages}）。请稍后再试。",
         )
 
     ids = page_context.get(str(page_index)) if isinstance(page_context, dict) else None
@@ -1753,21 +1789,17 @@ def pick_page_for_tutoring(
     if not ids:
         return (
             gr.update(
-                value=f"第 {page_index+1} 页似乎没有可用错题上下文（可能全对或尚未产出）。你也可以直接问“讲第几题”。"
+                value=f"第 {page_index + 1} 页似乎没有可用错题上下文（可能全对或尚未产出）。你也可以直接问“讲第几题”。"
             ),
             [],
-            f"已选择第 {page_index+1} 页（但没有错题 item_ids）。",
+            f"已选择第 {page_index + 1} 页（但没有错题 item_ids）。",
         )
 
     return (
-        gr.update(value=f"我们先从第 {page_index+1} 页的错题里选一题开始辅导。"),
+        gr.update(value=f"我们先从第 {page_index + 1} 页的错题里选一题开始辅导。"),
         ids,
-        f"已选择第 {page_index+1} 页（错题 {len(ids)} 个 item_ids）。",
+        f"已选择第 {page_index + 1} 页（错题 {len(ids)} 个 item_ids）。",
     )
-
-
-
-
 
 
 MAX_CANDIDATE_BUTTONS = 6
@@ -1859,7 +1891,13 @@ async def tutor_chat_logic(
                         elapsed = int(time.monotonic() - start)
                         if assistant_msg["content"].startswith("思考中"):
                             assistant_msg["content"] = f"思考中... ({elapsed}s)"
-                            yield "", history, candidate_labels, *candidate_button_updates, tool_status
+                            yield (
+                                "",
+                                history,
+                                candidate_labels,
+                                *candidate_button_updates,
+                                tool_status,
+                            )
                         continue
 
                     if current_event == "error":
@@ -1911,7 +1949,13 @@ async def tutor_chat_logic(
                                         "content": f"我将参考你这题的图片/切片：\n\n{md}",
                                     },
                                 )
-                                yield "", history, candidate_labels, *candidate_button_updates, tool_status
+                                yield (
+                                    "",
+                                    history,
+                                    candidate_labels,
+                                    *candidate_button_updates,
+                                    tool_status,
+                                )
                         # Find latest assistant message content
                         latest = ""
                         for m in reversed(msgs):
@@ -1921,7 +1965,13 @@ async def tutor_chat_logic(
                         if latest and latest != last_rendered:
                             assistant_msg["content"] = latest
                             last_rendered = latest
-                            yield "", history, candidate_labels, *candidate_button_updates, tool_status
+                            yield (
+                                "",
+                                history,
+                                candidate_labels,
+                                *candidate_button_updates,
+                                tool_status,
+                            )
                         continue
 
                     if current_event == "tool_progress":
@@ -1932,7 +1982,13 @@ async def tutor_chat_logic(
                         tool_name = str(obj.get("tool") or obj.get("name") or "tool")
                         status = str(obj.get("status") or "running")
                         tool_status = f"🔧 工具进度：{tool_name} · {status}"
-                        yield "", history, candidate_labels, *candidate_button_updates, tool_status
+                        yield (
+                            "",
+                            history,
+                            candidate_labels,
+                            *candidate_button_updates,
+                            tool_status,
+                        )
                         continue
 
                     if current_event == "done":
@@ -2028,7 +2084,9 @@ def create_demo():
         report_job_id_state = gr.State(value="")
         report_id_state = gr.State(value="")
         timing_ctx_state = gr.State(value={})
-        page_progress_state = gr.State(value={"total_pages": 0, "done_pages": 0, "page_context": {}})
+        page_progress_state = gr.State(
+            value={"total_pages": 0, "done_pages": 0, "page_context": {}}
+        )
         chat_context_item_ids_state = gr.State(value=[])
 
         # Auth helpers (kept local to create_demo for simplicity).
@@ -2047,9 +2105,7 @@ def create_demo():
                     f"- Auth: ✅ 已登录（Bearer `{_mask_token(t)}`）\n"
                     f"- user_id: `{uid or 'unknown'}`\n"
                 )
-            return (
-                f"- Auth: ⚠️ 未登录（使用开发模式 header: `X-User-Id={DEMO_USER_ID}`）\n"
-            )
+            return f"- Auth: ⚠️ 未登录（使用开发模式 header: `X-User-Id={DEMO_USER_ID}`）\n"
 
         # ... (Redefining auth handlers for completeness as they were local functions)
         def _auth_login(email, password, cur_token, cur_uid):
@@ -2118,173 +2174,170 @@ def create_demo():
                 _auth_logout, None, [auth_token_state, auth_user_id_state, auth_status]
             )
 
-
         with gr.Tabs():
-                with gr.Tab("🚀 工作台 (Workflow Console)"):
-                    # ================= Input Area =================
-                    with gr.Row():
-                        with gr.Column(scale=1):
-                            file_kwargs: Dict[str, Any] = {
-                                "label": "📤 上传图片（可多选）",
-                                # Allow HEIC/HEIF/PDF explicitly (some environments don't classify them as "image").
-                                "file_types": ["image", ".heic", ".heif", ".pdf"],
-                                "height": 200,
-                            }
-                            if (
-                                "file_count"
-                                in inspect.signature(gr.File.__init__).parameters
-                            ):
-                                file_kwargs["file_count"] = "multiple"
-                            input_img = gr.File(**file_kwargs)
-                        # Simplified: Hardcoded defaults (math/doubao/ark)
-                        # subject_dropdown = gr.Dropdown(...) -> Removed
-                        # provider_dropdown = gr.Dropdown(...) -> Removed
-                        # llm_dropdown = gr.Dropdown(...) -> Removed
-                        
-                        submit_btn = gr.Button("🚀 提交作业 (Async)", variant="primary")
-                        submission_status_md = gr.Markdown("准备就绪")
+            with gr.Tab("🚀 工作台 (Workflow Console)"):
+                # ================= Input Area =================
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        file_kwargs: Dict[str, Any] = {
+                            "label": "📤 上传图片（可多选）",
+                            # Allow HEIC/HEIF/PDF explicitly (some environments don't classify them as "image").
+                            "file_types": ["image", ".heic", ".heif", ".pdf"],
+                            "height": 200,
+                        }
+                        if (
+                            "file_count"
+                            in inspect.signature(gr.File.__init__).parameters
+                        ):
+                            file_kwargs["file_count"] = "multiple"
+                        input_img = gr.File(**file_kwargs)
+                    # Simplified: Hardcoded defaults (math/doubao/ark)
+                    # subject_dropdown = gr.Dropdown(...) -> Removed
+                    # provider_dropdown = gr.Dropdown(...) -> Removed
+                    # llm_dropdown = gr.Dropdown(...) -> Removed
 
-                # ================= Monitor Area (Hidden Initially) =================
-                with gr.Group(visible=False) as monitor_group:
-                    gr.Markdown("### 📊 实时流水线 (Pipeline Monitor)")
-                    with gr.Row():
-                        s1_html = gr.HTML(
-                            label="Stage 1: Grade",
-                            value='<div style="color: gray">⏳ 等待中</div>',
-                        )
-                        s2_html = gr.HTML(
-                            label="Stage 2: Report",
-                            value='<div style="color: gray">⏳ 等待中</div>',
-                        )
+                    submit_btn = gr.Button("🚀 提交作业 (Async)", variant="primary")
+                    submission_status_md = gr.Markdown("准备就绪")
 
-                    pages_progress_md = gr.Markdown(value="")
-                    with gr.Row():
-                        page_no_dd = gr.Dropdown(
-                            label="选择页（用于进入辅导）",
-                            choices=[],
-                            value=None,
-                            interactive=True,
-                        )
-                        btn_pick_page = gr.Button("进入辅导（本页）", variant="secondary")
-                    tutor_scope_md = gr.Markdown(value="")
-                    
-                    btn_gen_report = gr.Button("生成学业报告", variant="secondary", interactive=False)
-                    timings_summary_md = gr.Markdown(value="")
-                    with gr.Accordion("高级：调试指标（默认隐藏）", open=False):
-                        timings_detail_md = gr.Markdown(value="")
-                    logs_box = gr.Textbox(
-                        label="System Logs", lines=5, interactive=False
+            # ================= Monitor Area (Hidden Initially) =================
+            with gr.Group(visible=False) as monitor_group:
+                gr.Markdown("### 📊 实时流水线 (Pipeline Monitor)")
+                with gr.Row():
+                    s1_html = gr.HTML(
+                        label="Stage 1: Grade",
+                        value='<div style="color: gray">⏳ 等待中</div>',
+                    )
+                    s2_html = gr.HTML(
+                        label="Stage 2: Report",
+                        value='<div style="color: gray">⏳ 等待中</div>',
                     )
 
-                # ================= Result Area =================
-                # Split into Tabs for persistence
-                with gr.Tabs():
-                    with gr.Tab("批改结果"):
-                        grade_result_md = gr.Markdown(label="Grade Result")
-                    with gr.Tab("学业报告"):
-                        class_report_md = gr.Markdown(label="Class Report")
+                pages_progress_md = gr.Markdown(value="")
+                with gr.Row():
+                    page_no_dd = gr.Dropdown(
+                        label="选择页（用于进入辅导）",
+                        choices=[],
+                        value=None,
+                        interactive=True,
+                    )
+                    btn_pick_page = gr.Button("进入辅导（本页）", variant="secondary")
+                tutor_scope_md = gr.Markdown(value="")
 
-                # Chatbot for follow-up
-                gr.Markdown("### 💬 辅导对话")
-                chatbot_kwargs: Dict[str, Any] = {"height": 400, "label": "AI 助教"}
-                if "type" in inspect.signature(gr.Chatbot.__init__).parameters:
-                    chatbot_kwargs["type"] = "messages"
-                chatbot = gr.Chatbot(**chatbot_kwargs)
-                msg = gr.Textbox(label="你的问题")
-                tool_status_md = gr.Markdown(value="")
-
-                # Logic Wiring
-                # 1. Submit
-                submit_btn.click(
-                    fn=submit_job_handler,
-                    inputs=[
-                        input_img,
-                        auth_token_state,
-                    ],
-                    outputs=[
-                        job_id_state,
-                        session_id_state,
-                        upload_id_state,
-                        report_job_id_state,
-                        report_id_state,
-                        monitor_group,
-                        submission_status_md,
-                        logs_box,
-                        timings_summary_md,
-                        timings_detail_md,
-                        grade_result_md,
-                        class_report_md,
-                        btn_gen_report,
-                        timing_ctx_state,
-                        page_progress_state,
-                        chat_context_item_ids_state,
-                    ],
+                btn_gen_report = gr.Button(
+                    "生成学业报告", variant="secondary", interactive=False
                 )
+                timings_summary_md = gr.Markdown(value="")
+                with gr.Accordion("高级：调试指标（默认隐藏）", open=False):
+                    timings_detail_md = gr.Markdown(value="")
+                logs_box = gr.Textbox(label="System Logs", lines=5, interactive=False)
 
-                # 2. Manual Report Generation
-                btn_gen_report.click(
-                    fn=generate_report_handler,
-                    inputs=[upload_id_state, auth_token_state, timing_ctx_state],
-                    outputs=[
-                        report_job_id_state,
-                        btn_gen_report,
-                        timing_ctx_state,
-                    ]
-                )
+            # ================= Result Area =================
+            # Split into Tabs for persistence
+            with gr.Tabs():
+                with gr.Tab("批改结果"):
+                    grade_result_md = gr.Markdown(label="Grade Result")
+                with gr.Tab("学业报告"):
+                    class_report_md = gr.Markdown(label="Class Report")
 
-                # 3. Polling (Timer)
-                # Poll every 2 seconds
-                timer = gr.Timer(2.0)
-                timer.tick(
-                    fn=poll_job_status,
-                    inputs=[
-                        job_id_state,
-                        report_job_id_state,
-                        report_id_state,
-                        session_id_state,
-                        upload_id_state,
-                        auth_token_state,
-                        timing_ctx_state,
-                        page_progress_state,
-                    ],
-                    outputs=[
-                        s1_html,
-                        s2_html,
-                        pages_progress_md,
-                        page_no_dd,
-                        timings_summary_md,
-                        timings_detail_md,
-                        grade_result_md,
-                        class_report_md,
-                        logs_box,
-                        report_job_id_state,
-                        report_id_state,
-                        btn_gen_report,
-                        timing_ctx_state,
-                        page_progress_state,
-                    ],
-                )
+            # Chatbot for follow-up
+            gr.Markdown("### 💬 辅导对话")
+            chatbot_kwargs: Dict[str, Any] = {"height": 400, "label": "AI 助教"}
+            if "type" in inspect.signature(gr.Chatbot.__init__).parameters:
+                chatbot_kwargs["type"] = "messages"
+            chatbot = gr.Chatbot(**chatbot_kwargs)
+            msg = gr.Textbox(label="你的问题")
+            tool_status_md = gr.Markdown(value="")
 
-                btn_pick_page.click(
-                    fn=pick_page_for_tutoring,
-                    inputs=[page_no_dd, page_progress_state],
-                    outputs=[msg, chat_context_item_ids_state, tutor_scope_md],
-                )
+            # Logic Wiring
+            # 1. Submit
+            submit_btn.click(
+                fn=submit_job_handler,
+                inputs=[
+                    input_img,
+                    auth_token_state,
+                ],
+                outputs=[
+                    job_id_state,
+                    session_id_state,
+                    upload_id_state,
+                    report_job_id_state,
+                    report_id_state,
+                    monitor_group,
+                    submission_status_md,
+                    logs_box,
+                    timings_summary_md,
+                    timings_detail_md,
+                    grade_result_md,
+                    class_report_md,
+                    btn_gen_report,
+                    timing_ctx_state,
+                    page_progress_state,
+                    chat_context_item_ids_state,
+                ],
+            )
 
-                msg.submit(
-                    fn=tutor_chat_logic_demo2,
-                    inputs=[
-                        msg,
-                        chatbot,
-                        session_id_state,
-                        gr.State("math"), # Hardcoded subject
-                        auth_token_state,
-                        chat_context_item_ids_state,
-                    ],
-                    outputs=[msg, chatbot, tool_status_md],
-                )
+            # 2. Manual Report Generation
+            btn_gen_report.click(
+                fn=generate_report_handler,
+                inputs=[upload_id_state, auth_token_state, timing_ctx_state],
+                outputs=[
+                    report_job_id_state,
+                    btn_gen_report,
+                    timing_ctx_state,
+                ],
+            )
 
+            # 3. Polling (Timer)
+            # Poll every 2 seconds
+            timer = gr.Timer(2.0)
+            timer.tick(
+                fn=poll_job_status,
+                inputs=[
+                    job_id_state,
+                    report_job_id_state,
+                    report_id_state,
+                    session_id_state,
+                    upload_id_state,
+                    auth_token_state,
+                    timing_ctx_state,
+                    page_progress_state,
+                ],
+                outputs=[
+                    s1_html,
+                    s2_html,
+                    pages_progress_md,
+                    page_no_dd,
+                    timings_summary_md,
+                    timings_detail_md,
+                    grade_result_md,
+                    class_report_md,
+                    logs_box,
+                    report_job_id_state,
+                    report_id_state,
+                    btn_gen_report,
+                    timing_ctx_state,
+                    page_progress_state,
+                ],
+            )
 
+            btn_pick_page.click(
+                fn=pick_page_for_tutoring,
+                inputs=[page_no_dd, page_progress_state],
+                outputs=[msg, chat_context_item_ids_state, tutor_scope_md],
+            )
+
+            msg.submit(
+                fn=tutor_chat_logic_demo2,
+                inputs=[
+                    msg,
+                    chatbot,
+                    session_id_state,
+                    gr.State("math"),  # Hardcoded subject
+                    auth_token_state,
+                    chat_context_item_ids_state,
+                ],
+                outputs=[msg, chatbot, tool_status_md],
+            )
 
     return demo
 

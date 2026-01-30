@@ -7,7 +7,6 @@ from fastapi.testclient import TestClient
 
 from homework_agent.main import create_app
 
-
 client = TestClient(create_app())
 
 
@@ -35,7 +34,9 @@ def _parse_sse_events(body: str) -> list[tuple[str, str]]:
     return events
 
 
-def test_chat_rehydrate_from_submission_id_emits_session_id(monkeypatch: pytest.MonkeyPatch):
+def test_chat_rehydrate_from_submission_id_emits_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
     monkeypatch.setattr(
         "homework_agent.services.llm.LLMClient.socratic_tutor_stream",
         lambda *args, **kwargs: iter(["stub response"]),
@@ -116,4 +117,3 @@ def test_chat_rehydrate_subject_mismatch_yields_error_event(
     assert err_payloads, "expected error event"
     err = json.loads(err_payloads[0])
     assert err.get("code") == "SUBJECT_MISMATCH"
-

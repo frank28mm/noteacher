@@ -21,7 +21,9 @@ def test_require_user_id_prefers_bearer_token(monkeypatch: pytest.MonkeyPatch):
 def test_require_user_id_local_jwt(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(uc, "verify_access_token", lambda _token: {"sub": "user_local"})
     monkeypatch.setattr(
-        uc, "get_settings", lambda: types.SimpleNamespace(auth_required=False, auth_mode="local")
+        uc,
+        "get_settings",
+        lambda: types.SimpleNamespace(auth_required=False, auth_mode="local"),
     )
     assert (
         uc.require_user_id(authorization="Bearer local_token", x_user_id="dev_x")

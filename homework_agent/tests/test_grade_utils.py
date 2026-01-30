@@ -4,6 +4,7 @@ Tests image validation, URL parsing, and grading utilities.
 """
 
 import pytest
+import socket
 
 from homework_agent.api.grade import (
     _is_public_url,
@@ -19,8 +20,17 @@ from homework_agent.models.schemas import VisionProvider
 class TestIsPublicUrl:
     """Tests for _is_public_url function."""
 
-    def test_http_urls(self):
+    def test_http_urls(self, monkeypatch: pytest.MonkeyPatch):
         """Should return True for http/https URLs."""
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda host, *args, **kwargs: (
+                [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+                if host == "example.com"
+                else (_ for _ in ()).throw(OSError("unexpected host"))
+            ),
+        )
         assert _is_public_url("https://example.com/image.jpg") is True
         assert _is_public_url("http://example.com/image.jpg") is True
 

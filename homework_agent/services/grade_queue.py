@@ -169,6 +169,7 @@ def enqueue_grade_job(
     set_job_status(
         job_id,
         {
+            "user_id": str(user_id),
             "status": "processing",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "request": grade_request,

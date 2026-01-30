@@ -83,7 +83,7 @@ resp = client.responses.create(
 - 失败回退：可按需要配置 fallback（例如 doubao → qwen3），但需在实现中显式定义。
 
 ## 5. 注意事项（URL First）
-- 优先使用公网 HTTP/HTTPS URL，禁止 localhost/127/内网；单文件不超过 20 MB。
+- 优先使用公网 HTTP/HTTPS URL，禁止 localhost/127/内网；单文件不超过 5 MB（可配置 `MAX_UPLOAD_IMAGE_BYTES`）。
 - Doubao 对外输入优先用 URL；后端在遇到“供应商抓 URL 超时/不稳定”时，会走内部兜底：先后端下载图片→转 data-url(base64)→直接喂给 Doubao（绕开对方抓 URL）。
 - Qwen3 支持 URL（推荐）或 Base64 兜底；Doubao 的 base64 仅接受 data URL 形态（`data:image/...;base64,...`，用于后端内部兜底，不建议客户端直接使用）。
 - 不要将真实 API Key 提交到仓库；运行前在 `.env` 设置。

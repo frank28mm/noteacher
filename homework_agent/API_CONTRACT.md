@@ -2,7 +2,7 @@
 
 ## 1. 概览 (Overview)
 
-本契约定义Node.js BFF与Python AI Agent之间的REST API通信协议，支持同步/异步批改和SSE流式聊天辅导。
+本契约定义前端（React）与后端（FastAPI）之间的REST API通信协议，支持同步/异步批改和SSE流式聊天辅导。
 
 ### Base URL
 - **Development**: `http://localhost:8000`
@@ -111,8 +111,8 @@ X-Request-Id: req-123456
 
 **字段说明**:
 - `upload_id` (可选): `POST /uploads` 返回的 id（=submission_id）。当提供 `upload_id` 且 `images` 为空/省略时，后端会从 `submissions.page_image_urls` 反查图片列表。
-- `images` (必需\*): 1-20 张图片，每项为 `ImageRef`（url 或 base64 二选一），支持 jpg/png/webp；\*当 `upload_id` 已提供并可反查时可省略/为空。
-- 上传要求：单文件不超过 20 MB；**强烈推荐公网 URL**（禁止 127/localhost/内网）；若使用 `base64`，必须是 **Data URL**（`data:image/...;base64,...`），且超限直接 400。为减少无效调用，建议入口预检 URL/大小/格式，不合规直接返回 400。
+- `images` (必需\*): 1-4 张图片，每项为 `ImageRef`（url 或 base64 二选一），支持 jpg/png/webp；\*当 `upload_id` 已提供并可反查时可省略/为空。
+- 上传要求：单文件不超过 5 MB（可通过 `MAX_UPLOAD_IMAGE_BYTES` 配置）；**强烈推荐公网 URL**（禁止 127/localhost/内网）；若使用 `base64`，必须是 **Data URL**（`data:image/...;base64,...`），且超限直接 400。为减少无效调用，建议入口预检 URL/大小/格式，不合规直接返回 400。
 - `subject` (必需): "math" | "english"
 - `batch_id` (可选): 客户端批次标识，用于日志追踪
 - `session_id` (推荐): 会话/批次 ID，24h 生命周期，便于上下文续接
@@ -270,7 +270,7 @@ Cache-Control: no-cache
 - `history` (必需): 本次会话的历史消息，最多20条
 - `question` (必需): 当前问题
 - `subject` (必需): "math" | "english"
-- `session_id` (可选): 对应的作业批次会话ID（24h TTL）。服务端也支持从 Header `Last-Event-Id` 兜底恢复 `session_id`（当客户端未持久化 session_id 时使用；当前 demo 前端未接入该 header）。
+- `session_id` (可选): 对应的作业批次会话ID（24h TTL）。服务端也支持从 Header `Last-Event-Id` 兜底恢复 `session_id`（当客户端未持久化 session_id 时使用；前端已实现 `Last-Event-Id` 断线续接）。
 - `submission_id` (可选): 用于“历史错题问老师”的 **Chat Rehydrate**。当 `session_id` 缺失/过期且提供 `submission_id` 时，后端会从 `submissions` 真源快照重建最小 qbank，并创建新的 `session_id`（心跳首包返回）。
 - `mode` (可选): "normal" | "strict"（对英语辅导/判分一致）
 - `context_item_ids` (可选): 关联的错题项，支持“索引 (int)”或“item_id (string)”两种写法；若缓存有错题则注入详情，无数据或缺失项将在上下文 note 中标记；last-event-id 断线续接会重放最近助手消息。
@@ -1444,7 +1444,445 @@ const res = await fetch('/api/v1/chat', {
 
 ---
 
-**文档版本**: v1.1.0
-**最后更新**: 2026-01-20
-**维护人**: [Your Name]
-**审核人**: [Partner Name]
+## 附录C: 完整 API 端点列表 (Appendix C - Complete API Endpoints)
+
+> 本附录补充主文档未涵盖的所有已实现 API 端点。
+
+---
+
+## C.1 认证接口 (Auth API)
+
+### POST /auth/sms/send
+**描述**: 发送短信验证码
+
+#### 请求体
+```json
+{
+  "phone": "13800138000"  // 支持 11位手机号、+86前缀、86前缀
+}
+```
+
+#### 响应体
+```json
+{
+  "success": true,
+  "message": "验证码已发送",
+  "expires_in": 300  // 5分钟有效期
+}
+```
+
+### POST /auth/sms/verify
+**描述**: 验证短信验证码并登录
+
+#### 请求体
+```json
+{
+  "phone": "13800138000",
+  "code": "123456"
+}
+```
+
+#### 响应体
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "token_type": "Bearer",
+  "expires_in": 86400,
+  "user_id": "usr_xxx"
+}
+```
+
+### POST /auth/login/email
+**描述**: 邮箱密码登录
+
+#### 请求体
+```json
+{
+  "email": "user@example.com",
+  "password": "hashed_password"
+}
+```
+
+### POST /auth/logout
+**描述**: 用户登出
+
+---
+
+## C.2 用户中心接口 (Me API)
+
+### GET /me/quota
+**描述**: 获取用户配额信息（BT/CP/报告券）
+
+#### 响应体
+```json
+{
+  "cp_left": 5000,
+  "report_coupons_left": 3,
+  "trial_expires_at": "2026-02-28T00:00:00Z",
+  "plan_tier": "pro"
+}
+```
+
+### GET /me/profiles
+**描述**: 获取子女档案列表
+
+#### 响应体
+```json
+{
+  "profiles": [
+    {
+      "profile_id": "prof_xxx",
+      "display_name": "小明",
+      "is_default": true,
+      "created_at": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+### POST /me/profiles
+**描述**: 创建子女档案
+
+#### 请求体
+```json
+{
+  "display_name": "小红"
+}
+```
+
+### PATCH /me/profiles/{profile_id}
+**描述**: 更新子女档案
+
+### DELETE /me/profiles/{profile_id}
+**描述**: 删除子女档案
+
+### POST /me/profiles/{profile_id}/set_default
+**描述**: 设置默认档案
+
+### GET /me/account
+**描述**: 获取账户信息
+
+### PATCH /me/account
+**描述**: 更新账户信息（昵称等）
+
+### POST /me/password
+**描述**: 设置/修改密码
+
+### POST /me/email/bind
+**描述**: 绑定邮箱
+
+---
+
+## C.3 提交管理接口 (Submissions API)
+
+### GET /submissions
+**描述**: 列出历史提交
+
+#### 查询参数
+- `profile_id` (可选): 筛选特定子女档案
+- `limit`: 分页大小，默认 20
+- `offset`: 分页偏移
+
+#### 响应体
+```json
+{
+  "items": [
+    {
+      "submission_id": "sub_xxx",
+      "subject": "math",
+      "total_items": 5,
+      "wrong_count": 2,
+      "created_at": "2026-01-20T10:00:00Z",
+      "profile_id": "prof_xxx"
+    }
+  ],
+  "total": 100
+}
+```
+
+### GET /submissions/{submission_id}
+**描述**: 获取提交详情
+
+### POST /submissions/{submission_id}/questions/{question_id}
+**描述**: 更新题目判定（人工修正）
+
+#### 请求体
+```json
+{
+  "verdict": "correct",  // correct | incorrect | uncertain
+  "reason": "人工复核：实际答案正确"
+}
+```
+
+### POST /submissions/{submission_id}/qindex/rebuild
+**描述**: 重建题目索引
+
+### POST /submissions/{submission_id}/move_profile
+**描述**: 移动提交到其他子女档案
+
+#### 请求体
+```json
+{
+  "to_profile_id": "prof_yyy"
+}
+```
+
+---
+
+## C.4 错题本接口 (Mistakes API)
+
+### GET /mistakes
+**描述**: 列出错题
+
+#### 查询参数
+- `include_excluded`: 是否包含已排除的错题，默认 false
+
+### GET /mistakes/stats
+**描述**: 错题统计
+
+#### 响应体
+```json
+{
+  "total_mistakes": 50,
+  "by_subject": {
+    "math": 30,
+    "english": 20
+  },
+  "by_severity": {
+    "calculation": 25,
+    "concept": 15,
+    "format": 10
+  }
+}
+```
+
+### POST /mistakes/exclusions
+**描述**: 排除错题（不影响历史，仅影响统计）
+
+#### 请求体
+```json
+{
+  "submission_id": "sub_xxx",
+  "item_id": "item_yyy",
+  "reason": "已掌握"
+}
+```
+
+### DELETE /mistakes/exclusions/{submission_id}/{item_id}
+**描述**: 恢复已排除的错题
+
+---
+
+## C.5 学情报告接口 (Reports API)
+
+### GET /reports/eligibility
+**描述**: 检查报告生成资格
+
+#### 响应体
+```json
+{
+  "eligible": true,
+  "reason": null,  // 如不满足，说明原因
+  "required_submissions": 3,
+  "current_submissions": 5
+}
+```
+
+### POST /reports
+**描述**: 创建学情报告（异步）
+
+#### 请求体
+```json
+{
+  "start_date": "2026-01-01",
+  "end_date": "2026-01-31",
+  "profile_id": "prof_xxx"  // 可选，默认所有子女
+}
+```
+
+#### 响应体
+```json
+{
+  "job_id": "report_job_xxx",
+  "status": "queued"
+}
+```
+
+### GET /reports/jobs/{job_id}
+**描述**: 查询报告任务状态
+
+### GET /reports/{report_id}
+**描述**: 获取报告内容
+
+### GET /reports
+**描述**: 列出历史报告
+
+---
+
+## C.6 订阅与兑换接口 (Subscriptions API)
+
+### POST /subscriptions/orders
+**描述**: 创建订阅订单
+
+#### 请求体
+```json
+{
+  "plan_type": "monthly",  // monthly | yearly
+  "payment_method": "alipay"  // alipay | wechat
+}
+```
+
+### POST /subscriptions/orders/{order_id}/mock_pay
+**描述**: Mock 支付（开发环境）
+
+### POST /subscriptions/redeem
+**描述**: 兑换码兑换
+
+#### 请求体
+```json
+{
+  "code": "REDEEM-1234-5678"
+}
+```
+
+#### 响应体
+```json
+{
+  "success": true,
+  "bt_granted": 100,
+  "message": "兑换成功，获得 100 BT"
+}
+```
+
+### GET /subscriptions/redemptions
+**描述**: 查询兑换历史
+
+---
+
+## C.7 反馈接口 (Feedback API)
+
+### POST /feedback
+**描述**: 提交用户反馈
+
+#### 请求体
+```json
+{
+  "content": "批改结果有误...",
+  "submission_id": "sub_xxx",  // 可选，关联具体提交
+  "item_id": "item_yyy"  // 可选，关联具体题目
+}
+```
+
+### GET /feedback
+**描述**: 获取反馈列表
+
+#### 查询参数
+- `limit`: 默认 50
+
+### GET /feedback/check_unread
+**描述**: 检查是否有未读的管理员回复
+
+#### 响应体
+```json
+{
+  "has_unread": true,
+  "unread_count": 2
+}
+```
+
+---
+
+## C.8 管理员接口 (Admin API)
+
+> **注意**: 所有管理员接口需要 `X-Admin-Token` 头部认证
+
+### GET /admin/users
+**描述**: 列出所有用户
+
+#### 查询参数
+- `limit`, `offset`: 分页
+- `created_after`, `created_before`: 时间筛选
+
+### GET /admin/users/{user_id}
+**描述**: 获取用户详情
+
+### POST /admin/users/{user_id}/wallet_adjust
+**描述**: 调整用户钱包（补偿/奖励）
+
+#### 请求体
+```json
+{
+  "bt_delta": 50,  // 正数增加，负数扣除
+  "reason": "活动奖励"
+}
+```
+
+### POST /admin/users/{user_id}/grant
+**描述**: 授予订阅或报告券
+
+### GET /admin/audit_logs
+**描述**: 审计日志查询
+
+### GET /admin/usage_ledger
+**描述**: 使用记录统计
+
+### GET /admin/submissions
+**描述**: 查看所有提交
+
+### GET /admin/reports
+**描述**: 查看所有报告
+
+### POST /admin/redeem_cards/generate
+**描述**: 批量生成兑换码
+
+#### 请求体
+```json
+{
+  "batch_size": 100,
+  "bt_value": 50,
+  "expires_at": "2026-12-31T23:59:59Z",
+  "prefix": "PROMO-"
+}
+```
+
+### GET /admin/redemptions
+**描述**: 查看所有兑换记录
+
+### GET /admin/redeem_cards/batches
+**描述**: 查看兑换码批次
+
+### POST /admin/redeem_cards/batches/{batch_id}/disable
+**描述**: 禁用整个批次的兑换码
+
+### POST /admin/redeem_cards/bulk_update
+**描述**: 批量更新兑换码状态
+
+### GET /admin/stats/dashboard
+**描述**: 仪表盘统计数据
+
+#### 响应体
+```json
+{
+  "dau": 1500,
+  "mau": 15000,
+  "total_gradings_today": 3500,
+  "revenue_today": 5000.00
+}
+```
+
+### GET /admin/feedback/users
+**描述**: 查看有反馈的用户列表
+
+### GET /admin/feedback/{user_id}
+**描述**: 查看特定用户的反馈
+
+### POST /admin/feedback/{user_id}
+**描述**: 回复用户反馈
+
+---
+
+**文档版本**: v1.2.0
+**最后更新**: 2026-01-30
+**维护人**: Atlas (OpenCode)
+**变更说明**: 补充 40+ 缺失端点，移除 BFF 引用

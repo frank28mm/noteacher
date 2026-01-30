@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import base64
 import hashlib
-import httpx
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
@@ -31,6 +30,7 @@ from homework_agent.core.prompts_autonomous import (
     QUESTION_CARDS_OCR_PROMPT,
 )
 from homework_agent.utils.settings import get_settings
+from homework_agent.utils.url_image_helpers import _safe_fetch_public_url_bytes
 from homework_agent.utils.cache import get_cache_store
 from homework_agent.utils.supabase_client import get_storage_client
 
@@ -219,12 +219,18 @@ def _compute_image_hash(image_url_or_base64: str) -> Optional[str]:
             # URL: download and hash
             settings = get_settings()
             timeout = float(getattr(settings, "opencv_processing_timeout", 30))
-            with httpx.Client(
-                timeout=timeout, follow_redirects=True, trust_env=False
-            ) as client:
-                r = client.get(image_url_or_base64)
-                if r.status_code == 200:
-                    return hashlib.sha256(r.content).hexdigest()
+            max_bytes = int(
+                getattr(settings, "max_upload_image_bytes", 5 * 1024 * 1024)
+            )
+            fetched = _safe_fetch_public_url_bytes(
+                image_url_or_base64,
+                timeout_seconds=float(timeout),
+                max_redirects=3,
+                max_bytes=max_bytes,
+            )
+            if fetched:
+                data, _ct = fetched
+                return hashlib.sha256(data).hexdigest()
             return None
     except Exception as e:
         logger.debug(f"Failed to compute image hash: {e}")
@@ -243,15 +249,19 @@ def _compress_image_if_needed(image_url: str, max_side: int = 1280) -> str:
         # Download image
         settings = get_settings()
         timeout = float(getattr(settings, "opencv_processing_timeout", 30))
-        with httpx.Client(
-            timeout=timeout, follow_redirects=True, trust_env=False
-        ) as client:
-            r = client.get(image_url)
-            if r.status_code != 200:
-                return image_url
+        max_bytes = int(getattr(settings, "max_upload_image_bytes", 5 * 1024 * 1024))
+        fetched = _safe_fetch_public_url_bytes(
+            image_url,
+            timeout_seconds=float(timeout),
+            max_redirects=3,
+            max_bytes=max_bytes,
+        )
+        if not fetched:
+            return image_url
+        data, _ct = fetched
 
         # Check dimensions
-        img = Image.open(BytesIO(r.content))
+        img = Image.open(BytesIO(data))
         w, h = img.size
         if max(w, h) <= max_side:
             return image_url  # No compression needed
@@ -317,19 +327,22 @@ def _compress_image_if_needed_with_metrics(
     try:
         settings = get_settings()
         timeout = float(getattr(settings, "opencv_processing_timeout", 30))
+        max_bytes = int(getattr(settings, "max_upload_image_bytes", 5 * 1024 * 1024))
         t_dl = time.monotonic()
-        with httpx.Client(
-            timeout=timeout, follow_redirects=True, trust_env=False
-        ) as client:
-            r = client.get(image_url)
-            if r.status_code != 200:
-                metrics["download_ms"] = int((time.monotonic() - t_dl) * 1000)
-                metrics["total_ms"] = int((time.monotonic() - started) * 1000)
-                return image_url, metrics
+        fetched = _safe_fetch_public_url_bytes(
+            image_url,
+            timeout_seconds=float(timeout),
+            max_redirects=3,
+            max_bytes=max_bytes,
+        )
         metrics["download_ms"] = int((time.monotonic() - t_dl) * 1000)
+        if not fetched:
+            metrics["total_ms"] = int((time.monotonic() - started) * 1000)
+            return image_url, metrics
+        data, _ct = fetched
 
         t_dec = time.monotonic()
-        img = Image.open(BytesIO(r.content))
+        img = Image.open(BytesIO(data))
         img.load()
         metrics["decode_ms"] = int((time.monotonic() - t_dec) * 1000)
 

@@ -1,3 +1,4 @@
+import socket
 import sys
 from types import SimpleNamespace
 
@@ -14,11 +15,23 @@ from homework_agent.utils.url_image_helpers import (
 )
 
 
-def test_is_public_url_rejects_localhost_and_non_http():
+def test_is_public_url_rejects_localhost_and_non_http(monkeypatch: pytest.MonkeyPatch):
+    # Avoid real DNS/network in unit tests.
+    def fake_getaddrinfo(host, *args, **kwargs):
+        if host == "example.com":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+        raise OSError("unexpected host")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     assert _is_public_url("https://example.com/a.jpg") is True
     assert _is_public_url("http://example.com/a.jpg") is True
     assert _is_public_url("file:///tmp/a.jpg") is False
     assert _is_public_url("http://127.0.0.1/a.jpg") is False
+    assert _is_public_url("http://127.0.0.2/a.jpg") is False
+    assert _is_public_url("http://10.0.0.1/a.jpg") is False
+    assert _is_public_url("http://192.168.1.1/a.jpg") is False
+    assert _is_public_url("http://169.254.169.254/a.jpg") is False
+    assert _is_public_url("http://[::1]/a.jpg") is False
     assert _is_public_url("https://localhost/a.jpg") is False
 
 
@@ -55,6 +68,16 @@ def test_is_provider_image_fetch_issue_detects_common_patterns():
 
 
 def test_probe_url_head_uses_httpx_and_formats_output(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, *args, **kwargs: (
+            [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+            if host == "example.com"
+            else (_ for _ in ()).throw(OSError("unexpected host"))
+        ),
+    )
+
     class FakeResp:
         status_code = 200
         headers = {"content-type": "image/jpeg", "content-length": "123"}
@@ -69,8 +92,11 @@ def test_probe_url_head_uses_httpx_and_formats_output(monkeypatch: pytest.Monkey
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def head(self, url: str):
+        def request(self, method: str, url: str):
+            assert method.upper() == "HEAD"
             assert url == "https://example.com/a.jpg"
+            # Mimic httpx.Response.request.url used by redirect handler.
+            FakeResp.request = SimpleNamespace(url=url)
             return FakeResp()
 
     fake_httpx = SimpleNamespace(Client=FakeClient)
@@ -82,6 +108,16 @@ def test_probe_url_head_uses_httpx_and_formats_output(monkeypatch: pytest.Monkey
 
 
 def test_download_as_data_uri_happy_path(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, *args, **kwargs: (
+            [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+            if host == "example.com"
+            else (_ for _ in ()).throw(OSError("unexpected host"))
+        ),
+    )
+
     class FakeResp:
         status_code = 200
         headers = {"content-type": "image/png"}
@@ -97,8 +133,10 @@ def test_download_as_data_uri_happy_path(monkeypatch: pytest.MonkeyPatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def get(self, url: str):
+        def request(self, method: str, url: str):
+            assert method.upper() == "GET"
             assert url == "https://example.com/a.png"
+            FakeResp.request = SimpleNamespace(url=url)
             return FakeResp()
 
     fake_httpx = SimpleNamespace(Client=FakeClient)
@@ -110,6 +148,16 @@ def test_download_as_data_uri_happy_path(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_download_as_data_uri_rejects_non_200(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, *args, **kwargs: (
+            [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+            if host == "example.com"
+            else (_ for _ in ()).throw(OSError("unexpected host"))
+        ),
+    )
+
     class FakeResp:
         status_code = 403
         headers = {"content-type": "image/jpeg"}
@@ -125,9 +173,50 @@ def test_download_as_data_uri_rejects_non_200(monkeypatch: pytest.MonkeyPatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def get(self, url: str):
+        def request(self, method: str, url: str):
+            FakeResp.request = SimpleNamespace(url=url)
             return FakeResp()
 
     fake_httpx = SimpleNamespace(Client=FakeClient)
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
     assert _download_as_data_uri("https://example.com/forbidden.jpg") is None
+
+
+def test_safe_fetch_rejects_redirect_to_private(monkeypatch: pytest.MonkeyPatch):
+    from homework_agent.utils import url_image_helpers as helpers
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, *args, **kwargs: (
+            [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+            if host == "example.com"
+            else (_ for _ in ()).throw(OSError("unexpected host"))
+        ),
+    )
+
+    class FakeResp:
+        status_code = 302
+        headers = {"location": "http://127.0.0.1/private"}
+
+        def __init__(self, url: str):
+            self.request = SimpleNamespace(url=url)
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def request(self, method: str, url: str):
+            return FakeResp(url)
+
+    fake_httpx = SimpleNamespace(Client=FakeClient)
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+
+    with pytest.raises(ValueError):
+        helpers._safe_fetch_public_url("https://example.com/a.jpg", method="GET")

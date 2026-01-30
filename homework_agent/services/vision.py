@@ -27,6 +27,7 @@ from tenacity import (
 from homework_agent.models.schemas import ImageRef, VisionProvider
 from homework_agent.services.image_preprocessor import maybe_preprocess_for_vision
 from homework_agent.utils.observability import trace_span
+from homework_agent.utils.url_image_helpers import _is_public_url
 from homework_agent.utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,10 @@ class VisionClient:
             int(settings.grade_vision_timeout_seconds),
         )
 
+        self.max_upload_image_bytes = int(
+            getattr(settings, "max_upload_image_bytes", 5 * 1024 * 1024)
+        )
+
     def _build_openai_client(self, base_url: str, api_key: str) -> OpenAI:
         return OpenAI(
             base_url=base_url, api_key=api_key, timeout=float(self.timeout_seconds)
@@ -83,22 +88,11 @@ class VisionClient:
     def _strip_base64_prefix(self, data: str) -> str:
         return re.sub(r"^data:image/[^;]+;base64,", "", data, flags=re.IGNORECASE)
 
-    def _is_public_url(self, url: str) -> bool:
-        if not url:
-            return False
-        if re.match(r"^https?://", url) is None:
-            return False
-        if url.startswith("http://127.") or url.startswith("https://127."):
-            return False
-        if url.startswith("http://localhost") or url.startswith("https://localhost"):
-            return False
-        return True
-
     def _image_content_blocks(self, refs: List[ImageRef], provider: VisionProvider):
         blocks = []
         for ref in refs:
             if ref.url:
-                if not self._is_public_url(str(ref.url)):
+                if not _is_public_url(str(ref.url)):
                     raise ValueError(
                         "Image URL must be public HTTP/HTTPS (no localhost/127)"
                     )
@@ -127,8 +121,10 @@ class VisionClient:
 
                 # Approximate size check: 4/3 of base64 length
                 est_bytes = int(len(ref.base64) * 0.75)
-                if est_bytes > 20 * 1024 * 1024:
-                    raise ValueError("Image size exceeds 20MB limit; use URL instead")
+                if est_bytes > self.max_upload_image_bytes:
+                    raise ValueError(
+                        f"Image size exceeds {self.max_upload_image_bytes} bytes limit; use URL instead"
+                    )
                 if provider == VisionProvider.DOUBAO:
                     blocks.append({"type": "input_image", "image_url": ref.base64})
                 else:

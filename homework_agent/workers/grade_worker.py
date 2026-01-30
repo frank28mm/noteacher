@@ -40,7 +40,10 @@ from homework_agent.api.session import (
     persist_question_bank,
     save_mistakes,
 )
-from homework_agent.core.qbank import build_question_bank, build_question_bank_from_vision_raw_text
+from homework_agent.core.qbank import (
+    build_question_bank,
+    build_question_bank_from_vision_raw_text,
+)
 from homework_agent.core.question_cards import (
     build_question_cards_from_questions_list,
     build_question_cards_from_questions_map,
@@ -147,10 +150,10 @@ def _merge_questions_with_page_context(
                 else None
             )
             if existing_page is not None and existing_page != int(page_index):
-                alt_key = f"{base_key}@p{int(page_index)+1}"
+                alt_key = f"{base_key}@p{int(page_index) + 1}"
                 suffix = 2
                 while alt_key in merged:
-                    alt_key = f"{base_key}@p{int(page_index)+1}#{suffix}"
+                    alt_key = f"{base_key}@p{int(page_index) + 1}#{suffix}"
                     suffix += 1
                 q["question_number"] = alt_key
                 merged[alt_key] = q
@@ -169,6 +172,7 @@ def _merge_questions_with_page_context(
 
 def _now_job_payload(
     *,
+    user_id: Optional[str] = None,
     status: str,
     req_obj: Dict[str, Any],
     total_pages: int,
@@ -181,6 +185,7 @@ def _now_job_payload(
     finished: bool = False,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
+        "user_id": (str(user_id).strip() or None) if user_id is not None else None,
         "status": str(status),
         "created_at": _iso_now(),
         "request": req_obj,
@@ -214,7 +219,7 @@ def _concat_vision_raw_text_pages(pages: List[Tuple[int, str]]) -> str:
         t = str(text or "").strip()
         if not t:
             continue
-        parts.append(f"### Page {idx+1}\n{t}")
+        parts.append(f"### Page {idx + 1}\n{t}")
     return "\n\n".join(parts).strip()
 
 
@@ -259,6 +264,7 @@ def _maybe_bill_grade_job(
             user_id=str(user_id),
             endpoint="/api/v1/grade",
             stage="grade",
+            error_type="quota_charge_failed",
             error=str(err or ""),
         )
 
@@ -425,6 +431,7 @@ def main() -> int:
                     set_job_status(
                         job.job_id,
                         _now_job_payload(
+                            user_id=str(job.user_id),
                             status="running",
                             req_obj=req_obj,
                             total_pages=int(total_pages),
@@ -435,7 +442,9 @@ def main() -> int:
                         ttl_seconds=ttl_seconds,
                     )
 
-                    for page_index, img in enumerate(getattr(req, "images", None) or []):
+                    for page_index, img in enumerate(
+                        getattr(req, "images", None) or []
+                    ):
                         page_url = str(getattr(img, "url", "") or "").strip()
                         req_page = req.model_copy(update={"images": [img]})
 
@@ -451,20 +460,26 @@ def main() -> int:
                                     else ""
                                 )
                                 if ocr_text:
-                                    vision_qbank = build_question_bank_from_vision_raw_text(
-                                        session_id=str(req.session_id or job.session_id or ""),
-                                        subject=req.subject,
-                                        vision_raw_text=ocr_text,
-                                        page_image_urls=[page_url],
+                                    vision_qbank = (
+                                        build_question_bank_from_vision_raw_text(
+                                            session_id=str(
+                                                req.session_id or job.session_id or ""
+                                            ),
+                                            subject=req.subject,
+                                            vision_raw_text=ocr_text,
+                                            page_image_urls=[page_url],
+                                        )
                                     )
-                                    placeholders = build_question_cards_from_questions_map(
-                                        page_index=int(page_index),
-                                        questions=(
-                                            vision_qbank.get("questions")
-                                            if isinstance(vision_qbank, dict)
-                                            else {}
-                                        ),
-                                        card_state="placeholder",
+                                    placeholders = (
+                                        build_question_cards_from_questions_map(
+                                            page_index=int(page_index),
+                                            questions=(
+                                                vision_qbank.get("questions")
+                                                if isinstance(vision_qbank, dict)
+                                                else {}
+                                            ),
+                                            card_state="placeholder",
+                                        )
                                     )
                                     cards_by_id = merge_question_cards(
                                         cards_by_id, placeholders
@@ -472,12 +487,15 @@ def main() -> int:
                                     set_job_status(
                                         job.job_id,
                                         _now_job_payload(
+                                            user_id=str(job.user_id),
                                             status="running",
                                             req_obj=req_obj,
                                             total_pages=int(total_pages),
                                             done_pages=int(len(page_summaries)),
                                             page_summaries=page_summaries,
-                                            question_cards=sort_question_cards(cards_by_id),
+                                            question_cards=sort_question_cards(
+                                                cards_by_id
+                                            ),
                                             started=started,
                                         ),
                                         ttl_seconds=ttl_seconds,
@@ -517,10 +535,16 @@ def main() -> int:
                             page_questions_list = []
 
                         # A-7 Layer 2: verdict cards (page batch update).
-                        verdict_cards, blank_count = build_question_cards_from_questions_list(
-                            page_index=int(page_index),
-                            questions=[q for q in page_questions_list if isinstance(q, dict)],
-                            card_state="verdict_ready",
+                        verdict_cards, blank_count = (
+                            build_question_cards_from_questions_list(
+                                page_index=int(page_index),
+                                questions=[
+                                    q
+                                    for q in page_questions_list
+                                    if isinstance(q, dict)
+                                ],
+                                card_state="verdict_ready",
+                            )
                         )
                         total_blank_count += int(blank_count)
                         cards_by_id = merge_question_cards(cards_by_id, verdict_cards)
@@ -535,7 +559,10 @@ def main() -> int:
                         if bool(getattr(settings, "grade_review_cards_enabled", True)):
                             try:
                                 max_per_page = int(
-                                    getattr(settings, "grade_review_cards_max_per_page", 2) or 0
+                                    getattr(
+                                        settings, "grade_review_cards_max_per_page", 2
+                                    )
+                                    or 0
                                 )
                             except Exception:
                                 max_per_page = 2
@@ -543,7 +570,11 @@ def main() -> int:
                                 candidates = pick_review_candidates(
                                     subject=req.subject,
                                     page_index=int(page_index),
-                                    questions=[q for q in page_questions_list if isinstance(q, dict)],
+                                    questions=[
+                                        q
+                                        for q in page_questions_list
+                                        if isinstance(q, dict)
+                                    ],
                                     max_per_page=max_per_page,
                                 )
                             except Exception:
@@ -558,13 +589,17 @@ def main() -> int:
                                         {
                                             "item_id": cand.item_id,
                                             "card_state": "review_pending",
-                                            "review_reasons": list(cand.review_reasons or [])[:8],
+                                            "review_reasons": list(
+                                                cand.review_reasons or []
+                                            )[:8],
                                         }
                                     ],
                                 )
                                 enqueue_review_card_job(
                                     job_id=job.job_id,
-                                    session_id=str(req.session_id or job.session_id or ""),
+                                    session_id=str(
+                                        req.session_id or job.session_id or ""
+                                    ),
                                     request_id=job.request_id,
                                     subject=str(subj_value),
                                     page_index=int(page_index),
@@ -579,7 +614,10 @@ def main() -> int:
                                                     q.get("question_content")
                                                     for q in page_questions_list
                                                     if isinstance(q, dict)
-                                                    and str(q.get("question_number") or "").strip() == str(cand.question_number)
+                                                    and str(
+                                                        q.get("question_number") or ""
+                                                    ).strip()
+                                                    == str(cand.question_number)
                                                 ),
                                                 "",
                                             )
@@ -618,17 +656,24 @@ def main() -> int:
                                 q.setdefault("page_image_url", page_url)
                             q["item_id"] = make_card_item_id(
                                 page_index=int(page_index),
-                                question_number=q.get("question_number") or q.get("question_index"),
+                                question_number=q.get("question_number")
+                                or q.get("question_index"),
                             )
 
                         # Aggregate wrong_items and warnings.
                         agg_wrong_items.extend(
-                            [wi for wi in page_wrong_items_filtered if isinstance(wi, dict)]
+                            [
+                                wi
+                                for wi in page_wrong_items_filtered
+                                if isinstance(wi, dict)
+                            ]
                         )
                         agg_questions.extend(
                             [q for q in page_questions_list if isinstance(q, dict)]
                         )
-                        page_warnings = list(getattr(page_result, "warnings", None) or [])
+                        page_warnings = list(
+                            getattr(page_result, "warnings", None) or []
+                        )
                         for w in page_warnings:
                             s = str(w).strip()
                             if s and s not in agg_warnings:
@@ -639,7 +684,11 @@ def main() -> int:
                             page_bank = build_question_bank(
                                 session_id=str(req.session_id or job.session_id or ""),
                                 subject=req.subject,
-                                questions=[q for q in page_questions_list if isinstance(q, dict)],
+                                questions=[
+                                    q
+                                    for q in page_questions_list
+                                    if isinstance(q, dict)
+                                ],
                                 vision_raw_text=str(
                                     getattr(page_result, "vision_raw_text", None) or ""
                                 ),
@@ -647,10 +696,14 @@ def main() -> int:
                                 visual_facts_map=None,
                             )
                             page_questions = (
-                                page_bank.get("questions") if isinstance(page_bank, dict) else None
+                                page_bank.get("questions")
+                                if isinstance(page_bank, dict)
+                                else None
                             )
                             page_questions = (
-                                page_questions if isinstance(page_questions, dict) else {}
+                                page_questions
+                                if isinstance(page_questions, dict)
+                                else {}
                             )
 
                             agg_questions_map = (
@@ -666,20 +719,27 @@ def main() -> int:
                                 collisions=collisions,
                             )
                             agg_bank["questions"] = merged_questions
-                            agg_bank["page_image_urls"] = [u for u in page_image_urls if u]
+                            agg_bank["page_image_urls"] = [
+                                u for u in page_image_urls if u
+                            ]
 
-                            vt = str(getattr(page_result, "vision_raw_text", None) or "").strip()
+                            vt = str(
+                                getattr(page_result, "vision_raw_text", None) or ""
+                            ).strip()
                             if vt:
                                 vision_pages.append((int(page_index), vt))
-                                agg_bank["vision_raw_text"] = _concat_vision_raw_text_pages(
-                                    vision_pages
+                                agg_bank["vision_raw_text"] = (
+                                    _concat_vision_raw_text_pages(vision_pages)
                                 )
 
                             meta_now: Dict[str, Any] = {}
-                            bank_now = get_question_bank(job.session_id) if job.session_id else None
-                            if (
-                                isinstance(bank_now, dict)
-                                and isinstance(bank_now.get("meta"), dict)
+                            bank_now = (
+                                get_question_bank(job.session_id)
+                                if job.session_id
+                                else None
+                            )
+                            if isinstance(bank_now, dict) and isinstance(
+                                bank_now.get("meta"), dict
                             ):
                                 meta_now = dict(bank_now.get("meta") or {})
                             usage_now = (
@@ -699,23 +759,27 @@ def main() -> int:
                                 if isinstance(agg_bank.get("meta"), dict)
                                 else {}
                             )
-                            meta.update({k: v for k, v in meta_now.items() if v is not None})
+                            meta.update(
+                                {k: v for k, v in meta_now.items() if v is not None}
+                            )
                             meta["pages_total"] = int(total_pages)
                             meta["pages_done"] = int(page_index) + 1
                             if collisions:
-                                meta["question_number_collisions"] = list(collisions)[-50:]
+                                meta["question_number_collisions"] = list(collisions)[
+                                    -50:
+                                ]
                             agg_bank["meta"] = meta
 
                             persist_question_bank(
                                 session_id=str(req.session_id or job.session_id or ""),
                                 bank=agg_bank,
                                 grade_status="running",
-                                grade_summary=f"批改进行中：已完成 {int(page_index)+1}/{total_pages} 页",
+                                grade_summary=f"批改进行中：已完成 {int(page_index) + 1}/{total_pages} 页",
                                 grade_warnings=list(
                                     dict.fromkeys(
                                         [
                                             *agg_warnings,
-                                            f"批改尚未完成：当前仅完成 {int(page_index)+1}/{total_pages} 页（辅导仅基于已完成页）",
+                                            f"批改尚未完成：当前仅完成 {int(page_index) + 1}/{total_pages} 页（辅导仅基于已完成页）",
                                         ]
                                     )
                                 ),
@@ -746,7 +810,10 @@ def main() -> int:
                                 continue
                             if c.get("answer_state") == "blank":
                                 continue
-                            if str(c.get("verdict") or "").strip().lower() == "uncertain":
+                            if (
+                                str(c.get("verdict") or "").strip().lower()
+                                == "uncertain"
+                            ):
                                 uncertain_count += 1
                         needs_review = _needs_review(
                             warnings=[str(w) for w in page_warnings if str(w).strip()],
@@ -760,9 +827,9 @@ def main() -> int:
                                 "uncertain_count": uncertain_count,
                                 "blank_count": int(blank_count),
                                 "needs_review": bool(needs_review),
-                                "warnings": [str(w) for w in page_warnings if str(w).strip()][
-                                    :10
-                                ],
+                                "warnings": [
+                                    str(w) for w in page_warnings if str(w).strip()
+                                ][:10],
                                 # Demo helper: allow "进入辅导（本页）" without extra endpoints.
                                 "wrong_item_ids": page_item_ids[:30],
                                 "page_elapsed_ms": int(page_elapsed_ms),
@@ -772,6 +839,7 @@ def main() -> int:
                         set_job_status(
                             job.job_id,
                             _now_job_payload(
+                                user_id=str(job.user_id),
                                 status="running",
                                 req_obj=req_obj,
                                 total_pages=int(total_pages),
@@ -811,7 +879,9 @@ def main() -> int:
                             t = (s or "").strip()
                             if not t:
                                 return True
-                            return t.startswith("（批改未完成") or t.startswith("（未提取到")
+                            return t.startswith("（批改未完成") or t.startswith(
+                                "（未提取到"
+                            )
 
                         for q in agg_questions:
                             if not isinstance(q, dict):
@@ -822,12 +892,17 @@ def main() -> int:
                             src = qmap.get(qn_key) or qmap.get(qn)
                             if not isinstance(src, dict):
                                 continue
-                            full = src.get("question_text") or src.get("question_content")
+                            full = src.get("question_text") or src.get(
+                                "question_content"
+                            )
                             full_s = str(full or "").strip()
                             if full_s and not _looks_like_placeholder(full_s):
                                 q["question_content"] = full_s
                             # Prefer OCR/parsed options if missing (helps UI reconstruct full text).
-                            if q.get("options") is None and src.get("options") is not None:
+                            if (
+                                q.get("options") is None
+                                and src.get("options") is not None
+                            ):
                                 q["options"] = src.get("options")
 
                         # Keep job.question_cards aligned with the same full text (ResultSummary may render from /jobs/{job_id}).
@@ -841,7 +916,9 @@ def main() -> int:
                             src = qmap.get(qn_key) or qmap.get(qn)
                             if not isinstance(src, dict):
                                 continue
-                            full = src.get("question_text") or src.get("question_content")
+                            full = src.get("question_text") or src.get(
+                                "question_content"
+                            )
                             full_s = str(full or "").strip()
                             if full_s and not _looks_like_placeholder(full_s):
                                 c["question_content"] = full_s
@@ -863,7 +940,10 @@ def main() -> int:
                         "job_id": job.job_id,
                         "session_id": str(req.session_id or job.session_id or ""),
                         "status": "done",
-                        "total_items": len([q for q in agg_questions if isinstance(q, dict)]) or None,
+                        "total_items": len(
+                            [q for q in agg_questions if isinstance(q, dict)]
+                        )
+                        or None,
                         "wrong_count": len(agg_wrong_items),
                         "blank_count": int(total_blank_count),
                         "cross_subject_flag": None,
@@ -888,7 +968,9 @@ def main() -> int:
                             session_id=str(req.session_id or job.session_id or ""),
                             bank=agg_bank,
                             grade_status="done",
-                            grade_summary=str(grade_result_dict.get("summary") or "").strip(),
+                            grade_summary=str(
+                                grade_result_dict.get("summary") or ""
+                            ).strip(),
                             grade_warnings=agg_warnings,
                             request_id=job.request_id,
                             timings_ms=None,
@@ -924,7 +1006,9 @@ def main() -> int:
                                 and isinstance(bank_now.get("meta"), dict)
                                 else {}
                             )
-                            meta_now = {k: v for k, v in meta_now.items() if v is not None}
+                            meta_now = {
+                                k: v for k, v in meta_now.items() if v is not None
+                            }
                             update_submission_after_grade(
                                 user_id=str(job.user_id),
                                 submission_id=upload_id,
@@ -933,7 +1017,9 @@ def main() -> int:
                                 subject=subj_value,
                                 page_image_urls=page_image_urls or None,
                                 proxy_page_image_urls=None,
-                                vision_raw_text=grade_result_dict.get("vision_raw_text"),
+                                vision_raw_text=grade_result_dict.get(
+                                    "vision_raw_text"
+                                ),
                                 grade_result=grade_result_dict,
                                 warnings=list(grade_result_dict.get("warnings") or []),
                                 meta=meta_now or None,
@@ -968,6 +1054,7 @@ def main() -> int:
                     set_job_status(
                         job.job_id,
                         _now_job_payload(
+                            user_id=str(job.user_id),
                             status="done",
                             req_obj=req_obj,
                             total_pages=int(total_pages),
@@ -989,9 +1076,15 @@ def main() -> int:
                         elapsed_ms=int((time.monotonic() - started) * 1000),
                     )
                     try:
-                        bank_now = get_question_bank(job.session_id) if job.session_id else None
+                        bank_now = (
+                            get_question_bank(job.session_id)
+                            if job.session_id
+                            else None
+                        )
                         meta_now = (
-                            (bank_now or {}).get("meta") if isinstance(bank_now, dict) else None
+                            (bank_now or {}).get("meta")
+                            if isinstance(bank_now, dict)
+                            else None
                         )
                         meta_now = meta_now if isinstance(meta_now, dict) else {}
                         _maybe_bill_grade_job(
@@ -1146,12 +1239,20 @@ def main() -> int:
                     result_dict["wrong_count"] = int(len(wrong_items_filtered))
                     result_dict["blank_count"] = int(blank_n)
                 try:
-                    bank_now = get_question_bank(job.session_id) if job.session_id else None
+                    bank_now = (
+                        get_question_bank(job.session_id) if job.session_id else None
+                    )
                     meta_now = (
-                        (bank_now or {}).get("meta") if isinstance(bank_now, dict) else None
+                        (bank_now or {}).get("meta")
+                        if isinstance(bank_now, dict)
+                        else None
                     )
                     meta_now = meta_now if isinstance(meta_now, dict) else {}
-                    usage_now = meta_now.get("llm_usage") if isinstance(meta_now, dict) else None
+                    usage_now = (
+                        meta_now.get("llm_usage")
+                        if isinstance(meta_now, dict)
+                        else None
+                    )
                     if isinstance(usage_now, dict):
                         _maybe_bill_grade_job(
                             user_id=str(job.user_id),
@@ -1159,7 +1260,9 @@ def main() -> int:
                             session_id=str(job.session_id),
                             idempotency_key=idempotency_key or job.job_id,
                             prompt_tokens=int(usage_now.get("prompt_tokens") or 0),
-                            completion_tokens=int(usage_now.get("completion_tokens") or 0),
+                            completion_tokens=int(
+                                usage_now.get("completion_tokens") or 0
+                            ),
                             model=str(meta_now.get("llm_model") or "") or None,
                         )
                 except Exception:
@@ -1167,6 +1270,7 @@ def main() -> int:
                 set_job_status(
                     job.job_id,
                     _now_job_payload(
+                        user_id=str(job.user_id),
                         status="done",
                         req_obj=req_obj,
                         total_pages=1,
@@ -1200,6 +1304,7 @@ def main() -> int:
                 set_job_status(
                     job.job_id,
                     {
+                        "user_id": str(job.user_id),
                         "status": "failed",
                         "created_at": _iso_now(),
                         "request": req_obj,

@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: homework-agent-expiry-worker
+  namespace: homework-agent
+spec:
+  # Daily 02:00 (cluster timezone). Adjust to your ops window.
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: expiry-worker
+              image: homework-agent:latest
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "homework_agent.workers.expiry_worker"]
+              env:
+                - name: APP_ENV
+                  value: "prod"
+                - name: WORKER_REQUIRE_SERVICE_ROLE
+                  value: "1"
+                - name: SUPABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: homework-agent-secrets
+                      key: supabase-url
+                - name: SUPABASE_SERVICE_ROLE_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: homework-agent-secrets
+                      key: supabase-service-role-key
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "1Gi"
+

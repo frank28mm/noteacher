@@ -70,9 +70,36 @@
 
 详见：`docs/tasks/development_plan_grade_reports_security_20260101.md` § WS‑D
 
-## 5. 当前开放问题（需要产品/业务共同决策）
+## 5. 架构决策记录 (Architecture Decision Records)
+
+### ADR-001: 不引入 BFF 层 (Backend for Frontend)
+
+**状态**: ✅ **已决策 - 当前不引入**
+
+**决策**: 前端（React）直连后端（FastAPI），不引入 Node.js BFF 层。
+
+**理由**:
+1. 当前架构简单清晰，无 BFF 足够支撑业务
+2. FastAPI 已实现完整 JWT 鉴权，无需 BFF 代理
+3. SSE 流式响应后端直接支持，无需 BFF 中转
+4. 减少一层部署和运维复杂度
+
+**未来可能重新评估的条件**:
+- 支持原生移动客户端（iOS/Android/HarmonyOS）
+- 需要对接微信/支付宝/Apple ID 等第三方登录
+- 需要复杂的边缘缓存策略
+- 需要协议转换（GraphQL/gRPC）
+
+**如果未来需要，推荐方案**:
+- 轻量级: Next.js API Routes
+- 网关层: 阿里云 API Gateway / Kong
+- Serverless: 阿里云函数计算
+
+---
+
+## 6. 当前开放问题（需要产品/业务共同决策）
 
 - ~~登录体系与用户隔离~~ ✅ 已完成：手机号验证码登录 + JWT + Profile 子账户
 - ~~题目"全对也可聊"的产品边界~~ ✅ 已完成：Chat Rehydrate 支持历史错题复习
-- 是否引入 BFF：移动端直连 SSE 还是通过 BFF 统一连接管理与鉴权？
+- ~~BFF 层决策~~ ✅ 已决策：当前不引入，未来视多客户端需求评估
 - 部署 IaC：ACK + ECI + PolarDB 的 YAML/ Helm Chart 配置落地

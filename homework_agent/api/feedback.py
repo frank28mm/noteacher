@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from homework_agent.api.admin import _require_admin

@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 
 from homework_agent.main import create_app
 
-
 client = TestClient(create_app())
 
 
@@ -75,9 +74,7 @@ class _FakeTable:
                     bound = _parse_dt(str(v))
                     if bound is not None:
                         rows = [
-                            r
-                            for r in rows
-                            if _dt_or_min(str(r.get(k) or "")) >= bound
+                            r for r in rows if _dt_or_min(str(r.get(k) or "")) >= bound
                         ]
                 else:
                     rows = [r for r in rows if str(r.get(k) or "") >= str(v)]
@@ -239,6 +236,8 @@ def test_reports_eligibility_subject_filter_and_window_days(
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["eligible"] is False
-    assert payload["submission_count"] == 2  # old1 excluded by window_days, e1 excluded by subject
+    assert (
+        payload["submission_count"] == 2
+    )  # old1 excluded by window_days, e1 excluded by subject
     assert payload["required_count"] == 3
     assert payload["reason"] == "need_more_submissions"

@@ -4,7 +4,11 @@ import io
 import logging
 from typing import List, Optional
 
-from homework_agent.utils.url_image_helpers import _normalize_public_url
+from homework_agent.utils.url_image_helpers import (
+    _normalize_public_url,
+    _safe_fetch_public_url_bytes,
+)
+from homework_agent.utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +30,6 @@ def _create_proxy_image_urls(
         return None
 
     try:
-        import httpx
         from PIL import Image
         from homework_agent.utils.supabase_client import get_storage_client
     except Exception as e:
@@ -37,14 +40,21 @@ def _create_proxy_image_urls(
     storage = get_storage_client()
     base_prefix = f"{prefix.rstrip('/')}/{session_id}/"
 
+    settings = get_settings()
+    max_bytes = int(getattr(settings, "max_upload_image_bytes", 5 * 1024 * 1024))
+
     for u in cleaned:
         try:
-            with httpx.Client(
-                timeout=25.0, follow_redirects=True, trust_env=False
-            ) as client:
-                r = client.get(u)
-            r.raise_for_status()
-            data = r.content or b""
+            fetched = _safe_fetch_public_url_bytes(
+                u,
+                timeout_seconds=25.0,
+                max_redirects=3,
+                max_bytes=max_bytes,
+            )
+            if not fetched:
+                raise RuntimeError("proxy source download failed")
+
+            data, _content_type = fetched
             if not data:
                 continue
 

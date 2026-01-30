@@ -13,7 +13,6 @@ from fastapi.testclient import TestClient
 
 from homework_agent.main import create_app
 
-
 REPLAY_ROOT = Path(__file__).resolve().parent / "replay_data"
 SAMPLES_DIR = REPLAY_ROOT / "samples"
 IMAGES_DIR = REPLAY_ROOT / "images"

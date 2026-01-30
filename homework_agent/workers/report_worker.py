@@ -100,7 +100,9 @@ def _lock_job(job_id: str) -> Optional[Dict[str, Any]]:
             )
             rows0 = getattr(resp0, "data", None)
             row0 = rows0[0] if isinstance(rows0, list) and rows0 else {}
-            attempt = int(row0.get("attempt_count") or 0) if isinstance(row0, dict) else 0
+            attempt = (
+                int(row0.get("attempt_count") or 0) if isinstance(row0, dict) else 0
+            )
         except Exception:
             attempt = 0
         payload = {
@@ -413,7 +415,9 @@ def _fallback_extract_from_submission(
     return facts.question_attempts, facts.question_steps
 
 
-def _load_exclusions(*, user_id: str, profile_id: Optional[str]) -> Set[Tuple[str, str]]:
+def _load_exclusions(
+    *, user_id: str, profile_id: Optional[str]
+) -> Set[Tuple[str, str]]:
     try:
         q = (
             _safe_table("mistake_exclusions")
@@ -558,7 +562,10 @@ def main() -> int:
 
             started = time.monotonic()
             try:
-                if str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
+                if (
+                    str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower()
+                    != "dev"
+                ):
                     if not can_use_report_coupon(user_id=user_id):
                         _mark_job_failed(job_id=job_id, error="quota_insufficient")
                         log_event(
@@ -574,7 +581,9 @@ def main() -> int:
                 subject = str(effective_params.get("subject") or "").strip() or None
                 if submission_id:
                     created_at, subj2 = _load_submission_meta(
-                        user_id=user_id, profile_id=profile_id, submission_id=submission_id
+                        user_id=user_id,
+                        profile_id=profile_id,
+                        submission_id=submission_id,
                     )
                     if not subject and subj2:
                         subject = subj2
@@ -597,7 +606,9 @@ def main() -> int:
                     )
                     if not attempts and not steps:
                         attempts, steps = _fallback_extract_from_submission(
-                            user_id=user_id, profile_id=profile_id, submission_id=submission_id
+                            user_id=user_id,
+                            profile_id=profile_id,
+                            submission_id=submission_id,
                         )
                         log_event(
                             logger,
@@ -681,11 +692,19 @@ def main() -> int:
                             report_narrative = llm.generate_report(
                                 system_prompt=system_tmpl, user_prompt=user_prompt
                             )
-                            report_usage = llm.last_usage if isinstance(llm.last_usage, dict) else None
+                            report_usage = (
+                                llm.last_usage
+                                if isinstance(llm.last_usage, dict)
+                                else None
+                            )
                             report_response_id = llm.last_response_id
-                            report_model = str(
-                                getattr(settings, "ark_report_model", None) or llm.ark_model
-                            ) or None
+                            report_model = (
+                                str(
+                                    getattr(settings, "ark_report_model", None)
+                                    or llm.ark_model
+                                )
+                                or None
+                            )
                             log_event(
                                 logger,
                                 "report_narrative_generated",
@@ -704,19 +723,32 @@ def main() -> int:
                     log_event(logger, "report_narrative_skipped", user_id=user_id)
 
                 # WS-E: consume report coupon + report reserve (BT) once per report job.
-                if str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower() != "dev":
+                if (
+                    str(getattr(settings, "auth_mode", "dev") or "dev").strip().lower()
+                    != "dev"
+                ):
                     try:
                         bt_cost = 0
                         usage_payload: Optional[Dict[str, Any]] = None
                         if isinstance(report_usage, dict):
                             usage_payload = {
-                                "prompt_tokens": int(report_usage.get("prompt_tokens") or 0),
-                                "completion_tokens": int(report_usage.get("completion_tokens") or 0),
-                                "total_tokens": int(report_usage.get("total_tokens") or 0),
+                                "prompt_tokens": int(
+                                    report_usage.get("prompt_tokens") or 0
+                                ),
+                                "completion_tokens": int(
+                                    report_usage.get("completion_tokens") or 0
+                                ),
+                                "total_tokens": int(
+                                    report_usage.get("total_tokens") or 0
+                                ),
                             }
                             bt_cost = bt_from_usage(
-                                prompt_tokens=int(usage_payload.get("prompt_tokens") or 0),
-                                completion_tokens=int(usage_payload.get("completion_tokens") or 0),
+                                prompt_tokens=int(
+                                    usage_payload.get("prompt_tokens") or 0
+                                ),
+                                completion_tokens=int(
+                                    usage_payload.get("completion_tokens") or 0
+                                ),
                             )
                         ok, err = consume_report_coupon_and_reserve(
                             user_id=user_id,

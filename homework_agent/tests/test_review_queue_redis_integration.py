@@ -12,7 +12,6 @@ from homework_agent.services.review_queue import (
 )
 from homework_agent.utils.cache import InMemoryCache
 
-
 pytestmark = pytest.mark.integration
 
 

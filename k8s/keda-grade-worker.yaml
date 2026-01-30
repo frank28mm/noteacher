@@ -1,0 +1,20 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: homework-agent-grade-worker
+  namespace: homework-agent
+spec:
+  scaleTargetRef:
+    name: homework-agent-grade-worker
+  minReplicaCount: 0
+  maxReplicaCount: 50
+  cooldownPeriod: 300
+  triggers:
+    - type: redis
+      metadata:
+        # KEDA Redis scaler expects host:port, not redis://...
+        # Provide it via env on the target Deployment.
+        addressFromEnv: REDIS_HOST
+        listName: grade:queue
+        listLength: "10"
+        databaseIndex: "0"

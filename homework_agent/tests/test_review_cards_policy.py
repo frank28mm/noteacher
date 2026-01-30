@@ -58,4 +58,3 @@ def test_pick_review_candidates_prioritizes_uncertain_then_incorrect():
     )
     assert [c.question_number for c in cands] == ["2", "1"]
     assert cands[0].priority < cands[1].priority
-

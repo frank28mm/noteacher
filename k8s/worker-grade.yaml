@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homework-agent-grade-worker
+  namespace: homework-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: homework-agent-grade-worker
+  template:
+    metadata:
+      labels:
+        app: homework-agent-grade-worker
+    spec:
+      containers:
+        - name: worker
+          image: homework-agent:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "homework_agent.workers.grade_worker"]
+          env:
+            - name: APP_ENV
+              value: "prod"
+            - name: REQUIRE_REDIS
+              value: "1"
+            - name: WORKER_REQUIRE_SERVICE_ROLE
+              value: "1"
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: redis-url
+            - name: REDIS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: redis-host
+            - name: SUPABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: supabase-url
+            - name: SUPABASE_SERVICE_ROLE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: supabase-service-role-key
+            - name: ARK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: ark-api-key
+            - name: SILICON_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: homework-agent-secrets
+                  key: silicon-api-key
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"

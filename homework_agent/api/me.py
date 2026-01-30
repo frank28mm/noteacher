@@ -539,7 +539,6 @@ def update_me_account(
             ).eq("user_id", user_id).execute()
         except Exception as e:
             logger.error(f"Failed to update account: {e}")
-            print(f"DEBUG_UPDATE_ACCOUNT_ERROR: {e}")
             raise HTTPException(
                 status_code=500, detail=f"failed_to_update_account: {str(e)}"
             )

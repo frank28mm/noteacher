@@ -15,6 +15,8 @@ from supabase import Client, create_client
 
 from PIL import Image
 
+from homework_agent.utils.settings import get_settings
+
 try:
     import fitz  # PyMuPDF
 
@@ -150,10 +152,15 @@ class SupabaseStorageClient:
         if not os.path.exists(file_path):
             raise ValueError(f"文件不存在: {file_path}")
 
-        # 验证文件大小 (<20MB)
+        settings = get_settings()
+        max_bytes = int(getattr(settings, "max_upload_image_bytes", 5 * 1024 * 1024))
+
+        # 验证文件大小
         file_size = os.path.getsize(file_path)
-        if file_size > 20 * 1024 * 1024:
-            raise ValueError(f"文件超过 20MB: {file_size / 1024 / 1024:.2f}MB")
+        if file_size > max_bytes:
+            raise ValueError(
+                f"文件超过 {max_bytes} bytes: {file_size / 1024 / 1024:.2f}MB"
+            )
 
         ext = Path(file_path).suffix.lower()
         mime_guess, _ = mimetypes.guess_type(file_path)

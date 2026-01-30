@@ -45,7 +45,10 @@ from homework_agent.api.chat import (  # noqa: E402
 )
 
 import homework_agent.api.chat as chat_api  # noqa: E402
-from homework_agent.services.quota_service import bt_from_usage, charge_bt_spendable  # noqa: E402
+from homework_agent.services.quota_service import (
+    bt_from_usage,
+    charge_bt_spendable,
+)  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -1081,6 +1084,7 @@ async def _stream_socratic_llm_to_sse(
                         user_id=str(user_id),
                         endpoint="/api/v1/chat",
                         stage="chat",
+                        error_type="quota_charge_failed",
                         error=str(err or ""),
                     )
             except Exception as e:

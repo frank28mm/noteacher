@@ -68,7 +68,9 @@ def pick_review_candidates(
     for q in questions or []:
         if not isinstance(q, dict):
             continue
-        qn = _normalize_question_number(q.get("question_number") or q.get("question_index"))
+        qn = _normalize_question_number(
+            q.get("question_number") or q.get("question_index")
+        )
         if not qn:
             continue
         warnings = _as_list(q.get("warnings"))

@@ -196,9 +196,17 @@ def _iter_sql_files(paths: Iterable[str], *, dir_mode: bool = False) -> Iterator
         if dir_mode:
             if not path.exists() or not path.is_dir():
                 raise SystemExit(f"Not a directory: {path}")
-            for f in sorted(path.glob("*.sql")):
-                if f.is_file():
-                    yield f
+            # Safety: migrations/ includes both *.up.sql and *.down.sql.
+            # In directory mode we only apply:
+            # - plain *.sql
+            # - *.up.sql (never apply rollback scripts by accident)
+            files: List[Path] = []
+            files.extend([f for f in path.glob("*.sql") if f.is_file()])
+            files.extend([f for f in path.glob("*.up.sql") if f.is_file()])
+            # Exclude *.down.sql explicitly even if a repo uses ".down.sql" suffix.
+            files = [f for f in files if not f.name.endswith(".down.sql")]
+            for f in sorted(set(files)):
+                yield f
         else:
             if not path.exists() or not path.is_file():
                 raise SystemExit(f"Not a file: {path}")
@@ -221,6 +229,8 @@ def _apply_file(conn, *, file_path: Path, dry_run: bool) -> None:
     if dry_run:
         print(f"[dry-run] {file_path}: {len(parts)} statements")
         return
+    if conn is None:
+        raise RuntimeError("db connection is required (dry-run disabled)")
     cur = conn.cursor()
     for idx, stmt in enumerate(parts, 1):
         try:
@@ -242,12 +252,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("paths", nargs="+", help="SQL file(s) or directory(ies)")
     args = parser.parse_args(argv)
 
+    files = list(_iter_sql_files(args.paths, dir_mode=bool(args.dir)))
+    if args.dry_run:
+        for f in files:
+            print(f"[apply] {f}")
+            _apply_file(None, file_path=f, dry_run=True)
+        return 0
+
     db_url = _get_db_url()
     conn = _connect(db_url)
     try:
-        for f in _iter_sql_files(args.paths, dir_mode=bool(args.dir)):
+        for f in files:
             print(f"[apply] {f}")
-            _apply_file(conn, file_path=f, dry_run=bool(args.dry_run))
+            _apply_file(conn, file_path=f, dry_run=False)
         return 0
     except Exception as e:
         print(f"[apply] ERROR: {e}", file=sys.stderr)

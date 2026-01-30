@@ -6,12 +6,13 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, status
 
 from homework_agent.core.qbank import _normalize_question_number
 from homework_agent.core.qindex import build_question_index_for_pages
 from homework_agent.utils.cache import BaseCache, get_cache_store
 from homework_agent.utils.observability import log_event
+from homework_agent.utils.user_context import require_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,9 @@ def delete_session(session_id: str) -> None:
     cache_store.delete(f"sess:{session_id}")
 
 
-def get_question_history(session_data: Dict[str, Any], question_number: str) -> List[Dict[str, Any]]:
+def get_question_history(
+    session_data: Dict[str, Any], question_number: str
+) -> List[Dict[str, Any]]:
     """Get chat history for a specific question."""
     if not isinstance(session_data, dict):
         return []
@@ -181,11 +184,15 @@ def get_question_history(session_data: Dict[str, Any], question_number: str) -> 
     return []
 
 
-def save_question_history(session_data: Dict[str, Any], question_number: str, history: List[Dict[str, Any]]) -> None:
+def save_question_history(
+    session_data: Dict[str, Any], question_number: str, history: List[Dict[str, Any]]
+) -> None:
     """Save chat history for a specific question."""
     if not isinstance(session_data, dict):
         session_data = {}
-    if "question_histories" not in session_data or not isinstance(session_data["question_histories"], dict):
+    if "question_histories" not in session_data or not isinstance(
+        session_data["question_histories"], dict
+    ):
         session_data["question_histories"] = {}
     session_data["question_histories"][str(question_number)] = history
 
@@ -313,9 +320,24 @@ def _build_question_index_for_pages(
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str):
+async def get_job(
+    job_id: str,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    user_id = require_user_id(authorization=authorization, x_user_id=x_user_id)
     job = cache_store.get(f"job:{job_id}")
     if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        )
+    if not isinstance(job, dict):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        )
+    owner = str(job.get("user_id") or "").strip()
+    # If ownership is missing, treat as not found to avoid leaking cross-user results.
+    if not owner or owner != user_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
         )

@@ -1,24 +1,183 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import logging
 import re
-from typing import Any, List, Optional
+import socket
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
+from urllib.parse import urljoin, urlsplit
+
+from homework_agent.utils.settings import DEFAULT_MAX_UPLOAD_IMAGE_BYTES
 
 logger = logging.getLogger(__name__)
 
 
+if TYPE_CHECKING:
+    import httpx
+
+
 def _is_public_url(url: str) -> bool:
-    url = str(url)
-    if not url:
+    """Best-effort URL allowlist for user input.
+
+    This function is intentionally conservative on *syntax* (scheme/host) and IP-literals,
+    but does not require DNS to be available.
+
+    SSRF-critical paths MUST use `_safe_fetch_public_url*()` which performs DNS resolution
+    and validates each hop (including redirects).
+    """
+
+    s = str(url or "").strip()
+    if not s:
         return False
-    if re.match(r"^https?://", url) is None:
+    try:
+        parsed = urlsplit(s)
+    except Exception:
         return False
-    if url.startswith("http://127.") or url.startswith("https://127."):
+    if parsed.scheme not in {"http", "https"}:
         return False
-    if url.startswith("http://localhost") or url.startswith("https://localhost"):
+    host = (parsed.hostname or "").strip().strip(".")
+    if not host:
         return False
+    host_l = host.lower()
+    if host_l in {"localhost"}:
+        return False
+
+    # Direct IP literal.
+    try:
+        ip = ipaddress.ip_address(host_l)
+        return bool(ip.is_global)
+    except ValueError:
+        pass
+
+    # Domain hostname: allow here; SSRF-critical call sites must resolve + validate.
     return True
+
+
+def _hostname_resolves_to_global_ips(hostname: str) -> bool:
+    """Resolve hostname and ensure all resolved A/AAAA are global.
+
+    Used by SSRF-critical fetchers.
+    """
+
+    host = (hostname or "").strip().strip(".")
+    if not host:
+        return False
+    host_l = host.lower()
+    if host_l in {"localhost"}:
+        return False
+    try:
+        infos = socket.getaddrinfo(host_l, None, proto=socket.IPPROTO_TCP)
+    except Exception:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        sockaddr = info[4]
+        ip_s = sockaddr[0] if isinstance(sockaddr, tuple) and sockaddr else None
+        if not ip_s:
+            return False
+        try:
+            ip = ipaddress.ip_address(str(ip_s))
+        except ValueError:
+            return False
+        if not ip.is_global:
+            return False
+    return True
+
+
+def _safe_fetch_public_url(
+    url: str,
+    *,
+    method: str = "GET",
+    timeout_seconds: float = 20.0,
+    max_redirects: int = 3,
+) -> "httpx.Response":
+    """Fetch a public URL with SSRF guard and safe redirect handling.
+
+    - Denies non-public URLs.
+    - Does NOT use httpx automatic redirects; it validates each redirect hop.
+    """
+
+    if not _is_public_url(url):
+        raise ValueError("URL must be public HTTP/HTTPS")
+
+    try:
+        host = urlsplit(str(url)).hostname
+    except Exception:
+        host = None
+    if not host:
+        raise ValueError("URL must have hostname")
+    # SSRF-critical: require DNS resolution to global IPs.
+    try:
+        ipaddress.ip_address(host)
+        # IP literal is already checked by _is_public_url.
+    except ValueError:
+        if not _hostname_resolves_to_global_ips(host):
+            raise ValueError("Hostname must resolve to public IPs")
+
+    import httpx
+
+    current = str(url)
+    with httpx.Client(
+        timeout=float(timeout_seconds), follow_redirects=False, trust_env=False
+    ) as client:
+        for _ in range(int(max_redirects) + 1):
+            r = client.request(method, current)
+            if r.status_code in {301, 302, 303, 307, 308}:
+                loc = (r.headers.get("location") or "").strip()
+                if not loc:
+                    return r
+                next_url = urljoin(str(r.request.url), loc)
+                if not _is_public_url(next_url):
+                    raise ValueError("Redirect location must be public HTTP/HTTPS")
+                try:
+                    next_host = urlsplit(str(next_url)).hostname
+                except Exception:
+                    next_host = None
+                if not next_host:
+                    raise ValueError("Redirect location must have hostname")
+                try:
+                    ipaddress.ip_address(str(next_host))
+                except ValueError:
+                    if not _hostname_resolves_to_global_ips(str(next_host)):
+                        raise ValueError("Redirect hostname must resolve to public IPs")
+                current = next_url
+                continue
+            return r
+
+    raise ValueError("Too many redirects")
+
+
+def _safe_fetch_public_url_bytes(
+    url: str,
+    *,
+    timeout_seconds: float = 20.0,
+    max_redirects: int = 3,
+    max_bytes: int = DEFAULT_MAX_UPLOAD_IMAGE_BYTES,
+) -> Optional[Tuple[bytes, str]]:
+    """Fetch bytes for a public URL (SSRF-safe)."""
+
+    try:
+        r = _safe_fetch_public_url(
+            url,
+            method="GET",
+            timeout_seconds=timeout_seconds,
+            max_redirects=max_redirects,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.content or b""
+        if not data or len(data) > int(max_bytes):
+            return None
+        ct = (
+            r.headers.get("content-type", "image/jpeg").split(";", 1)[0].strip()
+            or "image/jpeg"
+        )
+        return data, ct
+    except Exception as e:
+        logger.debug(f"safe fetch failed for {url}: {e}")
+        return None
 
 
 def _normalize_public_url(url: Optional[str]) -> Optional[str]:
@@ -50,13 +209,7 @@ def _probe_url_head(url: str) -> Optional[str]:
     if not url:
         return None
     try:
-        import httpx
-
-        # Don't inherit local proxy env for public URL probes.
-        with httpx.Client(
-            timeout=5.0, follow_redirects=True, trust_env=False
-        ) as client:
-            r = client.head(url)
+        r = _safe_fetch_public_url(url, method="HEAD", timeout_seconds=5.0)
         ct = r.headers.get("content-type")
         cl = r.headers.get("content-length")
         return f"url_head status={r.status_code} content-type={ct} content-length={cl}"
@@ -71,27 +224,10 @@ def _download_as_data_uri(url: str) -> Optional[str]:
 
     # Try using httpx for public URLs first
     try:
-        import httpx
-
-        # Avoid local proxy interference when downloading public object URLs.
-        with httpx.Client(
-            timeout=20.0, follow_redirects=True, trust_env=False
-        ) as client:
-            r = client.get(url)
-        if r.status_code != 200:
-            raise httpx.HTTPStatusError(
-                f"HTTP {r.status_code}", request=r.request, response=r
-            )
-
-        content_type = (
-            r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
-            or "image/jpeg"
-        )
-        data = r.content or b""
-        if not data:
+        out = _safe_fetch_public_url_bytes(url, timeout_seconds=20.0, max_redirects=3)
+        if not out:
             return None
-        if len(data) > 20 * 1024 * 1024:
-            return None
+        data, content_type = out
         b64 = base64.b64encode(data).decode("ascii")
         return f"data:{content_type};base64,{b64}"
     except Exception as e:

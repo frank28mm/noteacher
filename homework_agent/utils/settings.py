@@ -3,6 +3,8 @@ import os
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_MAX_UPLOAD_IMAGE_BYTES = 5 * 1024 * 1024
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=[".env", ".env.local"], extra="ignore")
@@ -10,10 +12,16 @@ class Settings(BaseSettings):
     # Critical infrastructure
     supabase_url: str = Field(default="", validation_alias="SUPABASE_URL")
     supabase_key: str = Field(default="", validation_alias="SUPABASE_KEY")
-    supabase_service_role_key: str = Field(default="", validation_alias="SUPABASE_SERVICE_ROLE_KEY")
+    supabase_service_role_key: str = Field(
+        default="", validation_alias="SUPABASE_SERVICE_ROLE_KEY"
+    )
     supabase_db_url: str = Field(default="", validation_alias="SUPABASE_DB_URL")
-    supabase_bucket: str = Field(default="homework-test-staging", validation_alias="SUPABASE_BUCKET")
-    redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
+    supabase_bucket: str = Field(
+        default="homework-test-staging", validation_alias="SUPABASE_BUCKET"
+    )
+    redis_url: str = Field(
+        default="redis://localhost:6379/0", validation_alias="REDIS_URL"
+    )
     cache_prefix: str = Field(default="", validation_alias="CACHE_PREFIX")
     require_redis: bool = Field(default=False, validation_alias="REQUIRE_REDIS")
 
@@ -307,7 +315,14 @@ class Settings(BaseSettings):
         default=30, validation_alias="OPENCV_PROCESSING_TIMEOUT"
     )
     opencv_processing_max_bytes: int = Field(
-        default=20 * 1024 * 1024, validation_alias="OPENCV_PROCESSING_MAX_BYTES"
+        default=DEFAULT_MAX_UPLOAD_IMAGE_BYTES,
+        validation_alias="OPENCV_PROCESSING_MAX_BYTES",
+    )
+
+    # Upload / image size guardrails
+    max_upload_image_bytes: int = Field(
+        default=DEFAULT_MAX_UPLOAD_IMAGE_BYTES,
+        validation_alias="MAX_UPLOAD_IMAGE_BYTES",
     )
 
     # Vision/OCR preprocessing (OpenCV-enhanced)
@@ -318,7 +333,8 @@ class Settings(BaseSettings):
         default=20, validation_alias="VISION_PREPROCESS_TIMEOUT_SECONDS"
     )
     vision_preprocess_max_bytes: int = Field(
-        default=20 * 1024 * 1024, validation_alias="VISION_PREPROCESS_MAX_BYTES"
+        default=DEFAULT_MAX_UPLOAD_IMAGE_BYTES,
+        validation_alias="VISION_PREPROCESS_MAX_BYTES",
     )
 
     ocr_preprocess_enabled: bool = Field(
@@ -331,7 +347,8 @@ class Settings(BaseSettings):
         default=20, validation_alias="OCR_PREPROCESS_TIMEOUT_SECONDS"
     )
     ocr_preprocess_max_bytes: int = Field(
-        default=20 * 1024 * 1024, validation_alias="OCR_PREPROCESS_MAX_BYTES"
+        default=DEFAULT_MAX_UPLOAD_IMAGE_BYTES,
+        validation_alias="OCR_PREPROCESS_MAX_BYTES",
     )
 
     # Context compaction (session memory)
@@ -467,4 +484,7 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    env = str(os.getenv("APP_ENV") or "").strip().lower()
+    if env in {"test", "testing"} or os.getenv("PYTEST_CURRENT_TEST"):
+        return Settings(_env_file=None)
     return Settings()
